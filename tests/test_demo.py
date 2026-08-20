@@ -9,6 +9,7 @@ from agent import Agent
 from hooks import Hooks, PreStepContext, RequestErrorContext
 from inbox import Inbox
 from llm import FakeLlm, LlmRequest, StreamChunk, build_payload, _to_wire_messages
+from main import build_tools
 from persistence import load_events, save_event
 from prompt import PromptRegistry
 from session import Session
@@ -297,3 +298,66 @@ async def test_resume_restores_inbox_and_last_turn(tmp_path):
     agent2.followup('second question')
     await agent2.when_idle()
     assert [e.type for e in restored.events].count('turn/start') == 2
+
+
+@pytest.mark.asyncio
+async def test_read_file_pages_with_line_numbers(tmp_path):
+    registry = build_tools()
+    path = tmp_path / 'code.py'
+    path.write_text(''.join(f'line {i}\n' for i in range(1, 6)), encoding='utf-8')
+
+    # 默认：全部行 + 行号，窗口没截断时没有提示行
+    full = await registry.execute('read_file', {'file_path': str(path)}, None)
+    assert full.is_error is False
+    assert full.content == (
+        '   1: line 1\n   2: line 2\n   3: line 3\n   4: line 4\n   5: line 5'
+    )
+
+    # offset + limit 组合：从第 3 行开始只给 2 行，且必须告知后面还有
+    paged = await registry.execute(
+        'read_file', {'file_path': str(path), 'offset': 3, 'limit': 2}, None)
+    assert paged.content == (
+        '   3: line 3\n   4: line 4\n'
+        '(file has 5 lines; showing lines 3-4; increase offset to continue)'
+    )
+
+    # 窗口恰好覆盖到文件末尾：没有截断提示
+    tail = await registry.execute(
+        'read_file', {'file_path': str(path), 'offset': 5, 'limit': 10}, None)
+    assert tail.content == '   5: line 5'
+
+    # line_numbers=false：裸行输出（读文档/日志省 token）；JSON 布尔和字符串写法都接受
+    plain = await registry.execute(
+        'read_file', {'file_path': str(path), 'line_numbers': False}, None)
+    assert plain.content == 'line 1\nline 2\nline 3\nline 4\nline 5'
+    plain_str = await registry.execute(
+        'read_file', {'file_path': str(path), 'line_numbers': 'false'}, None)
+    assert plain_str.content == 'line 1\nline 2\nline 3\nline 4\nline 5'
+
+
+@pytest.mark.asyncio
+async def test_read_file_errors_are_results(tmp_path):
+    registry = build_tools()
+    path = tmp_path / 'code.py'
+    path.write_text('a\nb\nc\n', encoding='utf-8')
+
+    missing = await registry.execute('read_file', {'file_path': str(tmp_path / 'nope.txt')}, None)
+    assert missing.is_error and 'file not found' in missing.content
+
+    oob = await registry.execute('read_file', {'file_path': str(path), 'offset': 10}, None)
+    assert oob.is_error and 'file has 3 lines, offset 10 out of range' in oob.content
+
+    bad = await registry.execute('read_file', {'file_path': str(path), 'offset': 'abc'}, None)
+    assert bad.is_error and 'integers' in bad.content
+
+    zero = await registry.execute('read_file', {'file_path': str(path), 'limit': 0}, None)
+    assert zero.is_error and 'limit must be >= 1' in zero.content
+
+    weird = await registry.execute(
+        'read_file', {'file_path': str(path), 'line_numbers': 'maybe'}, None)
+    assert weird.is_error and 'line_numbers must be a boolean' in weird.content
+
+    empty = tmp_path / 'empty.txt'
+    empty.write_text('', encoding='utf-8')
+    result = await registry.execute('read_file', {'file_path': str(empty)}, None)
+    assert result.is_error is False and result.content == '(empty file)'

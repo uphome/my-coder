@@ -321,13 +321,15 @@ JSON 没有类型信息，用 `$xxx` 前缀 key 做类型标记：`$text`/`$tool
 
 ### 阶段一：真实工具集（先能干活）
 
-| 任务 | 说明 |
-|---|---|
-| `bash` 工具 | 执行 shell 命令，带超时、输出截断、工作目录——编码 agent 的第一工具 |
-| `edit` 工具 | 精确字符串替换式编辑（替换 write_file 全量覆盖，省 token） |
-| `grep` / `glob` 工具 | 代码搜索能力 |
-| `read_file` 升级 | 行号、偏移量、长度限制 |
-| **approval 确认门** | bash 等危险操作执行前确认——对应 harness 的 approval/权限桥（README 对照表预留项），`tool/skipped` 和 `_execute_tool_calls` 的 aborted 路径是现成接入点 |
+| 任务 | 说明 | 状态 |
+|---|---|---|
+| `bash` 工具 | 执行 shell 命令，带超时、输出截断、工作目录——编码 agent 的第一工具 | ⬜ |
+| `edit` 工具 | 精确字符串替换式编辑（替换 write_file 全量覆盖，省 token） | ⬜ |
+| `grep` / `glob` 工具 | 代码搜索能力（设计定稿：对齐 harness 的 tool-fs-search 形状，见 NEXT_STEPS.md） | 🔶 |
+| `read_file` 升级 | 行号、偏移量、长度限制、`line_numbers` 开关 | ✅ |
+| **approval 确认门** | bash 等危险操作执行前确认——对应 harness 的 approval/权限桥（README 对照表预留项），`tool/skipped` 和 `_execute_tool_calls` 的 aborted 路径是现成接入点 | ⬜ |
+
+> 实施进度与已定设计决策记录在 `NEXT_STEPS.md`（✅ 已完成 / 🔶 设计中 / ⬜ 待做）。
 
 ### 阶段二：交互式 REPL（能持续对话）
 

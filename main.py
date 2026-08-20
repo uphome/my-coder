@@ -50,7 +50,49 @@ def build_tools() -> ToolRegistry:
         path = _resolve(args['file_path'])
         if not path.is_file():
             return ToolOutcome(content=f'file not found: {args["file_path"]}', is_error=True)
-        return ToolOutcome(content=path.read_text(encoding='utf-8', errors='replace'))
+        # 行号分页：offset（1-based 起始行）+ limit（最大行数）。
+        # 行号让模型能引用"第 N 行"（edit 工具的前置）；分页防止大文件一次读爆上下文。
+        try:
+            offset = int(args.get('offset', 1))
+            limit = int(args.get('limit', 200))
+        except (TypeError, ValueError):
+            return ToolOutcome(content='offset and limit must be integers', is_error=True)
+        if offset < 1:
+            return ToolOutcome(content=f'offset must be >= 1, got {offset}', is_error=True)
+        if limit < 1:
+            return ToolOutcome(content=f'limit must be >= 1, got {limit}', is_error=True)
+        # line_numbers 开关：LLM 自己决定要不要行号——读代码要坐标（引用"第 N 行"），
+        # 读文档/日志时行号是纯 token 浪费，传 false 拿裸行。
+        raw = args.get('line_numbers', True)
+        if isinstance(raw, bool):
+            line_numbers = raw
+        elif isinstance(raw, str) and raw.strip().lower() in ('true', '1', 'yes'):
+            line_numbers = True
+        elif isinstance(raw, str) and raw.strip().lower() in ('false', '0', 'no'):
+            line_numbers = False
+        else:
+            return ToolOutcome(content='line_numbers must be a boolean', is_error=True)
+        lines = path.read_text(encoding='utf-8', errors='replace').splitlines()
+        total = len(lines)
+        if total == 0:
+            return ToolOutcome(content='(empty file)')
+        if offset > total:
+            # 越界是明确错误：告诉模型文件总行数，让它自己调整（宁炸勿静默）
+            return ToolOutcome(
+                content=f'file has {total} lines, offset {offset} out of range', is_error=True)
+        end = min(offset + limit - 1, total)
+        selected = lines[offset - 1:end]
+        if line_numbers:
+            content = '\n'.join(f'{i:>4}: {line}' for i, line in enumerate(selected, start=offset))
+        else:
+            content = '\n'.join(selected)
+        if end < total:
+            # 截断提示是关键 UX：模型必须知道"后面还有"，否则会以为文件就这些
+            content += (
+                f'\n(file has {total} lines; showing lines {offset}-{end}; '
+                'increase offset to continue)'
+            )
+        return ToolOutcome(content=content)
 
     async def list_files(args, agent, signal):
         path = _resolve(args.get('dir_path', '.'))
@@ -71,10 +113,15 @@ def build_tools() -> ToolRegistry:
 
     registry.register(ToolSpec(
         name='read_file',
-        description='Read a UTF-8 text file. Results include the full content.',
+        description='Read a UTF-8 text file. Line numbers on by default (pass line_numbers=false for plain text); use offset/limit to page large files.',
         parameters={
             'type': 'object',
-            'properties': {'file_path': {'type': 'string'}},
+            'properties': {
+                'file_path': {'type': 'string'},
+                'offset': {'type': 'integer', 'description': '1-based start line, default 1'},
+                'limit': {'type': 'integer', 'description': 'max lines to return, default 200'},
+                'line_numbers': {'type': 'boolean', 'description': 'prepend line numbers, default true'},
+            },
             'required': ['file_path'],
         },
         execute=read_file,

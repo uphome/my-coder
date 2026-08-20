@@ -116,8 +116,8 @@ python -m pytest -q
 | `loop.py` | turn/step 两级循环 + 流组装 + 工具分组执行 |
 | `agent.py` | 被动状态机：wake / kick / when_idle / cancel |
 | `persistence.py` | JSONL 追加写 + 重放读 |
-| `main.py` | CLI + 示例工具（read_file/list_files/write_file/todo_write）+ 日志驱动 UI |
-| `tests/test_demo.py` | 15 个架构测试 |
+| `main.py` | CLI + 示例工具（read_file 行号分页 / list_files / write_file / todo_write）+ 日志驱动 UI |
+| `tests/test_demo.py` | 17 个架构测试 |
 
 ## 与 harness 的保真度对照
 
@@ -143,6 +143,7 @@ python -m pytest -q
 - 取消：中途 cancel → turn/end 记 aborted → 状态机回 idle
 - 持久化：JSONL 回写回放、resume 恢复队列与回合号
 - wire 格式：OpenAI function 包装、tool_calls 回传、role:tool 结果
+- 工具：read_file 行号分页（offset/limit/line_numbers、越界与坏参数降级为 is_error）
 
 ## 安全警告
 
