@@ -39,8 +39,9 @@ class ToolCallDelta:
 
 @dataclass(frozen=True)
 class StreamChunk:
-    """一次流增量：text 增量 / 工具调用片段 / 结束原因 / usage。"""
+    """一次流增量：text 增量 / 思维链增量 / 工具调用片段 / 结束原因 / usage。"""
     text: str = ''
+    reasoning: str = ''
     tool_calls: tuple[ToolCallDelta, ...] = ()
     finish_reason: str | None = None
     usage: dict | None = None
@@ -86,6 +87,7 @@ class OpenAiCompatibleLlm:
                     delta = choices[0].get('delta') or {}
                     yield StreamChunk(
                         text=delta.get('content') or '',
+                        reasoning=_delta_reasoning(delta),
                         tool_calls=tuple(_tool_call_deltas(delta.get('tool_calls'), index_by_id)),
                         finish_reason=choices[0].get('finish_reason'),
                         usage=frame.get('usage'),
@@ -120,6 +122,21 @@ def build_payload(request: LlmRequest, default_model: str) -> dict:
     if request.max_tokens:
         payload['max_tokens'] = request.max_tokens
     return payload
+
+
+def _delta_reasoning(delta: dict) -> str:
+    """统一提取各家流式接口里的思维链字段。
+
+    目前兼容三种常见命名：
+    - reasoning_content（DeepSeek 等）
+    - reasoning（部分 OpenAI 兼容服务）
+    - thinking（部分模型/代理使用）
+    """
+    for key in ('reasoning_content', 'reasoning', 'thinking'):
+        value = delta.get(key)
+        if value:
+            return value
+    return ''
 
 
 def _tool_call_deltas(fragments, index_by_id: dict[int, str]) -> list[ToolCallDelta]:
@@ -194,6 +211,11 @@ class FakeLlm:
         step = self._script.pop(0) if self._script else {'text': '', 'finish_reason': 'stop'}
         if 'error' in step:
             raise LlmError(step['error']['code'], step['error']['message'])
+        reasoning = step.get('reasoning', '')
+        if reasoning:
+            mid = len(reasoning) // 2 or 1
+            yield StreamChunk(reasoning=reasoning[:mid])
+            yield StreamChunk(reasoning=reasoning[mid:])
         text = step.get('text', '')
         if text:
             mid = len(text) // 2 or 1

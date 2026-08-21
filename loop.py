@@ -1,9 +1,10 @@
 """循环层：turn/step 两级循环 + 工具分组执行。
 
-step 内层 while(true)：组请求 → 流式（每 chunk 落 assistant/chunk 日志）
-→ 组装消息（落 assistant/message）→ 有工具调用就执行（结果落
-tool/result 表面日志）→ 再调模型，直到纯文本。工具结果直接进日志，
-下一步请求的 derive_messages 自动带上它们——不需要另存一份对话状态。
+step 内层 while(true)：组请求 → 流式（每 chunk 落 assistant/chunk 日志，
+思维链另落 assistant/reasoning/chunk 痕迹日志）→ 组装消息（落
+assistant/message）→ 有工具调用就执行（结果落 tool/result 表面日志）→
+再调模型，直到纯文本。工具结果直接进日志，下一步请求的 derive_messages
+自动带上它们——不需要另存一份对话状态。思维链只作为痕迹数据，不回灌。
 """
 from __future__ import annotations
 
@@ -29,6 +30,9 @@ log = logging.getLogger('loop')
 class _BlockAssembler:
     """把流 chunk 折叠成最终 blocks：text 拼接 + 工具调用按 index 增量组装。
 
+    思维链（reasoning）也在这里累积，但**不会**进入 blocks / assistant message，
+    只作为痕迹数据由循环层单独落日志。
+
     为什么需要它：API 的流式响应把一条消息撕成几十个碎片——
     text 是逐字增量，工具调用按 index 分片（id/name 只出现一次，
     arguments 分散在多帧）。组装器负责把碎片重新折叠成
@@ -37,13 +41,15 @@ class _BlockAssembler:
 
     def __init__(self) -> None:
         self.text = ''
+        self.reasoning = ''
         self.finish_reason: str | None = None
         self.usage: dict | None = None
         self._tool_calls: dict[int, dict] = {}  # index -> {'id','name','arguments'} 增量累积
 
     def push(self, chunk: StreamChunk) -> None:
-        """吞一个流帧：text 直接拼接，工具调用按 index 累积（arguments 是 += 不是 =）。"""
+        """吞一个流帧：text/reasoning 直接拼接，工具调用按 index 累积（arguments 是 += 不是 =）。"""
         self.text += chunk.text
+        self.reasoning += chunk.reasoning
         if chunk.finish_reason:
             self.finish_reason = chunk.finish_reason
         if chunk.usage:
@@ -172,9 +178,15 @@ async def _run_step(agent, turn: int, step: int, assembly: dict) -> str:
         assembler = _BlockAssembler()
         try:
             async for chunk in agent.llm.stream(request):
-                session.append('assistant/chunk', {
-                    'turn': turn, 'step': step, 'chunk': _chunk_to_data(chunk),
-                })
+                # 纯思维链帧只落 reasoning 痕迹，不产生空的 assistant/chunk。
+                if chunk.text or chunk.tool_calls or chunk.finish_reason or chunk.usage:
+                    session.append('assistant/chunk', {
+                        'turn': turn, 'step': step, 'chunk': _chunk_to_data(chunk),
+                    })
+                if chunk.reasoning:
+                    session.append('assistant/reasoning/chunk', {
+                        'turn': turn, 'step': step, 'reasoning': chunk.reasoning,
+                    })
                 assembler.push(chunk)
         except LlmError as failure:
             action = 'throw'
@@ -185,6 +197,13 @@ async def _run_step(agent, turn: int, step: int, assembly: dict) -> str:
             if action == 'retry':
                 continue
             raise
+
+        if assembler.reasoning:
+            session.append('assistant/reasoning', {
+                'turn': turn,
+                'step': step,
+                'reasoning': assembler.reasoning,
+            })
 
         message = create_assistant_message(
             assembler.blocks(), provider=request.provider, model=request.model,

@@ -7,7 +7,7 @@
 
 | 任务 | 状态 |
 |---|---|
-| read_file 升级（行号 / offset / limit / line_numbers 开关） | ✅ 已完成（含测试，全量 17 passed） |
+| read_file 升级（行号 / offset / limit / line_numbers 开关） | ✅ 已完成（含测试，全量 20 passed） |
 | grep / glob 工具 | 🔶 设计已定稿，实现路线待拍板 |
 | edit 工具 | ⬜ 待做 |
 | bash 工具 | ⬜ 待做 |
@@ -25,6 +25,14 @@
 - 空文件返回 `(empty file)`（信息，不是错误）
 - 设计要点：行号 = 坐标系（模型可引用"第 N 行"，edit 工具的前置）；窗口 = token 预算可控
   （成本 O(窗口) 而非 O(文件)）；截断提示 = 方向感（模型必须知道窗外还有内容）
+
+## 思维链可视化（已完成）
+
+- 能力层统一解析 `reasoning_content` / `reasoning` / `thinking`，映射为 `StreamChunk.reasoning`
+- 循环层落非 surface 痕迹事件：`assistant/reasoning/chunk`（流式）+ `assistant/reasoning`（完整）
+- 思维链**不回灌模型**，不进入 `derive_messages()`
+- CLI 默认彩色实时显示，`--hide-reasoning` 可折叠隐藏
+- FakeLlm 支持 `reasoning` 字段，离线 demo / 测试可覆盖
 
 ## grep / glob 设计（已定稿）
 

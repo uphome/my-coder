@@ -20,12 +20,23 @@ from session import Session
 from tools import ToolOutcome, ToolRegistry, ToolSpec
 from values import TextBlock
 
+# 终端颜色：思维链用青色 + 暗淡样式，和正式回答区分开。
+# 后续如果做 Web UI，这里可以换成真正的可折叠组件。
+_REASONING_COLOR = '\033[36m'   # cyan
+_REASONING_DIM = '\033[2m'      # dim
+_RESET = '\033[0m'
+
 DEMO_SCRIPT = [
     {
+        'reasoning': '用户让我总结 README，先读取文件内容再回答。',
         'tool_calls': [{'id': 'call-1', 'name': 'read_file', 'arguments': json.dumps({'file_path': 'README.md'})}],
         'finish_reason': 'tool_calls',
     },
-    {'text': 'README 讲的是这个 demo 的四层架构。任务完成。', 'finish_reason': 'stop'},
+    {
+        'reasoning': 'README 已经读完，核心是四层架构，现在整理成简短总结。',
+        'text': 'README 讲的是这个 demo 的四层架构。任务完成。',
+        'finish_reason': 'stop',
+    },
 ]
 
 
@@ -193,10 +204,41 @@ def build_agent(session: Session, args) -> Agent:
 
     agent = Agent(session=session, llm=llm, prompt=prompt, tools=build_tools(), options=options)
 
+    reasoning_started = False
+
+    def _close_reasoning() -> None:
+        nonlocal reasoning_started
+        if reasoning_started:
+            print(f'{_RESET}\n', end='', flush=True)
+            reasoning_started = False
+
     def on_event(event) -> None:
-        if event.type == 'assistant/chunk':
-            print(event.data['chunk']['text'], end='', flush=True)
+        nonlocal reasoning_started
+        if event.type == 'request/header':
+            # 每次新请求前关闭可能未闭合的思维链（例如失败重试场景）。
+            _close_reasoning()
+        elif event.type == 'assistant/chunk':
+            text = event.data['chunk']['text']
+            if text:
+                _close_reasoning()
+                print(text, end='', flush=True)
+        elif event.type == 'assistant/reasoning/chunk':
+            if not args.hide_reasoning and event.data['reasoning']:
+                if not reasoning_started:
+                    print(
+                        f'{_REASONING_COLOR}{_REASONING_DIM}[思考] ',
+                        end='', flush=True,
+                    )
+                    reasoning_started = True
+                print(event.data['reasoning'], end='', flush=True)
+        elif event.type == 'assistant/reasoning':
+            if not args.hide_reasoning and event.data['reasoning']:
+                # 思维链流式片段已经实时打印，这里补一个换行，避免和正式回答粘在一起。
+                _close_reasoning()
+        elif event.type in ('step/end', 'turn/end'):
+            _close_reasoning()
         elif event.type == 'tool/call':
+            _close_reasoning()
             print(f'\n[tool] {event.data["name"]}({event.data["arguments"]})', flush=True)
         elif event.type == 'tool/result':
             result = event.data
@@ -235,6 +277,8 @@ def main() -> None:
     parser.add_argument('--model', default='deepseek-chat', help='model id for the OpenAI-compatible API')
     parser.add_argument('--resume', action='store_true', help='resume the session from its JSONL log')
     parser.add_argument('--fake', action='store_true', help='offline scripted model (architecture demo)')
+    parser.add_argument('--hide-reasoning', action='store_true',
+                        help='折叠（隐藏）思维链，只记录到日志，不打印到终端')
     parser.add_argument('--verbose', action='store_true', help='debug logging')
     args = parser.parse_args()
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO)

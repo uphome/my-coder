@@ -26,6 +26,13 @@ python main.py "读一下 main.py 并用 todo_write 列出你的三步计划"
 python -m pytest -q
 ```
 
+思维链（如 DeepSeek 的 `reasoning_content`）默认会以彩色 `[思考]` 实时显示，
+但**不会回灌给模型**，只作为痕迹数据写入日志。不需要看思考过程时加 `--hide-reasoning`：
+
+```sh
+python main.py --fake --hide-reasoning "read README.md and summarize"
+```
+
 运行后所有事件落在 `.sessions/<id>.jsonl`（每行一条事件），日志本身就是
 调试器——模型每一步看到什么、工具干了什么，都按 seq 记录在案。
 
@@ -64,7 +71,8 @@ python -m pytest -q
   → pre_step 钩子（可改写消息或拒绝）→ user/message 落日志
   → step 内层 while：
       request/header 落日志（含 system 全文，resume 时恢复路由）
-      → 流式：每 chunk 落 assistant/chunk
+      → 流式：有内容的 chunk 落 assistant/chunk；有思维链时另落 assistant/reasoning/chunk
+      → 结束时落完整 assistant/reasoning（痕迹数据，不进模型记忆）
       → assistant/message 落日志（usage、finish_reason）
       → 有工具调用：按 parallel/sequential 分组执行，每结果落 tool/result 表面日志
       → 回到 while 顶部，derive_messages 自动带上工具结果
@@ -91,16 +99,18 @@ python -m pytest -q
 {"seq":4,"type":"user/message","data":{"$message":{...}},"surface_op":"append"}
 {"seq":5,"type":"request/header","data":{"provider":"deepseek","model":"deepseek-chat","system":"...","tools":[...]}}
 {"seq":6,"type":"assistant/chunk","data":{"chunk":{"text":"..."}}}
-{"seq":7,"type":"assistant/message","data":{"message":{...}},"surface_op":"append"}
-{"seq":8,"type":"tool/call","data":{"call_id":"call-1","name":"read_file","arguments":"{...}"}}
-{"seq":9,"type":"tool/result","data":{"$message":{...}},"surface_op":"append"}
-{"seq":10,"type":"step/end","data":{"turn":1,"step":1}}
-{"seq":11,"type":"turn/end","data":{"turn":1,"reason":"completed"}}
+{"seq":7,"type":"assistant/reasoning/chunk","data":{"reasoning":"..."}}
+{"seq":8,"type":"assistant/reasoning","data":{"reasoning":"..."}}
+{"seq":9,"type":"assistant/message","data":{"message":{...}},"surface_op":"append"}
+{"seq":10,"type":"tool/call","data":{"call_id":"call-1","name":"read_file","arguments":"{...}"}}
+{"seq":11,"type":"tool/result","data":{"$message":{...}},"surface_op":"append"}
+{"seq":12,"type":"step/end","data":{"turn":1,"step":1}}
+{"seq":13,"type":"turn/end","data":{"turn":1,"reason":"completed"}}
 ```
 
 关键点：`surface_op:"append"` 标记"这条事件会变成模型消息"；`derive_messages()`
 只折叠这三种类型（user/message、assistant/message、tool/result），chunk、
-边界、todo 等是痕迹数据，不进模型请求。
+思维链、边界、todo 等是痕迹数据，不进模型请求。
 
 ## 模块清单
 
@@ -111,13 +121,13 @@ python -m pytest -q
 | `inbox.py` | 双队列（next-turn / next-step）+ claim 语义 + 持久化重放 |
 | `prompt.py` | sections 按 order 拼接 + `{{var}}` 严格插值（未注册/无值抛错） |
 | `tools.py` | 工具注册表（schema + executor + parallel/sequential + 超时） |
-| `llm.py` | OpenAI 兼容 SSE 流式客户端 + 可脚本化 FakeLlm + wire 格式纯函数 |
+| `llm.py` | OpenAI 兼容 SSE 流式客户端 + 可脚本化 FakeLlm + wire 格式纯函数（含思维链字段解析） |
 | `hooks.py` | pre_step / request / request_error 三个钩子的类型 |
-| `loop.py` | turn/step 两级循环 + 流组装 + 工具分组执行 |
+| `loop.py` | turn/step 两级循环 + 流组装 + 工具分组执行 + 思维链痕迹落盘 |
 | `agent.py` | 被动状态机：wake / kick / when_idle / cancel |
 | `persistence.py` | JSONL 追加写 + 重放读 |
 | `main.py` | CLI + 示例工具（read_file 行号分页 / list_files / write_file / todo_write）+ 日志驱动 UI |
-| `tests/test_demo.py` | 17 个架构测试 |
+| `tests/test_demo.py` | 20 个架构测试 |
 
 ## 与 harness 的保真度对照
 

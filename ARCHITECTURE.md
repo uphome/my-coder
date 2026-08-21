@@ -216,6 +216,10 @@ _run_group → _run_step → run_turn（记 turn/end aborted 后 re-raise）
   **消费**流（落日志 + 喂组装器），UI **展示**流（订阅 assistant/chunk
   事件渲染）。UI 显示的字不是从模型回调来的，是从日志来的——UI 是日志
   的投影
+- 思维链（`reasoning_content` / `reasoning` / `thinking`）在能力层统一映射为
+  `StreamChunk.reasoning`；循环层把它作为**非 surface 痕迹**落
+  `assistant/reasoning/chunk` 和 `assistant/reasoning`，只用于展示与调试，
+  **不会**进入 `assistant/message` / `derive_messages()`，因此不会回灌给模型
 - wire 翻译的讲究：工具结果在内部是 user 角色消息，wire 层变成
   `role: 'tool'`；带工具调用的助手消息 content 必须是 null；tools 要
   function 包装格式
@@ -276,7 +280,8 @@ JSON 没有类型信息，用 `$xxx` 前缀 key 做类型标记：`$text`/`$tool
  → _run_step 内层循环：
       组请求（system 快照 + derive_messages 折叠的记忆 + 全部工具 schema）
       → request/header 落日志
-      → 流式：每 chunk 落 assistant/chunk，喂组装器
+      → 流式：有内容的 chunk 落 assistant/chunk，喂组装器；有思维链时另落
+        assistant/reasoning/chunk，结束时落完整 assistant/reasoning（痕迹数据）
       → assistant/message 落日志（surface）
       → 有工具调用？按模式分组执行，结果落 tool/result（surface）
       → 回到 while 顶部：derive_messages 自动带上结果，再调模型
@@ -299,14 +304,14 @@ JSON 没有类型信息，用 `$xxx` 前缀 key 做类型标记：`$text`/`$tool
 | `inbox.py` | 双队列（next-turn / next-step）+ claim 语义 + 持久化重放 |
 | `prompt.py` | sections 按 order 拼接 + `{{var}}` 严格插值 |
 | `tools.py` | 工具注册表（schema + executor + parallel/sequential + 超时） |
-| `llm.py` | 能力层：SSE 流式客户端 + FakeLlm + wire 双向翻译 |
+| `llm.py` | 能力层：SSE 流式客户端 + FakeLlm + wire 双向翻译（含思维链字段解析） |
 | `hooks.py` | 三个决策钩子的类型 |
-| `loop.py` | turn/step 两级循环 + 流组装 + 工具分组执行 + 四层兜底 |
+| `loop.py` | turn/step 两级循环 + 流组装 + 工具分组执行 + 思维链痕迹落盘 + 四层兜底 |
 | `agent.py` | 被动状态机：wake / kick / when_idle / cancel |
 | `persistence.py` | JSONL 追加写 + 重放读 |
 | `main.py` | CLI + 示例工具 + 日志驱动 UI |
 | `show_memory.py` | 教学脚本：重放日志展示"记忆 = 投影" |
-| `tests/test_demo.py` | 15 个架构测试 |
+| `tests/test_demo.py` | 20 个架构测试 |
 
 ---
 
