@@ -7,12 +7,14 @@
 
 | 任务 | 状态 |
 |---|---|
-| read_file 升级（行号 / offset / limit / line_numbers 开关） | ✅ 已完成（含测试，全量 20 passed） |
-| grep / glob 工具 | 🔶 设计已定稿，实现路线待拍板 |
+| read_file 升级（行号 / offset / limit / line_numbers 开关） | ✅ 已完成（含测试） |
+| grep / glob 工具 | ✅ 已完成（标准库实现，含测试） |
 | edit 工具 | ⬜ 待做 |
 | bash 工具 | ⬜ 待做 |
 | approval 确认门 | ⬜ 待做 |
 | 阶段一收尾（更新 README / ARCHITECTURE 定稿） | ⬜ 阶段一完成时做 |
+
+> 当前全量测试：23 passed（AGENTS.md 里的数字保持同步）。
 
 ## read_file 升级（已完成）
 
@@ -34,29 +36,29 @@
 - CLI 默认彩色实时显示，`--hide-reasoning` 可折叠隐藏
 - FakeLlm 支持 `reasoning` 字段，离线 demo / 测试可覆盖
 
-## grep / glob 设计（已定稿）
+## grep / glob（已实现：路线 A 标准库）
 
 对齐 deepseek-harness 的实现（`packages/fs/tool-fs-search/` + 架构笔记
-`2026-07-09-bash-backed-grep-glob-discovery`）：
+`2026-07-09-bash-backed-grep-glob-discovery`），用标准库（`pathlib` + `re` +
+`fnmatch`）实现：零依赖、Windows 开箱即用；schema / 输出格式 / 预算对齐 harness。
 
 - **schema 极简**：`grep(pattern, path?, include?)`、`glob(pattern, path?)`；
   预算（上限、超时）不进模型 schema
 - **grep**：正则匹配；默认大小写敏感（不公开参数）；输出
-  `Found N of M matches` + 按文件分组 `Line 12: ...`；匹配上限 250 + 截断页脚
-- **glob**：路径模式（如 `**/*.py`）；每行一个相对路径；路径上限 100 + 截断页脚
-- **错误语义**：坏正则 / 路径不可访问 → `is_error`；0 命中 → 正常结果
-- **跳过隐藏目录与 `__pycache__`**：`.git` / `.sessions` / `.codegraph` 不进搜索结果
-- **待拍板：实现路线**：
-  - A. 标准库（`pathlib` + `re`）：零依赖、Windows 开箱即用、遍历逻辑可见（教学价值）
-  - B. 复用 `rg`：完全对齐 harness（argv 无 shell 层、条件式注册探测 `command -v rg`），
-    但 demo 环境默认没有 rg，需用户安装
-  - 倾向 A，但 schema / 输出格式 / 预算 / 错误语义完全对齐 harness——将来要升级真 rg，
-    工具层形状不变，只换 executor
+  `Found N of M matches` + 按文件分组 `Line N: ...`；匹配上限 250（`GREP_MAX_MATCHES`）；
+  `path` 可以是单个文件或目录（对齐 harness）
+- **glob**：路径模式（如 `**/*.py`）；每行一个相对路径；路径上限 100（`GLOB_MAX_RESULTS`）
+- **错误语义**：坏正则 → `is_error`；路径不存在 / 不是目录 → `is_error`；0 命中 → 正常结果
+- **跳过隐藏条目与 `__pycache__`**：`.git` / `.sessions` / `.codegraph` / `.env` 不进搜索结果
+  （隐藏条目是噪音甚至敏感数据——`.env` 里有 API key）
+- **include 校验**：单个正向 glob，拒绝 `!` 否定与逗号列表（对齐 harness）；
+  include 预编译成正则（更快，坏模式在编译时刻报错）
+- **与 harness 的已知差异**：Python 3.13 的 pathlib 对畸形 glob 模式宽容
+  （按字面量处理，不抛错），不像 rg 会报 invalid-regex——工具如实返回空结果，
+  模型自查修正；executor 保留 `re.error` / `ValueError` 兜底防御其他平台/版本
+- 将来要升级真 rg（路线 B）：工具层形状不变，只换 executor
 
 ## 后续任务（阶段一剩余）
-
-### grep / glob
-- 实现 + 测试：命中与分组、include 过滤、坏正则、结果截断页脚、隐藏目录跳过、0 命中
 
 ### edit
 - 精确字符串替换式编辑：`edit(file_path, old_string, new_string)`

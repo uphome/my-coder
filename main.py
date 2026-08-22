@@ -7,9 +7,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import fnmatch
 import json
 import logging
 import os
+import re
 from pathlib import Path
 
 from agent import Agent
@@ -25,6 +27,11 @@ from values import TextBlock
 _REASONING_COLOR = '\033[36m'   # cyan
 _REASONING_DIM = '\033[2m'      # dim
 _RESET = '\033[0m'
+
+# 搜索预算（对齐 harness 的 tool-fs-search，也是 Claude Code 的默认值）：
+# 常规上限不进模型 schema，模型只看到"前 N 条 + 截断提示"。
+GREP_MAX_MATCHES = 250   # grep 内联保留的最大匹配数
+GLOB_MAX_RESULTS = 100   # glob 内联保留的最大路径数
 
 DEMO_SCRIPT = [
     {
@@ -112,6 +119,91 @@ def build_tools() -> ToolRegistry:
         names = sorted(entry.name for entry in path.iterdir())
         return ToolOutcome(content='\n'.join(names) if names else '(empty)')
 
+    async def grep(args, agent, signal):
+        # 按内容搜（正则）：模型知道"内容片段"，拿"位置"——和 read_file 方向相反。
+        # 输出对齐 harness：Found N of M matches + 按文件分组 Line N: <text>。
+        pattern = args['pattern']
+        include = args.get('include')
+        if include is not None:
+            # include 必须是单个正向 glob：拒绝否定（!）和逗号列表（对齐 harness 的校验）
+            if not include.strip() or include.startswith('!') or ',' in include:
+                return ToolOutcome(
+                    content='include must be one positive glob (e.g. "*.py"); negation and lists are not supported',
+                    is_error=True,
+                )
+        try:
+            regex = re.compile(pattern)
+        except re.error as exc:
+            # 坏正则是模型给的坏输入：降级为结果，模型拿到原因自己改（宁炸勿静默）
+            return ToolOutcome(content=f'invalid regex: {exc}', is_error=True)
+        include_re = None
+        if include is not None:
+            # 预编译 include：fnmatch 每次调用都编译，预编译一次更快，
+            # 且坏模式（如未闭合的 [）在编译时刻显式报错，而不是搜索中途炸
+            try:
+                include_re = re.compile(fnmatch.translate(include))
+            except re.error as exc:
+                return ToolOutcome(content=f'invalid include glob: {exc}', is_error=True)
+        target = _resolve(args.get('path', '.'))
+        if target.is_file():
+            # grep.path 可以是单个文件（对齐 harness：grep 目标是文件或目录）
+            files = [(target, target.name)]
+        elif target.is_dir():
+            files = [(p, p.relative_to(target).as_posix()) for p in _iter_files(target)]
+        else:
+            return ToolOutcome(content=f'not found: {args.get("path", ".")}', is_error=True)
+        matches = []
+        for path, rel in files:
+            if include_re is not None and not include_re.search(path.name):
+                continue
+            for lineno, line in enumerate(
+                    path.read_text(encoding='utf-8', errors='replace').splitlines(), 1):
+                if regex.search(line):
+                    matches.append((rel, lineno, line))
+        if not matches:
+            return ToolOutcome(content='(no matches)')
+        kept = matches[:GREP_MAX_MATCHES]
+        # 按文件分组：每个文件一段 rel 路径 + Line N: <text> 行
+        sections = []
+        by_file = {}
+        for rel, lineno, line in kept:
+            by_file.setdefault(rel, []).append((lineno, line))
+        for rel, rows in by_file.items():
+            sections.append(f'{rel}\n' + '\n'.join(f'Line {n}: {text}' for n, text in rows))
+        body = '\n\n'.join(sections)
+        if len(matches) > GREP_MAX_MATCHES:
+            # 截断页脚：模型必须知道"还有更多"，否则会以为搜索就这些
+            header = f'Found {len(kept)} of {len(matches)} matches'
+            body += '\n\n(Showing first %d; narrow pattern, path, or include to see more.)' % GREP_MAX_MATCHES
+        else:
+            header = f'Found {len(matches)} matches'
+        return ToolOutcome(content=f'{header}\n\n{body}')
+
+    async def glob_tool(args, agent, signal):
+        # 按路径模式找文件（如 **/*.py）：模型知道"名字形状"，拿"路径清单"。
+        pattern = args['pattern']
+        target = _resolve(args.get('path', '.'))
+        if not target.is_dir():
+            return ToolOutcome(content=f'not a directory: {target}', is_error=True)
+        try:
+            paths = sorted(
+                p.relative_to(target).as_posix()
+                for p in target.glob(pattern)
+                if p.is_file()
+                and not any(part.startswith('.') or part == '__pycache__'
+                            for part in p.relative_to(target).parts)
+            )
+        except (re.error, ValueError) as exc:
+            # 坏 glob 模式（如未闭合的 [）同样降级为结果
+            return ToolOutcome(content=f'invalid glob pattern: {exc}', is_error=True)
+        if not paths:
+            return ToolOutcome(content='(no paths match)')
+        kept = paths[:GLOB_MAX_RESULTS]
+        content = '\n'.join(kept)
+        if len(paths) > GLOB_MAX_RESULTS:
+            content += f'\n\n(Showing {len(kept)} of {len(paths)} paths; narrow the pattern to see more.)'
+        return ToolOutcome(content=content)
+
     async def write_file(args, agent, signal):
         path = _resolve(args['file_path'])
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -147,6 +239,33 @@ def build_tools() -> ToolRegistry:
         execute=list_files,
     ))
     registry.register(ToolSpec(
+        name='grep',
+        description='Search file contents with a regular expression. Returns matching lines with line numbers, grouped by file.',
+        parameters={
+            'type': 'object',
+            'properties': {
+                'pattern': {'type': 'string', 'description': 'Regular expression to search for.'},
+                'path': {'type': 'string', 'description': 'File or directory to search; defaults to the workspace, relative paths resolve against it.'},
+                'include': {'type': 'string', 'description': 'One glob filter for which files to search (e.g. "*.py", "*.{js,jsx}"). Not a list; negation is not supported.'},
+            },
+            'required': ['pattern'],
+        },
+        execute=grep,
+    ))
+    registry.register(ToolSpec(
+        name='glob',
+        description='Find files whose paths match a glob pattern. Returns one relative path per line.',
+        parameters={
+            'type': 'object',
+            'properties': {
+                'pattern': {'type': 'string', 'description': 'Glob pattern relative to path (e.g. "**/*.py", "tests/**/test_*.py").'},
+                'path': {'type': 'string', 'description': 'Directory to search in; defaults to the workspace.'},
+            },
+            'required': ['pattern'],
+        },
+        execute=glob_tool,
+    ))
+    registry.register(ToolSpec(
         name='write_file',
         description='Create or overwrite a UTF-8 text file.',
         parameters={
@@ -172,6 +291,20 @@ def build_tools() -> ToolRegistry:
         execute=todo_write,
     ))
     return registry
+
+
+def _iter_files(root: Path):
+    """递归产出 root 下的普通文件（相对路径显示用），跳过隐藏条目与 __pycache__。
+
+    隐藏条目（. 开头，如 .git/.sessions/.codegraph/.env）是噪音甚至敏感数据
+    （.env 里有 API key），grep/glob 搜"代码"不该看到它们。
+    """
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if not d.startswith('.') and d != '__pycache__']
+        for name in filenames:
+            if name.startswith('.'):
+                continue
+            yield Path(dirpath) / name
 
 
 def _resolve(raw: str) -> Path:

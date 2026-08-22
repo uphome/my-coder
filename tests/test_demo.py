@@ -405,3 +405,98 @@ async def test_reasoning_is_trace_only_not_in_model_memory():
     # 日志中完整思维链确实被记录下来
     reasoning_events = [e for e in session.events if e.type == 'assistant/reasoning']
     assert reasoning_events and reasoning_events[-1].data['reasoning'] == '这是内部思考，不应该进入模型记忆。'
+
+
+@pytest.mark.asyncio
+async def test_grep_matches_and_groups(tmp_path):
+    registry = build_tools()
+    (tmp_path / 'a.py').write_text('def foo():\n    return 1\n', encoding='utf-8')
+    (tmp_path / 'b.py').write_text('x = foo()\n', encoding='utf-8')
+    (tmp_path / 'notes.md').write_text('nothing here\n', encoding='utf-8')
+
+    out = await registry.execute('grep', {'pattern': 'foo', 'path': str(tmp_path)}, None)
+    assert out.is_error is False
+    assert out.content.startswith('Found 2 matches')
+    assert 'a.py\nLine 1: def foo():' in out.content
+    assert 'b.py\nLine 1: x = foo()' in out.content
+    assert 'notes.md' not in out.content  # 没命中的文件不出现在分组里
+
+    # include 过滤：只搜 *.py
+    only_py = await registry.execute(
+        'grep', {'pattern': 'foo', 'path': str(tmp_path), 'include': '*.py'}, None)
+    assert 'notes.md' not in only_py.content
+
+    # 大小写敏感（对齐 harness：不公开大小写参数）
+    case = await registry.execute('grep', {'pattern': 'FOO', 'path': str(tmp_path)}, None)
+    assert case.content == '(no matches)'
+
+    # 坏正则 / 坏 include / 路径不存在：一律降级为 is_error
+    bad = await registry.execute('grep', {'pattern': '(unclosed', 'path': str(tmp_path)}, None)
+    assert bad.is_error and 'invalid regex' in bad.content
+    bad_inc = await registry.execute(
+        'grep', {'pattern': 'foo', 'path': str(tmp_path), 'include': '*.py,*.md'}, None)
+    assert bad_inc.is_error and 'one positive glob' in bad_inc.content
+    missing = await registry.execute('grep', {'pattern': 'foo', 'path': str(tmp_path / 'nope')}, None)
+    assert missing.is_error and 'not found' in missing.content
+
+    # path 可以是单个文件（对齐 harness：grep 目标是文件或目录）
+    single_file = await registry.execute(
+        'grep', {'pattern': 'foo', 'path': str(tmp_path / 'a.py')}, None)
+    assert single_file.content.startswith('Found 1 match')
+    assert 'a.py\nLine 1' in single_file.content
+
+
+@pytest.mark.asyncio
+async def test_grep_skips_hidden_and_truncates(tmp_path):
+    registry = build_tools()
+    (tmp_path / '.hidden.py').write_text('secret = 1\n', encoding='utf-8')
+    git = tmp_path / '.git'
+    git.mkdir()
+    (git / 'config').write_text('secret = 2\n', encoding='utf-8')
+    big = tmp_path / 'big.py'
+    big.write_text(''.join(f'match {i}\n' for i in range(260)), encoding='utf-8')
+
+    # 隐藏条目（. 开头目录/文件）不进搜索结果
+    hidden = await registry.execute('grep', {'pattern': 'secret', 'path': str(tmp_path)}, None)
+    assert hidden.content == '(no matches)'
+
+    # 超过上限：头部 Found 250 of 260 + 截断页脚（模型必须知道还有更多）
+    trunc = await registry.execute('grep', {'pattern': 'match', 'path': str(tmp_path)}, None)
+    assert trunc.content.startswith('Found 250 of 260 matches')
+    assert 'narrow pattern' in trunc.content
+
+
+@pytest.mark.asyncio
+async def test_glob_recursive_and_skip_hidden(tmp_path):
+    registry = build_tools()
+    (tmp_path / 'a.py').write_text('x\n', encoding='utf-8')
+    tests = tmp_path / 'tests'
+    tests.mkdir()
+    (tests / 'test_a.py').write_text('x\n', encoding='utf-8')
+    (tests / 'test_b.txt').write_text('x\n', encoding='utf-8')
+    hidden = tmp_path / '.hidden'
+    hidden.mkdir()
+    (hidden / 'h.py').write_text('x\n', encoding='utf-8')
+
+    out = await registry.execute('glob', {'pattern': '**/*.py', 'path': str(tmp_path)}, None)
+    assert out.is_error is False
+    # 递归匹配 + 相对路径 + 排序输出 + 隐藏目录跳过
+    assert out.content.splitlines() == ['a.py', 'tests/test_a.py']
+    assert '.hidden' not in out.content
+
+    no_match = await registry.execute('glob', {'pattern': '**/*.rs', 'path': str(tmp_path)}, None)
+    assert no_match.content == '(no paths match)'
+
+    # 畸形模式（如 [z-a]）：3.13 的 pathlib 宽容处理（按字面量，不抛错）——
+    # 与 rg 的 invalid-regex 行为不同；工具如实返回空结果，模型自己会修正。
+    # executor 仍保留 re.error/ValueError 兜底（防御其他平台/版本的异常）。
+    bad = await registry.execute('glob', {'pattern': '[z-a]', 'path': str(tmp_path)}, None)
+    assert bad.is_error is False and bad.content == '(no paths match)'
+
+    # 超过上限：截断页脚
+    many = tmp_path / 'many'
+    many.mkdir()
+    for i in range(105):
+        (many / f'f{i:03}.txt').write_text('x\n', encoding='utf-8')
+    trunc = await registry.execute('glob', {'pattern': 'many/**', 'path': str(tmp_path)}, None)
+    assert trunc.content.endswith('(Showing 100 of 105 paths; narrow the pattern to see more.)')
