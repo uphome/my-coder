@@ -9,12 +9,13 @@
 |---|---|
 | read_file 升级（行号 / offset / limit / line_numbers 开关） | ✅ 已完成（含测试） |
 | grep / glob 工具 | ✅ 已完成（标准库实现，含测试） |
+| 轻量路径沙箱（`--workspace` 边界） | ✅ 已完成（含测试） |
 | edit 工具 | ⬜ 待做 |
 | bash 工具 | ⬜ 待做 |
 | approval 确认门 | ⬜ 待做 |
 | 阶段一收尾（更新 README / ARCHITECTURE 定稿） | ⬜ 阶段一完成时做 |
 
-> 当前全量测试：23 passed（AGENTS.md 里的数字保持同步）。
+> 当前全量测试：25 passed（AGENTS.md 里的数字保持同步）。
 
 ## read_file 升级（已完成）
 
@@ -57,6 +58,27 @@
   （按字面量处理，不抛错），不像 rg 会报 invalid-regex——工具如实返回空结果，
   模型自查修正；executor 保留 `re.error` / `ValueError` 兜底防御其他平台/版本
 - 将来要升级真 rg（路线 B）：工具层形状不变，只换 executor
+
+## 轻量路径沙箱（`--workspace` 边界，已完成）
+
+**动机**：模型路径拼接是高频翻车点（幻觉路径、`..`、跨项目污染）；工作区边界
+把"写错地方"的破坏限制在用户声明的目录内。这是**防误用保险**，不是防恶意、
+也不是防"工作区内乱改"（后者是 approval 门的职责）。
+
+- **边界**：`--workspace` 必填（安全边界必须由调用者显式声明）；`build_tools(workspace)` 
+  注入——测试传 tmp_path，生产传用户选定的目录（"边界是注册时的声明"）
+- **原理**：`_resolve_in_workspace()` = 相对路径锚定到 workspace → `resolve()` 
+  归一化（折叠 `..`、解符号链接）→ `relative_to()` 逐段前缀匹配 → 越界返回
+  `is_error`（模型看到原因自己改正）
+- **覆盖**：read_file / list_files / write_file / grep / glob 全部走统一入口；
+  将来的 edit / bash 的路径参数自动继承
+- **对齐 harness**：`canonicalPath()`（realpath 归一化）+ `writableRoots()` 
+  （allow-list 单一事实源）+ `dsh-fs-sandbox`（进程内 fence）——同构思路；
+  harness 在其上还有 OS 级强制（landlock / bwrap / restricted token / seatbelt）
+- **局限**（README 安全警告如实声明）：工作区内全裸、TOCTOU 竞态、非 OS 级
+- **演进预留**：OS 级沙箱留给 bash 落地之后——届时 bash 的执行做成可替换后端，
+  沙箱 runner 是第三个后端（Windows: CreateRestrictedToken + CreateProcessAsUserW，
+  Linux: bwrap / Landlock，macOS: seatbelt），继承 harness 的 fail-closed 哲学
 
 ## 后续任务（阶段一剩余）
 

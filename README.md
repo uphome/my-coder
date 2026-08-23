@@ -12,15 +12,16 @@ conda create -n agent-demo python=3.13 pytest pytest-asyncio httpx -y
 conda activate agent-demo
 
 # 离线演示（脚本化假模型，不联网、不需要 key，跑通工具循环）
-python main.py --fake "read README.md and summarize"
+# --workspace 必填：工具只能读写这个目录（安全边界由你声明）
+python main.py --fake --workspace . "read README.md and summarize"
 
 # 恢复上次会话（JSONL 重放：队列、回合号、请求配置全部还原）
-python main.py --fake --resume "continue"
+python main.py --fake --workspace . --resume "continue"
 
 # 真实模型（DeepSeek 官方 API，OpenAI 兼容格式）
 # Windows PowerShell: $env:DEEPSEEK_API_KEY = "sk-..."
 export DEEPSEEK_API_KEY=sk-...
-python main.py "读一下 main.py 并用 todo_write 列出你的三步计划"
+python main.py --workspace . "读一下 main.py 并用 todo_write 列出你的三步计划"
 
 # 测试
 python -m pytest -q
@@ -30,7 +31,7 @@ python -m pytest -q
 但**不会回灌给模型**，只作为痕迹数据写入日志。不需要看思考过程时加 `--hide-reasoning`：
 
 ```sh
-python main.py --fake --hide-reasoning "read README.md and summarize"
+python main.py --fake --workspace . --hide-reasoning "read README.md and summarize"
 ```
 
 运行后所有事件落在 `.sessions/<id>.jsonl`（每行一条事件），日志本身就是
@@ -154,8 +155,12 @@ python main.py --fake --hide-reasoning "read README.md and summarize"
 - 持久化：JSONL 回写回放、resume 恢复队列与回合号
 - wire 格式：OpenAI function 包装、tool_calls 回传、role:tool 结果
 - 工具：read_file 行号分页（offset/limit/line_numbers、越界与坏参数降级为 is_error）
+- 沙箱：workspace 边界（绝对路径越界、`..` 逃逸、越界写入不落盘、grep/glob 越界拒绝）
 
 ## 安全警告
 
-demo 的 write_file/read_file 没有任何沙箱（cwd 内任意路径读写），只用于本地
-学习，不要暴露给不可信的输入。
+所有文件工具被限制在 `--workspace` 指定的目录内（**必填**，越界读写返回
+`path outside workspace` 错误结果）——这是**纯用户态的路径边界**（归一化 +
+前缀匹配，对齐 harness 的 fs-sandbox 思路），**不是 OS 级沙箱**：工作区内
+任意读写、TOCTOU 竞态（校验与访问之间的时间窗）、符号链接竞态都不设防。
+只用于本地学习，不要暴露给不可信的输入。

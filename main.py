@@ -61,11 +61,24 @@ def load_env(path: Path) -> None:
             os.environ[key] = value.strip()
 
 
-def build_tools() -> ToolRegistry:
+def build_tools(workspace: Path) -> ToolRegistry:
+    """工具注册表：全部文件工具共用一个 workspace 边界（轻量沙箱）。
+
+    workspace 必须显式指定（调用者声明边界）：CLI 用 --workspace（必填），
+    测试注入 tmp_path。安全边界是"注册时的声明"：executor 拿到的每个路径
+    都先过 _resolve_in_workspace 校验，越界拒绝——这是纯用户态的路径沙箱
+    （归一化 + 前缀匹配，对齐 harness 的 canonicalPath / fs-sandbox fence），
+    不是 OS 级沙箱（TOCTOU 竞态等不设防，README 有安全警告）。
+    """
+    if workspace is None:
+        raise ValueError('build_tools requires an explicit workspace（安全边界必须显式声明）')
+    workspace = workspace.resolve()
     registry = ToolRegistry()
 
     async def read_file(args, agent, signal):
-        path = _resolve(args['file_path'])
+        path, denied = _resolve_in_workspace(args['file_path'], workspace)
+        if denied:
+            return denied
         if not path.is_file():
             return ToolOutcome(content=f'file not found: {args["file_path"]}', is_error=True)
         # 行号分页：offset（1-based 起始行）+ limit（最大行数）。
@@ -113,7 +126,9 @@ def build_tools() -> ToolRegistry:
         return ToolOutcome(content=content)
 
     async def list_files(args, agent, signal):
-        path = _resolve(args.get('dir_path', '.'))
+        path, denied = _resolve_in_workspace(args.get('dir_path', '.'), workspace)
+        if denied:
+            return denied
         if not path.is_dir():
             return ToolOutcome(content=f'not a directory: {path}', is_error=True)
         names = sorted(entry.name for entry in path.iterdir())
@@ -144,7 +159,9 @@ def build_tools() -> ToolRegistry:
                 include_re = re.compile(fnmatch.translate(include))
             except re.error as exc:
                 return ToolOutcome(content=f'invalid include glob: {exc}', is_error=True)
-        target = _resolve(args.get('path', '.'))
+        target, denied = _resolve_in_workspace(args.get('path', '.'), workspace)
+        if denied:
+            return denied
         if target.is_file():
             # grep.path 可以是单个文件（对齐 harness：grep 目标是文件或目录）
             files = [(target, target.name)]
@@ -182,7 +199,9 @@ def build_tools() -> ToolRegistry:
     async def glob_tool(args, agent, signal):
         # 按路径模式找文件（如 **/*.py）：模型知道"名字形状"，拿"路径清单"。
         pattern = args['pattern']
-        target = _resolve(args.get('path', '.'))
+        target, denied = _resolve_in_workspace(args.get('path', '.'), workspace)
+        if denied:
+            return denied
         if not target.is_dir():
             return ToolOutcome(content=f'not a directory: {target}', is_error=True)
         try:
@@ -205,7 +224,9 @@ def build_tools() -> ToolRegistry:
         return ToolOutcome(content=content)
 
     async def write_file(args, agent, signal):
-        path = _resolve(args['file_path'])
+        path, denied = _resolve_in_workspace(args['file_path'], workspace)
+        if denied:
+            return denied
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(args['content'], encoding='utf-8')
         return ToolOutcome(content=f'wrote {path}')
@@ -307,18 +328,34 @@ def _iter_files(root: Path):
             yield Path(dirpath) / name
 
 
-def _resolve(raw: str) -> Path:
+def _resolve_in_workspace(raw: str, workspace: Path) -> tuple[Path | None, ToolOutcome | None]:
+    """把工具给的路径解析到 workspace 内；越界返回错误结果（轻量沙箱边界）。
+
+    - 相对路径一律相对 workspace 解析（生产环境 workspace=cwd，与历史行为一致）
+    - 先 resolve() 再 relative_to()：解掉 .. 和符号链接，杜绝"看似在内实则在外"
+    - 越界不是异常而是 is_error 结果：模型看到原因（path outside workspace）
+      自己会改正——失败降级为结果，不炸循环
+    """
     path = Path(raw)
-    return path if path.is_absolute() else Path.cwd() / path
+    if not path.is_absolute():
+        path = workspace / path
+    try:
+        path.resolve().relative_to(workspace)
+    except ValueError:
+        return None, ToolOutcome(
+            content=f'path outside workspace: {path} (workspace is {workspace})',
+            is_error=True,
+        )
+    return path, None
 
 
 def build_agent(session: Session, args) -> Agent:
     prompt = PromptRegistry()
     prompt.section('identity', -100, 'You are a coding agent powered by DeepSeek Harness (Python demo).')
-    prompt.section('persona', 0, 'You run on the {{model}} model in {{cwd}}.\nVerify work by running code or tests. Keep answers brief.')
+    prompt.section('persona', 0, 'You run on the {{model}} model. Your workspace is {{workspace}}; tool paths resolve relative to it, and nothing outside it is readable or writable.\nVerify work by running code or tests. Keep answers brief.')
     prompt.section('tool:todo', 110, 'Use todo_write to plan multi-step work before you start.')
     prompt.variable('model', lambda ctx: ctx['agent'].options.get('model', ''))
-    prompt.variable('cwd', lambda ctx: os.getcwd())
+    prompt.variable('workspace', lambda ctx: str(args.workspace))
 
     if args.fake:
         llm = FakeLlm(script=DEMO_SCRIPT, provider='fake', model='fake-model')
@@ -335,7 +372,7 @@ def build_agent(session: Session, args) -> Agent:
         )
         options = {'provider': 'deepseek', 'model': args.model}
 
-    agent = Agent(session=session, llm=llm, prompt=prompt, tools=build_tools(), options=options)
+    agent = Agent(session=session, llm=llm, prompt=prompt, tools=build_tools(workspace=args.workspace), options=options)
 
     reasoning_started = False
 
@@ -407,6 +444,8 @@ def main() -> None:
     parser.add_argument('prompt', help='the task to run')
     parser.add_argument('--session', default='main', help='session id (JSONL file under --sessions)')
     parser.add_argument('--sessions', default='.sessions', help='directory for JSONL session logs')
+    parser.add_argument('--workspace', type=Path, required=True,
+                        help='workspace root directory — tools may only read/write inside it (required)')
     parser.add_argument('--model', default='deepseek-chat', help='model id for the OpenAI-compatible API')
     parser.add_argument('--resume', action='store_true', help='resume the session from its JSONL log')
     parser.add_argument('--fake', action='store_true', help='offline scripted model (architecture demo)')

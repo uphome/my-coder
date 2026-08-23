@@ -302,7 +302,7 @@ async def test_resume_restores_inbox_and_last_turn(tmp_path):
 
 @pytest.mark.asyncio
 async def test_read_file_pages_with_line_numbers(tmp_path):
-    registry = build_tools()
+    registry = build_tools(workspace=tmp_path)
     path = tmp_path / 'code.py'
     path.write_text(''.join(f'line {i}\n' for i in range(1, 6)), encoding='utf-8')
 
@@ -337,7 +337,7 @@ async def test_read_file_pages_with_line_numbers(tmp_path):
 
 @pytest.mark.asyncio
 async def test_read_file_errors_are_results(tmp_path):
-    registry = build_tools()
+    registry = build_tools(workspace=tmp_path)
     path = tmp_path / 'code.py'
     path.write_text('a\nb\nc\n', encoding='utf-8')
 
@@ -409,7 +409,7 @@ async def test_reasoning_is_trace_only_not_in_model_memory():
 
 @pytest.mark.asyncio
 async def test_grep_matches_and_groups(tmp_path):
-    registry = build_tools()
+    registry = build_tools(workspace=tmp_path)
     (tmp_path / 'a.py').write_text('def foo():\n    return 1\n', encoding='utf-8')
     (tmp_path / 'b.py').write_text('x = foo()\n', encoding='utf-8')
     (tmp_path / 'notes.md').write_text('nothing here\n', encoding='utf-8')
@@ -448,7 +448,7 @@ async def test_grep_matches_and_groups(tmp_path):
 
 @pytest.mark.asyncio
 async def test_grep_skips_hidden_and_truncates(tmp_path):
-    registry = build_tools()
+    registry = build_tools(workspace=tmp_path)
     (tmp_path / '.hidden.py').write_text('secret = 1\n', encoding='utf-8')
     git = tmp_path / '.git'
     git.mkdir()
@@ -468,7 +468,7 @@ async def test_grep_skips_hidden_and_truncates(tmp_path):
 
 @pytest.mark.asyncio
 async def test_glob_recursive_and_skip_hidden(tmp_path):
-    registry = build_tools()
+    registry = build_tools(workspace=tmp_path)
     (tmp_path / 'a.py').write_text('x\n', encoding='utf-8')
     tests = tmp_path / 'tests'
     tests.mkdir()
@@ -500,3 +500,41 @@ async def test_glob_recursive_and_skip_hidden(tmp_path):
         (many / f'f{i:03}.txt').write_text('x\n', encoding='utf-8')
     trunc = await registry.execute('glob', {'pattern': 'many/**', 'path': str(tmp_path)}, None)
     assert trunc.content.endswith('(Showing 100 of 105 paths; narrow the pattern to see more.)')
+
+
+@pytest.mark.asyncio
+async def test_workspace_boundary_blocks_escape(tmp_path):
+    registry = build_tools(workspace=tmp_path)
+    outside = tmp_path.parent / 'outside.txt'
+    outside.write_text('secret\n', encoding='utf-8')
+
+    # 绝对路径越界 → is_error（模型看到原因能自己改正）
+    denied = await registry.execute('read_file', {'file_path': str(outside)}, None)
+    assert denied.is_error and 'outside workspace' in denied.content
+
+    # 相对路径 .. 逃逸 → is_error（resolve 折叠后前缀不符）
+    escaped = await registry.execute('read_file', {'file_path': '../outside.txt'}, None)
+    assert escaped.is_error and 'outside workspace' in escaped.content
+
+    # 越界写入不落盘
+    write = await registry.execute('write_file', {'file_path': str(outside), 'content': 'x'}, None)
+    assert write.is_error and 'outside workspace' in write.content
+    assert outside.read_text(encoding='utf-8') == 'secret\n'
+
+    # grep / glob 的 path 越界同样拒绝
+    grep = await registry.execute('grep', {'pattern': 'x', 'path': str(outside.parent)}, None)
+    assert grep.is_error and 'outside workspace' in grep.content
+    glb = await registry.execute('glob', {'pattern': '**', 'path': str(outside.parent)}, None)
+    assert glb.is_error and 'outside workspace' in glb.content
+
+    # workspace 内一切正常
+    inner = tmp_path / 'inner.txt'
+    inner.write_text('ok\n', encoding='utf-8')
+    ok = await registry.execute('read_file', {'file_path': str(inner)}, None)
+    assert ok.is_error is False and ok.content == '   1: ok'
+
+
+def test_build_tools_requires_explicit_workspace():
+    # 安全边界必须显式声明：不传 workspace 直接抛错（严格校验哲学）
+    with pytest.raises(ValueError, match='workspace'):
+        build_tools(None)
