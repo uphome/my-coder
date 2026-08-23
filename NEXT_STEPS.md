@@ -70,8 +70,8 @@
 - **原理**：`_resolve_in_workspace()` = 相对路径锚定到 workspace → `resolve()` 
   归一化（折叠 `..`、解符号链接）→ `relative_to()` 逐段前缀匹配 → 越界返回
   `is_error`（模型看到原因自己改正）
-- **覆盖**：read_file / list_files / write_file / grep / glob 全部走统一入口；
-  将来的 edit / bash 的路径参数自动继承
+- **覆盖**：read_file / list_files / write_file / grep / glob / edit / bash 全部走
+  统一入口（edit / bash 的路径参数自动继承边界）
 - **对齐 harness**：`canonicalPath()`（realpath 归一化）+ `writableRoots()` 
   （allow-list 单一事实源）+ `dsh-fs-sandbox`（进程内 fence）——同构思路；
   harness 在其上还有 OS 级强制（landlock / bwrap / restricted token / seatbelt）

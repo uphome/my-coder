@@ -41,5 +41,5 @@ PYTHONIOENCODING=utf-8 conda run --no-capture-output -n agent-demo python main.p
 
 - `main.py`：CLI 入口；`--fake` 用脚本化假模型离线跑通全流程（不需要 API key）；`--resume` 演示日志重放恢复
 - `show_memory.py`：教学脚本，重放日志展示"记忆 = 日志投影"
-- 工具注册在 `main.py:build_tools(workspace)`（read_file 行号分页 / list_files / write_file / todo_write / grep / glob），通过 `tools.py` 的 `ToolSpec`（schema + executor + 模式 + 超时绑定注册）；`--workspace` 必填（路径边界）；阶段一实施进度见 `NEXT_STEPS.md`
+- 工具注册在 `main.py:build_tools(workspace)`（read_file 行号分页 / list_files / grep / glob / edit / write_file / bash / todo_write），通过 `tools.py` 的 `ToolSpec`（schema + executor + 模式 + 超时 + requires_approval 绑定注册）；`--workspace` 必填（路径边界）；bash/write_file/edit 执行前需人工确认；阶段一实施进度见 `NEXT_STEPS.md`
 - `.env` 存 `DEEPSEEK_API_KEY`/`DEEPSEEK_BASE_URL`；`.sessions/`、`.codegraph/`、`.env` 均不入库

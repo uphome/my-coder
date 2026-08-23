@@ -309,7 +309,7 @@ JSON 没有类型信息，用 `$xxx` 前缀 key 做类型标记：`$text`/`$tool
 | `loop.py` | turn/step 两级循环 + 流组装 + 工具分组执行 + 思维链痕迹落盘 + 四层兜底 |
 | `agent.py` | 被动状态机：wake / kick / when_idle / cancel |
 | `persistence.py` | JSONL 追加写 + 重放读 |
-| `main.py` | CLI + 示例工具 + 日志驱动 UI |
+| `main.py` | CLI + 示例工具（read_file 行号分页 / list_files / grep / glob / edit / write_file / bash / todo_write，含 workspace 边界与 approval 声明）+ 日志驱动 UI |
 | `show_memory.py` | 教学脚本：重放日志展示"记忆 = 投影" |
 | `tests/test_demo.py` | 20 个架构测试 |
 

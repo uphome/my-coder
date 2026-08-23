@@ -128,8 +128,8 @@ python main.py --fake --workspace . --hide-reasoning "read README.md and summari
 | `loop.py` | turn/step 两级循环 + 流组装 + 工具分组执行 + 思维链痕迹落盘 |
 | `agent.py` | 被动状态机：wake / kick / when_idle / cancel |
 | `persistence.py` | JSONL 追加写 + 重放读 |
-| `main.py` | CLI + 示例工具（read_file 行号分页 / list_files / write_file / todo_write）+ 日志驱动 UI |
-| `tests/test_demo.py` | 20 个架构测试 |
+| `main.py` | CLI + 示例工具（read_file 行号分页 / list_files / grep / glob / edit / write_file / bash / todo_write）+ 日志驱动 UI |
+| `tests/test_demo.py` | 31 个架构测试 |
 
 ## 与 harness 的保真度对照
 
