@@ -333,7 +333,7 @@ JSON 没有类型信息，用 `$xxx` 前缀 key 做类型标记：`$text`/`$tool
 | `grep` / `glob` 工具 | 代码搜索能力（标准库实现，对齐 harness 的 tool-fs-search 形状） | ✅ |
 | `read_file` 升级 | 行号、偏移量、长度限制、`line_numbers` 开关 | ✅ |
 | 轻量路径沙箱（workspace 边界） | `--workspace` 必填，工具只读写在界内（纯用户态路径校验：归一化 + 前缀匹配）；OS 级沙箱留给 bash 落地后的专题 | ✅ |
-| **approval 确认门** | bash 等危险操作执行前确认——对应 harness 的 approval/权限桥（README 对照表预留项），`tool/skipped` 和 `_execute_tool_calls` 的 aborted 路径是现成接入点 | ⬜ |
+| **approval 确认门** | 敏感工具（bash/write_file/edit）执行前人工确认——`ToolSpec.requires_approval` 注册声明 + `Hooks.approval` 确认钩子；拒绝落 `tool/skipped` + is_error 结果（对应 harness 的 approval/权限桥） | ✅ |
 
 > 实施进度与已定设计决策记录在 `NEXT_STEPS.md`（✅ 已完成 / 🔶 设计中 / ⬜ 待做）。
 

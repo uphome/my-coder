@@ -157,6 +157,7 @@ python main.py --fake --workspace . --hide-reasoning "read README.md and summari
 - 工具：read_file 行号分页（offset/limit/line_numbers、越界与坏参数降级为 is_error）
 - 沙箱：workspace 边界（绝对路径越界、`..` 逃逸、越界写入不落盘、grep/glob 越界拒绝）
 - 工具：grep/glob 搜索（分组/截断/include）、edit 字面量唯一匹配（零/多匹配拒绝）、bash 退出码/截断/超时 kill
+- approval：敏感工具（bash/write_file/edit）执行前确认（拒绝 → tool/skipped + is_error 结果）
 
 ## 安全警告
 
@@ -164,6 +165,6 @@ python main.py --fake --workspace . --hide-reasoning "read README.md and summari
 `path outside workspace` 错误结果）——这是**纯用户态的路径边界**（归一化 +
 前缀匹配，对齐 harness 的 fs-sandbox 思路），**不是 OS 级沙箱**：工作区内
 任意读写、TOCTOU 竞态（校验与访问之间的时间窗）、符号链接竞态都不设防。
-`bash` 工具**没有命令级沙箱**（命令可以删除工作区外的文件），当前唯一
-刹车是 `cwd` 限制（approval 确认门是规划中的下一步）。只用于本地学习，
-不要暴露给不可信的输入。
+`bash` 工具**没有命令级沙箱**（命令可以删除工作区外的文件），刹车只有
+两道：`cwd` 限制 + approval 确认门（执行前人工确认，默认拒绝）。
+只用于本地学习，不要暴露给不可信的输入。

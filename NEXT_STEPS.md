@@ -12,10 +12,10 @@
 | 轻量路径沙箱（`--workspace` 边界） | ✅ 已完成（含测试） |
 | edit 工具 | ✅ 已完成（含测试） |
 | bash 工具 | ✅ 已完成（含测试） |
-| approval 确认门 | ⬜ 待做 |
-| 阶段一收尾（更新 README / ARCHITECTURE 定稿） | ⬜ 阶段一完成时做 |
+| approval 确认门 | ✅ 已完成（含测试） |
+| 阶段一收尾（更新 README / ARCHITECTURE 定稿） | 🔶 进行中 |
 
-> 当前全量测试：30 passed（AGENTS.md 里的数字保持同步）。
+> 当前全量测试：31 passed（AGENTS.md 里的数字保持同步）。
 
 ## read_file 升级（已完成）
 
@@ -93,7 +93,7 @@
 - **new_string 可选**，缺省空 = 删除片段
 - 成功返回 `edited <path> (replaced at line N)`——模型用 read_file 验证闭环
 - 路径走 workspace 沙箱（自动继承）；文件不存在 → is_error
-- 将来 approval 门会把 write_file / edit 一起标记（写操作统一确认）
+- 与 write_file / bash 一起声明 `requires_approval`（写操作统一确认，approval 门已实现）
 
 ## bash（已完成）
 
@@ -107,19 +107,38 @@
   harness 的"跨调用准则"在此补上）；0 且无输出 → `(no output)`
 - **输出截断**：`BASH_MAX_OUTPUT_CHARS = 8000` + 重定向导航提示
   （教模型：大输出写文件再 read_file 分页读）
-- **命令级刹车是 approval 门**（下一任务绑定）：命令本身不过路径沙箱
-  （无法校验命令里的路径），受限的是 cwd
+- **命令级刹车是 approval 门**（已绑定）：命令本身不过路径沙箱
+  （无法校验命令里的路径），受限的是 cwd；执行前需人工确认
 - prompt 已加 `tool:bash` 提示（测试用 `conda run -n agent-demo python -m pytest -q`）
 
-## 后续任务（阶段一剩余）
+## approval 确认门（已完成）
 
-### approval 确认门
+敏感工具（bash / write_file / edit）执行前的人工确认——阶段一最后一块
+"刹车"，对齐 harness 的 approval/权限桥。
 
-### approval 确认门
-- 危险工具（bash / write_file / edit）执行前确认；`tool/skipped` 事件 +
-  `_execute_tool_calls` 的 aborted 路径是现成接入点
-- `ToolSpec` 加 `requires_approval` 注册声明，循环不写业务 if（决策走注册声明）
-- CLI 交互式确认 → 工具声明 `execution_mode='sequential'`（交互式工具逐个执行）
+- **注册声明**：`ToolSpec.requires_approval: bool = False`——"要不要确认"是
+  工具的性质（写/执行要，只读不要），循环不写业务 if（不变式④）
+- **确认钩子**：`Hooks.approval: (name, arguments) -> bool`——"怎么确认"是
+  策略：默认实现 CLI stdin 交互（`[approval] bash(...)? [y/N]`，fail-safe
+  默认拒绝），测试注入假确认
+- **拒绝路径**：落 `tool/skipped`（痕迹，`reason: 'not-approved'`，审计）+
+  `tool/result`（surface，`is_error`，`skipped: user did not approve`）——
+  模型**必须**看到"没执行"，否则以为工具跑过了（模型可见 ⟺ 可重建）
+- **拒绝是结果不是失败**：模型拿到 skipped 会自己调整方案，循环正常继续
+- 三个敏感工具同时声明 `execution_mode='sequential'`（确认是交互，逐个来）
+- harness 对照：harness 用 `fs/write-intent` / `fs/edit-intent` 事件瀑布
+  （waterfall）实现审批桥；demo 用"声明 + 钩子"简化版，功能等价
+
+## 阶段一验收（进行中）
+
+> "找 bug 并修复、跑测试"端到端跑通——工具集已齐（读/搜/改/写/执行 +
+> 刹车），下一步用真实模型（.env 的 DEEPSEEK_API_KEY）或 --fake 演示完整任务。
+
+## 阶段一收尾清单
+
+- [x] read_file 升级 / grep / glob / 路径沙箱 / edit / bash / approval（各带测试）
+- [ ] 用真实模型端到端验收"找 bug 并修复、跑测试"
+- [ ] 更新 ARCHITECTURE.md 阶段一表格（全部 ✅）与 README 模块清单/安全警告
 
 ## 实施约定（延续项目哲学）
 

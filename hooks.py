@@ -39,3 +39,7 @@ class Hooks:
     pre_step: Optional[Callable[[PreStepContext, object], Awaitable[object]]] = None
     request: Optional[Callable[[RequestContext, dict], Awaitable[dict]]] = None
     request_error: Optional[Callable[[RequestErrorContext], Awaitable[str]]] = None
+    # approval：敏感工具（requires_approval 声明）执行前的人工确认。
+    # 签名 (name, arguments) -> bool；None 时循环用默认实现（CLI stdin 交互）。
+    # 确认是"钩子"——怎么问用户是策略；"要不要问"是工具注册时的声明。
+    approval: Optional[Callable[[str, dict], Awaitable[bool]]] = None

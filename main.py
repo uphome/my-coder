@@ -356,7 +356,7 @@ def build_tools(workspace: Path, bash_timeout_s: float = 60.0) -> ToolRegistry:
     ))
     registry.register(ToolSpec(
         name='edit',
-        description='Replace an exact string in a file. Saves tokens vs write_file full rewrite; old_string must appear verbatim EXACTLY once (whitespace matters).',
+        description='Replace an exact string in a file. Saves tokens vs write_file full rewrite; old_string must appear verbatim EXACTLY once (whitespace matters). Requires user approval before running.',
         parameters={
             'type': 'object',
             'properties': {
@@ -367,10 +367,12 @@ def build_tools(workspace: Path, bash_timeout_s: float = 60.0) -> ToolRegistry:
             'required': ['file_path', 'old_string'],
         },
         execute=edit,
+        execution_mode='sequential',
+        requires_approval=True,
     ))
     registry.register(ToolSpec(
         name='write_file',
-        description='Create or overwrite a UTF-8 text file.',
+        description='Create or overwrite a UTF-8 text file. Requires user approval before running.',
         parameters={
             'type': 'object',
             'properties': {
@@ -380,10 +382,12 @@ def build_tools(workspace: Path, bash_timeout_s: float = 60.0) -> ToolRegistry:
             'required': ['file_path', 'content'],
         },
         execute=write_file,
+        execution_mode='sequential',
+        requires_approval=True,
     ))
     registry.register(ToolSpec(
         name='bash',
-        description='Execute a shell command and return its output. Non-zero exit code is reported as [exit code: N] with the output. Output is capped at 8000 chars: redirect large outputs to a file and read it with read_file.',
+        description='Execute a shell command and return its output. Non-zero exit code is reported as [exit code: N] with the output. Output is capped at 8000 chars: redirect large outputs to a file and read it with read_file. Requires user approval before running.',
         parameters={
             'type': 'object',
             'properties': {
@@ -394,6 +398,8 @@ def build_tools(workspace: Path, bash_timeout_s: float = 60.0) -> ToolRegistry:
         },
         execute=bash,
         timeout_s=bash_timeout_s,
+        execution_mode='sequential',
+        requires_approval=True,
     ))
     registry.register(ToolSpec(
         name='todo_write',

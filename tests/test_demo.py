@@ -647,3 +647,64 @@ async def test_bash_timeout_kills_process(tmp_path):
     registry = build_tools(workspace=tmp_path, bash_timeout_s=0.3)
     slow = await registry.execute('bash', {'command': 'python -c "import time; time.sleep(5)"'}, None)
     assert slow.is_error and 'timed out' in slow.content
+
+
+@pytest.mark.asyncio
+async def test_approval_gate_approves_and_skips(tmp_path):
+    # 批准路径：确认钩子返回 True → 工具执行、文件写入、无 skipped
+    decisions = []
+    approve_hooks = Hooks()
+
+    async def approve(name, args):
+        decisions.append(name)
+        return True
+
+    approve_hooks.approval = approve
+    agent = Agent(
+        session=Session(id='s'),
+        llm=FakeLlm(script=[
+            {
+                'tool_calls': [{'id': 'c1', 'name': 'write_file',
+                                'arguments': json.dumps({'file_path': 'out.txt', 'content': 'hi'})}],
+                'finish_reason': 'tool_calls',
+            },
+            {'text': 'done', 'finish_reason': 'stop'},
+        ]),
+        prompt=PromptRegistry(), tools=build_tools(workspace=tmp_path),
+        options={'provider': 'fake', 'model': 'fake-model'}, hooks=approve_hooks,
+    )
+    agent.followup('write a file')
+    await agent.when_idle()
+    assert decisions == ['write_file']
+    assert (tmp_path / 'out.txt').read_text(encoding='utf-8') == 'hi'
+    assert not [e for e in agent.session.events if e.type == 'tool/skipped']
+
+    # 拒绝路径：确认钩子返回 False → tool/skipped + is_error result + 文件未写入 + 循环正常收尾
+    reject_hooks = Hooks()
+
+    async def reject(name, args):
+        return False
+
+    reject_hooks.approval = reject
+    agent2 = Agent(
+        session=Session(id='s2'),
+        llm=FakeLlm(script=[
+            {
+                'tool_calls': [{'id': 'c1', 'name': 'write_file',
+                                'arguments': json.dumps({'file_path': 'evil.txt', 'content': 'evil'})}],
+                'finish_reason': 'tool_calls',
+            },
+            {'text': 'ok, skipped', 'finish_reason': 'stop'},
+        ]),
+        prompt=PromptRegistry(), tools=build_tools(workspace=tmp_path),
+        options={'provider': 'fake', 'model': 'fake-model'}, hooks=reject_hooks,
+    )
+    agent2.followup('write a file')
+    await agent2.when_idle()
+    events = agent2.session.events
+    skipped = [e for e in events if e.type == 'tool/skipped']
+    assert skipped and skipped[0].data['reason'] == 'not-approved'
+    results = [e for e in events if e.type == 'tool/result']
+    assert results and 'skipped' in str(results[0].data)
+    assert not (tmp_path / 'evil.txt').exists()  # 拒绝后文件未写入
+    assert events[-1].data['reason'] == 'completed'  # 循环正常完成，不是炸掉

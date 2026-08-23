@@ -30,6 +30,8 @@ class ToolSpec:
     - execute：真实函数签名 execute(arguments, agent, signal) -> ToolOutcome
     - execution_mode：'parallel' 可并发 / 'sequential' 必须逐个（交互式工具）
     - timeout_s：执行超时秒数，卡死自动返回超时结果，不拖垮循环
+    - requires_approval：敏感工具（写文件/执行命令）执行前需人工确认——
+      循环层执行前检查此声明并调确认钩子（决策走注册声明，不写死在循环里）
 
     两处永不漂移：模型看到的 schema 和实际执行的函数来自同一条注册。
     """
@@ -39,6 +41,7 @@ class ToolSpec:
     execute: Callable[..., Awaitable[ToolOutcome]]
     execution_mode: str = 'parallel'
     timeout_s: float = 60.0
+    requires_approval: bool = False
 
 
 class ToolRegistry:

@@ -238,6 +238,22 @@ async def _resolve_request(agent, turn: int, step: int) -> dict:
     return await agent.hooks.request(RequestContext(turn=turn, step=step), default)
 
 
+async def _confirm_approval(agent, name: str, arguments: dict) -> bool:
+    """approval 确认：默认 CLI 交互（stdin），hooks.approval 可注入替换。
+
+    fail-safe：EOF（stdin 关闭）/非交互输入都视为拒绝——只有用户明确输入
+    y/yes 才放行。取消（CancelledError）不在这里吞，沿 await 链传播。
+    """
+    if agent.hooks.approval is not None:
+        return await agent.hooks.approval(name, arguments)
+    print(f'[approval] {name}({json.dumps(arguments, ensure_ascii=False)})? [y/N] ', end='', flush=True)
+    try:
+        answer = await asyncio.to_thread(input)
+    except EOFError:
+        return False
+    return answer.strip().lower() in ('y', 'yes')
+
+
 async def _execute_tool_calls(agent, turn: int, step: int, tool_calls: list[ToolCallBlock]) -> bool:
     """按工具声明的模式分组执行：parallel 一次全发，sequential 逐个。
 
@@ -292,6 +308,16 @@ async def _run_group(agent, turn: int, step: int, group: list[ToolCallBlock]) ->
             session.append('tool/result', message, surface_op='append')
             return
         try:
+            spec = agent.tools.get(call.name)
+            if spec.requires_approval and not await _confirm_approval(agent, call.name, arguments):
+                # 拒绝不是失败：落 tool/skipped 痕迹（审计） + tool/result surface
+                # 事件（模型必须看到"没执行"，否则以为工具跑过了——模型可见 ⟺ 可重建）
+                session.append('tool/skipped', {
+                    'call_id': call.id, 'name': call.name, 'reason': 'not-approved',
+                })
+                message = create_tool_result_message(call.id, 'skipped: user did not approve', True)
+                session.append('tool/result', message, surface_op='append')
+                return
             outcome = await agent.tools.execute(call.name, arguments, agent)
         except Exception as error:  # noqa: BLE001 - 工具失败必须变成 is_error 结果，不能炸掉循环
             outcome = ToolOutcome(content=f'{type(error).__name__}: {error}', is_error=True)
