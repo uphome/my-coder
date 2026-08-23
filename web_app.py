@@ -20,7 +20,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from persistence import load_events
 from session import Session
 
-from main import build_agent
+from main import build_agent, load_env
 
 app = FastAPI(title='agent-demo web')
 
@@ -150,6 +150,7 @@ def main() -> None:
     parser.add_argument('--host', default='127.0.0.1', help='bind host (default 127.0.0.1)')
     parser.add_argument('--port', default=8000, type=int, help='bind port (default 8000)')
     args = parser.parse_args()
+    load_env(Path(__file__).parent / '.env')  # 与 CLI 一致：注入 .env 的 API key
     init_web(args.workspace, fake=args.fake, model=args.model)
     import uvicorn
     uvicorn.run(app, host=args.host, port=args.port)
