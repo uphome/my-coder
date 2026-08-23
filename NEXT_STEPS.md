@@ -10,12 +10,12 @@
 | read_file 升级（行号 / offset / limit / line_numbers 开关） | ✅ 已完成（含测试） |
 | grep / glob 工具 | ✅ 已完成（标准库实现，含测试） |
 | 轻量路径沙箱（`--workspace` 边界） | ✅ 已完成（含测试） |
-| edit 工具 | ⬜ 待做 |
+| edit 工具 | ✅ 已完成（含测试） |
 | bash 工具 | ⬜ 待做 |
 | approval 确认门 | ⬜ 待做 |
 | 阶段一收尾（更新 README / ARCHITECTURE 定稿） | ⬜ 阶段一完成时做 |
 
-> 当前全量测试：25 passed（AGENTS.md 里的数字保持同步）。
+> 当前全量测试：27 passed（AGENTS.md 里的数字保持同步）。
 
 ## read_file 升级（已完成）
 
@@ -80,16 +80,27 @@
   沙箱 runner 是第三个后端（Windows: CreateRestrictedToken + CreateProcessAsUserW，
   Linux: bwrap / Landlock，macOS: seatbelt），继承 harness 的 fail-closed 哲学
 
-## 后续任务（阶段一剩余）
+## edit（已完成）
 
-### edit
-- 精确字符串替换式编辑：`edit(file_path, old_string, new_string)`
-- 替换 `write_file` 全量覆盖（省 token）；依赖 read_file 的行号定位
-- "old_string 未找到"是高频失败 → 明确 `is_error` 报错（宁炸勿静默）
+精确字符串替换式编辑：`edit(file_path, old_string, new_string)`，替换
+`write_file` 全量覆盖（省 token）。对齐 harness `str_replace_editor` 的
+`str_replace` 语义：
+
+- **字面量精确匹配**（非正则），缩进/空白敏感——模型先 read_file 看准确内容再改
+- **零匹配 → is_error**：提示检查空白/缩进，或先 read_file
+- **多匹配 → is_error**：报所有出现行号，要求扩大上下文使其唯一——刻意没有
+  `replace_all`（改错位置比拒绝更危险，宁炸勿静默）
+- **new_string 可选**，缺省空 = 删除片段
+- 成功返回 `edited <path> (replaced at line N)`——模型用 read_file 验证闭环
+- 路径走 workspace 沙箱（自动继承）；文件不存在 → is_error
+- 将来 approval 门会把 write_file / edit 一起标记（写操作统一确认）
+
+## 后续任务（阶段一剩余）
 
 ### bash
 - `subprocess` 执行 + 超时 + 输出截断 + 工作目录；退出码非 0 → `is_error` 结果（不是炸循环）
 - 与 approval 确认门绑定实现（危险操作先确认）
+- 执行做成可替换后端，OS 级沙箱（restricted token / bwrap / seatbelt）是后续专题
 
 ### approval 确认门
 - 危险工具（bash / write_file）执行前确认；`tool/skipped` 事件 + `_execute_tool_calls`

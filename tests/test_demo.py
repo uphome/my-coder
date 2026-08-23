@@ -538,3 +538,58 @@ def test_build_tools_requires_explicit_workspace():
     # 安全边界必须显式声明：不传 workspace 直接抛错（严格校验哲学）
     with pytest.raises(ValueError, match='workspace'):
         build_tools(None)
+
+
+@pytest.mark.asyncio
+async def test_edit_replaces_exact_string(tmp_path):
+    registry = build_tools(workspace=tmp_path)
+    path = tmp_path / 'code.py'
+    path.write_text('def foo():\n    return 1\n', encoding='utf-8')
+
+    out = await registry.execute(
+        'edit',
+        {'file_path': str(path), 'old_string': '    return 1', 'new_string': '    return 2'},
+        None)
+    assert out.is_error is False
+    assert out.content == f'edited {path} (replaced at line 2)'
+    assert path.read_text(encoding='utf-8') == 'def foo():\n    return 2\n'
+
+    # new_string 缺省 = 删除片段（对齐 harness）
+    out2 = await registry.execute(
+        'edit', {'file_path': str(path), 'old_string': 'def foo():\n'}, None)
+    assert out2.is_error is False
+    assert path.read_text(encoding='utf-8') == '    return 2\n'
+
+
+@pytest.mark.asyncio
+async def test_edit_requires_unique_verbatim_match(tmp_path):
+    registry = build_tools(workspace=tmp_path)
+    path = tmp_path / 'code.py'
+    path.write_text('x = 1\ny = x\nx = 2\n', encoding='utf-8')
+
+    # 零匹配（字面量、空白敏感）：提示模型检查空白/缩进
+    missing = await registry.execute(
+        'edit', {'file_path': str(path), 'old_string': 'x=1'}, None)
+    assert missing.is_error and 'did not appear verbatim' in missing.content
+
+    # 多匹配：报所有出现行号，拒绝替换——改错位置比拒绝更危险（宁炸勿静默）
+    ambiguous = await registry.execute(
+        'edit', {'file_path': str(path), 'old_string': 'x = ', 'new_string': 'z = '}, None)
+    assert ambiguous.is_error and 'appears 2 times' in ambiguous.content
+    assert 'lines 1, 3' in ambiguous.content
+    assert path.read_text(encoding='utf-8') == 'x = 1\ny = x\nx = 2\n'  # 文件未被改动
+
+    # 空 old_string 拒绝（严格校验）
+    empty = await registry.execute(
+        'edit', {'file_path': str(path), 'old_string': '', 'new_string': 'z'}, None)
+    assert empty.is_error and 'must not be empty' in empty.content
+
+    # 文件不存在 / 越界路径（沙箱自动继承）
+    missing_file = await registry.execute(
+        'edit', {'file_path': str(tmp_path / 'nope.py'), 'old_string': 'x'}, None)
+    assert missing_file.is_error and 'file not found' in missing_file.content
+    outside = tmp_path.parent / 'outside.txt'
+    outside.write_text('x\n', encoding='utf-8')
+    denied = await registry.execute(
+        'edit', {'file_path': str(outside), 'old_string': 'x'}, None)
+    assert denied.is_error and 'outside workspace' in denied.content

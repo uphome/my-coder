@@ -329,7 +329,7 @@ JSON 没有类型信息，用 `$xxx` 前缀 key 做类型标记：`$text`/`$tool
 | 任务 | 说明 | 状态 |
 |---|---|---|
 | `bash` 工具 | 执行 shell 命令，带超时、输出截断、工作目录——编码 agent 的第一工具 | ⬜ |
-| `edit` 工具 | 精确字符串替换式编辑（替换 write_file 全量覆盖，省 token） | ⬜ |
+| `edit` 工具 | 精确字符串替换式编辑（替换 write_file 全量覆盖，省 token；字面量唯一匹配，零/多匹配拒绝，对齐 harness str_replace_editor） | ✅ |
 | `grep` / `glob` 工具 | 代码搜索能力（标准库实现，对齐 harness 的 tool-fs-search 形状） | ✅ |
 | `read_file` 升级 | 行号、偏移量、长度限制、`line_numbers` 开关 | ✅ |
 | 轻量路径沙箱（workspace 边界） | `--workspace` 必填，工具只读写在界内（纯用户态路径校验：归一化 + 前缀匹配）；OS 级沙箱留给 bash 落地后的专题 | ✅ |

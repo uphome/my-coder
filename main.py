@@ -231,6 +231,42 @@ def build_tools(workspace: Path) -> ToolRegistry:
         path.write_text(args['content'], encoding='utf-8')
         return ToolOutcome(content=f'wrote {path}')
 
+    async def edit(args, agent, signal):
+        # 精确字符串替换式编辑：替换 write_file 全量覆盖（省 token——不用把整个
+        # 文件重新写给模型）。对齐 harness str_replace_editor 的 str_replace 语义：
+        # 字面量精确匹配（缩进/空白敏感），零匹配或多匹配都拒绝，刻意没有 replace_all。
+        path, denied = _resolve_in_workspace(args['file_path'], workspace)
+        if denied:
+            return denied
+        if not path.is_file():
+            return ToolOutcome(content=f'file not found: {args["file_path"]}', is_error=True)
+        old_string = args['old_string']
+        new_string = args.get('new_string', '')  # 缺省空 = 删除片段（对齐 harness）
+        if not old_string:
+            return ToolOutcome(content='old_string must not be empty', is_error=True)
+        before = path.read_text(encoding='utf-8', errors='replace')
+        count = before.count(old_string)
+        if count == 0:
+            # 零匹配：提示模型检查空白/缩进，或先用 read_file 看准确内容（宁炸勿静默）
+            return ToolOutcome(content=(
+                f'old_string did not appear verbatim in {args["file_path"]}. '
+                'Check whitespace/indentation, or use read_file to see the exact content.'
+            ), is_error=True)
+        if count > 1:
+            # 多匹配：报所有出现行号，要求扩大上下文使其唯一（对齐 harness 的
+            # FS_AMBIGUOUS_EDIT）——改错位置比拒绝更危险
+            lines = ', '.join(str(n) for n in sorted(set(_occurrence_lines(before, old_string))))
+            return ToolOutcome(content=(
+                f'old_string appears {count} times (lines {lines}). '
+                'Make old_string unique by including more context.'
+            ), is_error=True)
+        offset = before.index(old_string)
+        line_no = before.count('\n', 0, offset) + 1  # 1-based 起始行号
+        after = before[:offset] + new_string + before[offset + len(old_string):]
+        path.write_text(after, encoding='utf-8')
+        # 返回行号：模型可以用 read_file 验证改动（闭环）
+        return ToolOutcome(content=f'edited {args["file_path"]} (replaced at line {line_no})')
+
     async def todo_write(args, agent, signal):
         agent.session.append('todo/write', {'todos': args.get('todos', [])})
         return ToolOutcome(content='todo list updated')
@@ -287,6 +323,20 @@ def build_tools(workspace: Path) -> ToolRegistry:
         execute=glob_tool,
     ))
     registry.register(ToolSpec(
+        name='edit',
+        description='Replace an exact string in a file. Saves tokens vs write_file full rewrite; old_string must appear verbatim EXACTLY once (whitespace matters).',
+        parameters={
+            'type': 'object',
+            'properties': {
+                'file_path': {'type': 'string'},
+                'old_string': {'type': 'string', 'description': 'Exact text to replace; must appear verbatim and uniquely (whitespace matters).'},
+                'new_string': {'type': 'string', 'description': 'Replacement text; omit or pass empty to delete the old_string.'},
+            },
+            'required': ['file_path', 'old_string'],
+        },
+        execute=edit,
+    ))
+    registry.register(ToolSpec(
         name='write_file',
         description='Create or overwrite a UTF-8 text file.',
         parameters={
@@ -326,6 +376,18 @@ def _iter_files(root: Path):
             if name.startswith('.'):
                 continue
             yield Path(dirpath) / name
+
+
+def _occurrence_lines(content: str, search: str) -> list[int]:
+    """search 每次出现处的 1-based 起始行号（同一行多次出现产生重复行号，调用方去重）。"""
+    lines: list[int] = []
+    offset = 0
+    while True:
+        idx = content.find(search, offset)
+        if idx < 0:
+            return lines
+        lines.append(content.count('\n', 0, idx) + 1)
+        offset = idx + len(search)
 
 
 def _resolve_in_workspace(raw: str, workspace: Path) -> tuple[Path | None, ToolOutcome | None]:
