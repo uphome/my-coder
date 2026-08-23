@@ -171,6 +171,48 @@ UI 是日志的投影：on_event 只负责"怎么显示"，状态全在事件里
 - [x] 用真实模型端到端验收（读→搜→分页→执行→批准→验证→报告 全链路）
 - [x] 更新 ARCHITECTURE.md 阶段一表格（全部 ✅）与 README 模块清单/安全警告
 
+## 架构重构（求职作品级，规划中 · 暂缓执行）
+
+**定位转变**：项目将从"教学 demo"成长为**个人工具 / 求职作品**——教学 demo
+允许的简化（main.py 装下全部应用内容）开始成为债务。
+
+**保留的卖点（重构不能丢）**：日志唯一事实源 / 被动状态机 / 钩子 / approval /
+路径沙箱——这些架构思想是差异化优势；好的结构应该配得上它们（好的结构本身
+就是更好的教学）。
+
+**当前问题**：`main.py` 592 行装了 5 类职责（CLI 入口 ~120 / 8 个工具实现
+~300 / 路径沙箱 ~50 / 执行后端 ~30 / UI 渲染 ~90），与文档宣称的"入口层"
+不符；`tests/test_demo.py` 单文件 583 行；无 lint/typecheck/打包/CI。
+
+**目标蓝图**：
+
+```text
+agent_demo/               包结构（取代平铺）
+├── cli.py                入口：argparse + run + REPL（将来）
+├── ui.py                 渲染（_render_event / _paint）
+├── 框架四层不动           agent / loop / session / inbox / prompt /
+│                          values / persistence / hooks / llm
+├── tools/                工具包（取代 main.py 里的 executor）
+│   ├── __init__.py       build_tools() 注册表组装
+│   ├── file_io.py        read_file / list_files / write_file / edit
+│   ├── search.py         grep / glob
+│   ├── shell.py          bash + _run_command 执行后端
+│   └── todo.py           todo_write
+├── sandbox.py            安全边界（_resolve_in_workspace）
+└── constants.py          预算 / 颜色常量
+tests/                    按主题拆分（test_tools / test_sandbox / ...）
+pyproject.toml            打包 + ruff / mypy 配置
+```
+
+**分步路线**（每步跑测试，31 个测试作安全网）：
+1. **模块化**：拆 `tools/` 包 + `ui.py` + `sandbox.py`，main.py 回归 ~150 行入口
+2. **打包**：pyproject.toml + `pip install -e .` + `agent-demo` 命令可跑
+3. **工程化**：ruff + mypy 接入、测试拆分、CI（GitHub Actions 跑 pytest）
+4. **继续功能**：阶段二 REPL 等
+
+**原则**：框架四层（agent→loop→session→values）原封不动——它们是架构卖点；
+重构只动 main.py 里的"应用内容"（工具/沙箱/UI/执行后端）。
+
 ## 实施约定（延续项目哲学）
 
 1. 新增状态一律落日志——"没有状态不进日志"不变式不能破

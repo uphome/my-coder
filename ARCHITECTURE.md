@@ -323,6 +323,9 @@ JSON 没有类型信息，用 `$xxx` 前缀 key 做类型标记：`$text`/`$tool
 - 方向：实用编码 agent（能真干活：执行命令、搜索代码、编辑文件）
 - 模型：DeepSeek 官方 API（deepseek-chat）
 - 节奏：一步步来，每步先讲设计再动手
+- 定位：教学 demo → **个人工具 / 求职作品**（工程化重构规划见 NEXT_STEPS.md
+  "架构重构（求职作品级）"——框架四层不动，拆 main.py 的应用内容为
+  tools/ 包 + ui.py + sandbox.py，补打包 / lint / typecheck / CI）
 
 ### 阶段一：真实工具集（先能干活）
 
