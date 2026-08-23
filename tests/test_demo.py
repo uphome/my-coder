@@ -593,3 +593,57 @@ async def test_edit_requires_unique_verbatim_match(tmp_path):
     denied = await registry.execute(
         'edit', {'file_path': str(outside), 'old_string': 'x'}, None)
     assert denied.is_error and 'outside workspace' in denied.content
+
+
+@pytest.mark.asyncio
+async def test_bash_runs_and_reports_exit_code(tmp_path):
+    registry = build_tools(workspace=tmp_path)
+
+    ok = await registry.execute('bash', {'command': 'echo hello'}, None)
+    assert ok.is_error is False
+    assert ok.content.strip() == 'hello'
+
+    # 退出码非 0 → is_error + [exit code: N] 前缀（模型看到结果自己修）
+    fail = await registry.execute('bash', {'command': 'exit 3'}, None)
+    assert fail.is_error
+    assert fail.content.startswith('[exit code: 3]')
+
+    # 成功但无输出 → (no output)
+    empty = await registry.execute('bash', {'command': 'cd .'}, None)
+    assert empty.is_error is False and empty.content == '(no output)'
+
+    # 空命令拒绝
+    blank = await registry.execute('bash', {'command': '   '}, None)
+    assert blank.is_error and 'must not be empty' in blank.content
+
+
+@pytest.mark.asyncio
+async def test_bash_cwd_and_truncation(tmp_path):
+    registry = build_tools(workspace=tmp_path)
+    sub = tmp_path / 'sub'
+    sub.mkdir()
+    (sub / 'probe.txt').write_text('x\n', encoding='utf-8')
+
+    # cwd 生效：命令在指定目录下跑
+    listed = await registry.execute(
+        'bash', {'command': 'python -c "import os; print(sorted(os.listdir()))"', 'cwd': str(sub)}, None)
+    assert listed.is_error is False and 'probe.txt' in listed.content
+
+    # cwd 越界 → is_error（沙箱继承）
+    denied = await registry.execute('bash', {'command': 'echo hi', 'cwd': str(tmp_path.parent)}, None)
+    assert denied.is_error and 'outside workspace' in denied.content
+
+    # 大输出截断 + 重定向导航提示
+    big = await registry.execute('bash', {'command': 'python -c "print(\'x\' * 20000)"'}, None)
+    assert big.is_error is False
+    assert big.content.startswith('x' * 100)
+    assert 'truncated at 8000 chars' in big.content
+    assert 'redirect to a file' in big.content
+
+
+@pytest.mark.asyncio
+async def test_bash_timeout_kills_process(tmp_path):
+    # 注入短超时：wait_for 取消 → executor kill 子进程 → TimeoutError → is_error
+    registry = build_tools(workspace=tmp_path, bash_timeout_s=0.3)
+    slow = await registry.execute('bash', {'command': 'python -c "import time; time.sleep(5)"'}, None)
+    assert slow.is_error and 'timed out' in slow.content

@@ -11,11 +11,11 @@
 | grep / glob 工具 | ✅ 已完成（标准库实现，含测试） |
 | 轻量路径沙箱（`--workspace` 边界） | ✅ 已完成（含测试） |
 | edit 工具 | ✅ 已完成（含测试） |
-| bash 工具 | ⬜ 待做 |
+| bash 工具 | ✅ 已完成（含测试） |
 | approval 确认门 | ⬜ 待做 |
 | 阶段一收尾（更新 README / ARCHITECTURE 定稿） | ⬜ 阶段一完成时做 |
 
-> 当前全量测试：27 passed（AGENTS.md 里的数字保持同步）。
+> 当前全量测试：30 passed（AGENTS.md 里的数字保持同步）。
 
 ## read_file 升级（已完成）
 
@@ -95,16 +95,29 @@
 - 路径走 workspace 沙箱（自动继承）；文件不存在 → is_error
 - 将来 approval 门会把 write_file / edit 一起标记（写操作统一确认）
 
+## bash（已完成）
+
+执行能力：跑测试、git、构建——编码闭环"读→改→验证"的最后一步。
+- **参数**：`bash(command, cwd?)`；`cwd` 限制在 workspace 内（沙箱继承）
+- **执行后端接缝**：`_run_command()` 收执行细节（shell 语义、合并输出、
+  kill-on-cancel）——将来接 OS 级沙箱 runner 只换这一个函数
+- **超时 kill-on-cancel**：超时/取消时杀掉子进程再传播（不泄漏卡死进程）；
+  `build_tools(bash_timeout_s=60.0)` 注入短值供测试验证
+- **退出码**：非 0 → `is_error` + `[exit code: N]` 前缀（README 对照表
+  harness 的"跨调用准则"在此补上）；0 且无输出 → `(no output)`
+- **输出截断**：`BASH_MAX_OUTPUT_CHARS = 8000` + 重定向导航提示
+  （教模型：大输出写文件再 read_file 分页读）
+- **命令级刹车是 approval 门**（下一任务绑定）：命令本身不过路径沙箱
+  （无法校验命令里的路径），受限的是 cwd
+- prompt 已加 `tool:bash` 提示（测试用 `conda run -n agent-demo python -m pytest -q`）
+
 ## 后续任务（阶段一剩余）
 
-### bash
-- `subprocess` 执行 + 超时 + 输出截断 + 工作目录；退出码非 0 → `is_error` 结果（不是炸循环）
-- 与 approval 确认门绑定实现（危险操作先确认）
-- 执行做成可替换后端，OS 级沙箱（restricted token / bwrap / seatbelt）是后续专题
+### approval 确认门
 
 ### approval 确认门
-- 危险工具（bash / write_file）执行前确认；`tool/skipped` 事件 + `_execute_tool_calls`
-  的 aborted 路径是现成接入点
+- 危险工具（bash / write_file / edit）执行前确认；`tool/skipped` 事件 +
+  `_execute_tool_calls` 的 aborted 路径是现成接入点
 - `ToolSpec` 加 `requires_approval` 注册声明，循环不写业务 if（决策走注册声明）
 - CLI 交互式确认 → 工具声明 `execution_mode='sequential'`（交互式工具逐个执行）
 

@@ -33,6 +33,10 @@ _RESET = '\033[0m'
 GREP_MAX_MATCHES = 250   # grep 内联保留的最大匹配数
 GLOB_MAX_RESULTS = 100   # glob 内联保留的最大路径数
 
+# bash 输出截断上限：防大输出（cat 大文件、编译日志）一次撑爆上下文；
+# 截断提示教模型把大输出重定向到文件，再用 read_file 分页读。
+BASH_MAX_OUTPUT_CHARS = 8000
+
 DEMO_SCRIPT = [
     {
         'reasoning': '用户让我总结 README，先读取文件内容再回答。',
@@ -61,7 +65,7 @@ def load_env(path: Path) -> None:
             os.environ[key] = value.strip()
 
 
-def build_tools(workspace: Path) -> ToolRegistry:
+def build_tools(workspace: Path, bash_timeout_s: float = 60.0) -> ToolRegistry:
     """工具注册表：全部文件工具共用一个 workspace 边界（轻量沙箱）。
 
     workspace 必须显式指定（调用者声明边界）：CLI 用 --workspace（必填），
@@ -69,6 +73,9 @@ def build_tools(workspace: Path) -> ToolRegistry:
     都先过 _resolve_in_workspace 校验，越界拒绝——这是纯用户态的路径沙箱
     （归一化 + 前缀匹配，对齐 harness 的 canonicalPath / fs-sandbox fence），
     不是 OS 级沙箱（TOCTOU 竞态等不设防，README 有安全警告）。
+
+    bash_timeout_s：bash 命令的执行超时（秒）。默认 60；测试注入短值
+    （如 0.3）验证 kill-on-cancel 超时路径。
     """
     if workspace is None:
         raise ValueError('build_tools requires an explicit workspace（安全边界必须显式声明）')
@@ -267,6 +274,31 @@ def build_tools(workspace: Path) -> ToolRegistry:
         # 返回行号：模型可以用 read_file 验证改动（闭环）
         return ToolOutcome(content=f'edited {args["file_path"]} (replaced at line {line_no})')
 
+    async def bash(args, agent, signal):
+        # 执行能力：跑测试、git、构建——编码闭环"读→改→验证"的最后一步。
+        # 注意：命令本身不过路径沙箱（无法校验命令里的路径），受限的是 cwd；
+        # 命令级刹车是 approval 门（下一任务绑定，bash 声明 requires_approval）。
+        command = args['command']
+        if not command.strip():
+            return ToolOutcome(content='command must not be empty', is_error=True)
+        cwd, denied = _resolve_in_workspace(args.get('cwd', '.'), workspace)
+        if denied:
+            return denied
+        exit_code, output = await _run_command(command, cwd)
+        if len(output) > BASH_MAX_OUTPUT_CHARS:
+            # 截断 + 导航提示（read_file 哲学）：模型应学会重定向大输出到文件再分页读
+            output = (
+                output[:BASH_MAX_OUTPUT_CHARS]
+                + f'\n(output truncated at {BASH_MAX_OUTPUT_CHARS} chars; '
+                  'redirect to a file and use read_file for more)'
+            )
+        if exit_code != 0:
+            # 退出码非 0 是"结果"不是异常：模型看到 [exit code: N] 自己判断怎么修
+            # （README 对照表里 harness 的 "[exit code: N] 式跨调用准则"在此补上）
+            content = f'[exit code: {exit_code}]\n{output}' if output else f'[exit code: {exit_code}]'
+            return ToolOutcome(content=content, is_error=True)
+        return ToolOutcome(content=output or '(no output)')
+
     async def todo_write(args, agent, signal):
         agent.session.append('todo/write', {'todos': args.get('todos', [])})
         return ToolOutcome(content='todo list updated')
@@ -350,6 +382,20 @@ def build_tools(workspace: Path) -> ToolRegistry:
         execute=write_file,
     ))
     registry.register(ToolSpec(
+        name='bash',
+        description='Execute a shell command and return its output. Non-zero exit code is reported as [exit code: N] with the output. Output is capped at 8000 chars: redirect large outputs to a file and read it with read_file.',
+        parameters={
+            'type': 'object',
+            'properties': {
+                'command': {'type': 'string', 'description': 'Shell command to run.'},
+                'cwd': {'type': 'string', 'description': 'Working directory (must be inside the workspace); defaults to the workspace root.'},
+            },
+            'required': ['command'],
+        },
+        execute=bash,
+        timeout_s=bash_timeout_s,
+    ))
+    registry.register(ToolSpec(
         name='todo_write',
         description='Record and update a structured task list. The ENTIRE list replaces the previous one.',
         parameters={
@@ -376,6 +422,37 @@ def _iter_files(root: Path):
             if name.startswith('.'):
                 continue
             yield Path(dirpath) / name
+
+
+async def _run_command(command: str, cwd: Path) -> tuple[int, str]:
+    """执行一条 shell 命令，返回 (退出码, 合并输出)。执行后端的接缝。
+
+    执行细节都收在这里：将来接 OS 级沙箱 runner（restricted token / bwrap /
+    seatbelt）只换这一个函数，executor 与循环层不动。
+    - shell 语义（Windows 上是 cmd.exe /c），stdout/stderr 合并成顺序流
+    - 取消（超时或用户 cancel）时 kill 掉子进程再传播：卡死的命令不能泄漏在后台
+    """
+    proc = await asyncio.create_subprocess_shell(
+        command,
+        cwd=str(cwd),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    try:
+        raw, _ = await proc.communicate()
+    except asyncio.CancelledError:
+        # kill-on-cancel：命令已不被需要，杀掉再让取消继续传播（记账在循环层）
+        proc.kill()
+        await proc.wait()
+        # Windows Proactor 上取消的 communicate() 会留下未关闭的管道 transport，
+        # 显式关闭避免 ResourceWarning 噪音（asyncio 已知怪癖）
+        transport = getattr(proc, '_transport', None)
+        if transport is not None:
+            transport.close()
+        raise
+    # 与 read_file 同一宽容解码（Windows 子进程输出可能是 GBK，replace 不炸）
+    output = raw.decode('utf-8', errors='replace')
+    return proc.returncode or 0, output
 
 
 def _occurrence_lines(content: str, search: str) -> list[int]:
@@ -416,6 +493,7 @@ def build_agent(session: Session, args) -> Agent:
     prompt.section('identity', -100, 'You are a coding agent powered by DeepSeek Harness (Python demo).')
     prompt.section('persona', 0, 'You run on the {{model}} model. Your workspace is {{workspace}}; tool paths resolve relative to it, and nothing outside it is readable or writable.\nVerify work by running code or tests. Keep answers brief.')
     prompt.section('tool:todo', 110, 'Use todo_write to plan multi-step work before you start.')
+    prompt.section('tool:bash', 105, 'Use bash to verify work (run tests, git status). Output is capped: redirect large outputs to a file and read it with read_file. In this repo run tests with "conda run -n agent-demo python -m pytest -q".')
     prompt.variable('model', lambda ctx: ctx['agent'].options.get('model', ''))
     prompt.variable('workspace', lambda ctx: str(args.workspace))
 
