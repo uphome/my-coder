@@ -35,6 +35,20 @@ conda run -n agent-demo python -m pytest -q
 python main.py --fake --workspace . --hide-reasoning "read README.md and summarize"
 ```
 
+## Web UI（DeepSeek 风格对话）
+
+UI 是日志的投影的第二个渲染器：同一份事件流，CLI 渲染成终端、Web 渲染成 DOM。
+
+```sh
+# 启动 Web 服务（默认 http://127.0.0.1:8000）
+conda run -n agent-demo python web_app.py --workspace . --fake    # 离线（不需要 key）
+conda run -n agent-demo python web_app.py --workspace .           # 真实模型
+```
+
+浏览器打开 http://127.0.0.1:8000：流式输出、可折叠"已深度思考"、工具调用卡片；
+会话固定 `web`（刷新页面不丢对话）。最小方案：approval 在 Web 下默认拒绝
+（批准/拒绝按钮是迭代项）。
+
 运行后所有事件落在 `.sessions/<id>.jsonl`（每行一条事件），日志本身就是
 调试器——模型每一步看到什么、工具干了什么，都按 seq 记录在案。
 

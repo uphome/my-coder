@@ -708,3 +708,28 @@ async def test_approval_gate_approves_and_skips(tmp_path):
     assert results and 'skipped' in str(results[0].data)
     assert not (tmp_path / 'evil.txt').exists()  # 拒绝后文件未写入
     assert events[-1].data['reason'] == 'completed'  # 循环正常完成，不是炸掉
+
+
+def test_web_chat_streams_events(tmp_path):
+    import web_app
+    from fastapi.testclient import TestClient
+
+    # 最小方案：单会话 + SSE 流（--fake 离线验证全链路）
+    web_app.init_web(tmp_path, fake=True)
+    client = TestClient(web_app.app)
+
+    assert client.get('/').status_code == 200          # 页面可访问
+    assert client.get('/history').json() == []          # 空会话
+
+    resp = client.post('/chat', json={'message': 'hi'})
+    assert resp.status_code == 200
+    # SSE 帧：流式文本 + 工具调用 + 回合结束标记
+    assert resp.text.startswith('data: ')
+    assert '"type": "chunk"' in resp.text
+    assert '"type": "tool_call"' in resp.text
+    assert '"type": "turn_end"' in resp.text
+
+    # 对话后历史可查（记忆 = 日志投影，Web 视角同样成立）
+    history = client.get('/history').json()
+    assert history[0]['role'] == 'user'
+    assert any(m['role'] == 'assistant' and m['text'] for m in history)

@@ -15,9 +15,10 @@
 | approval 确认门 | ✅ 已完成（含测试） |
 | CLI 显示优化（A+B 档） | ✅ 已完成（颜色分层 + 结果摘要 + 进度指示） |
 | resume 历史重放 | ✅ 已完成（`--resume` 打开会话 = 看到完整历史对话） |
+| Web UI（最小方案） | ✅ 已完成（FastAPI + SSE + 深色单页：流式/思考折叠/工具卡片） |
 | 阶段一收尾（更新 README / ARCHITECTURE 定稿） | 🔶 进行中 |
 
-> 当前全量测试：31 passed（AGENTS.md 里的数字保持同步）。
+> 当前全量测试：32 passed（AGENTS.md 里的数字保持同步）。
 
 ## read_file 升级（已完成）
 
@@ -170,6 +171,24 @@ UI 是日志的投影：on_event 只负责"怎么显示"，状态全在事件里
 - [x] read_file 升级 / grep / glob / 路径沙箱 / edit / bash / approval（各带测试）
 - [x] 用真实模型端到端验收（读→搜→分页→执行→批准→验证→报告 全链路）
 - [x] 更新 ARCHITECTURE.md 阶段一表格（全部 ✅）与 README 模块清单/安全警告
+
+## Web UI（最小方案，已完成）
+
+浏览器里的 DeepSeek 风格对话——**UI 是日志的投影的第二个渲染器**：
+同一份事件流，CLI 渲染成终端、Web 渲染成 DOM，框架代码一行不改。
+
+- **技术栈**：FastAPI + SSE（`web_app.py`）+ 原生 JS 单页（`web/index.html`，
+  深色仿 chat.deepseek.com，零构建）
+- **桥接**：`session.on_event` → `asyncio.Queue` → SSE 帧；客户端断开即
+  `task.cancel()`（取消单向传播）
+- **功能**：流式打字、可折叠"已深度思考"块、工具调用卡片（黄/灰）、
+  历史加载（`GET /history` 返回 `derive_messages()` 投影——Web 视角的记忆）
+- **会话**：固定 `id='web'`，启动时重放已有日志（刷新页面不丢对话）
+- **approval**：Web 下走默认实现（无 stdin → EOF → fail-safe 拒绝）——
+  **Web 批准/拒绝按钮是迭代项**（hooks.approval 注入点已就绪）
+- **安全**：默认只监听 127.0.0.1；`--workspace` 必填（路径边界不丢）
+- **迭代方向**：会话列表/切换、Web approval 按钮、思考块耗时显示、
+  Ctrl-C 等价取消按钮（已有停止按钮）
 
 ## 架构重构（求职作品级，规划中 · 暂缓执行）
 
