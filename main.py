@@ -507,7 +507,65 @@ def _resolve_in_workspace(raw: str, workspace: Path) -> tuple[Path | None, ToolO
     return path, None
 
 
-def build_agent(session: Session, args) -> Agent:
+def _close_reasoning(state: dict) -> None:
+    """关闭未闭合的思维链显示（换行 + 重置颜色）。"""
+    if state['reasoning_started']:
+        print('\n' if not _USE_COLOR else f'{_RESET}\n', end='', flush=True)
+        state['reasoning_started'] = False
+
+
+def _render_event(event, hide_reasoning: bool, state: dict) -> None:
+    """把一条事件渲染到终端（UI 是日志的投影）。
+
+    state：可变渲染状态 {'reasoning_started', 'request_no', 'tool_no'}——
+    resume 重放历史时从 0 递增，新回合接续，序号天然连贯。
+    """
+    if event.type == 'turn/start':
+        _close_reasoning(state)
+        print(_paint(_DIM, f'\n════ turn {event.data["turn"]} ════'), flush=True)
+    elif event.type == 'step/start':
+        # 边界分隔线：长任务有进度感（回合.步骤 两级）
+        print(_paint(_DIM, f'── step {event.data["turn"]}.{event.data["step"]} ──'), flush=True)
+    elif event.type == 'request/header':
+        # 每次新请求前关闭可能未闭合的思维链（例如失败重试场景）。
+        _close_reasoning(state)
+        state['request_no'] += 1
+        print(_paint(_DIM, f'[req {state["request_no"]} {event.data["model"]}]'), flush=True)
+    elif event.type == 'assistant/chunk':
+        text = event.data['chunk']['text']
+        if text:
+            _close_reasoning(state)
+            print(text, end='', flush=True)
+    elif event.type == 'assistant/reasoning/chunk':
+        if not hide_reasoning and event.data['reasoning']:
+            if not state['reasoning_started']:
+                print(_paint(f'{_REASONING_COLOR}{_REASONING_DIM}', '[思考] '),
+                      end='', flush=True)
+                state['reasoning_started'] = True
+            print(event.data['reasoning'], end='', flush=True)
+    elif event.type == 'assistant/reasoning':
+        if not hide_reasoning and event.data['reasoning']:
+            # 思维链流式片段已经实时打印，这里补一个换行，避免和正式回答粘在一起。
+            _close_reasoning(state)
+    elif event.type in ('step/end', 'turn/end'):
+        _close_reasoning(state)
+    elif event.type == 'tool/call':
+        _close_reasoning(state)
+        state['tool_no'] += 1
+        print(_paint(
+            _TOOL_COLOR,
+            f'\n[tool {state["tool_no"]}] {event.data["name"]}({event.data["arguments"]})',
+        ), flush=True)
+    elif event.type == 'tool/result':
+        # 结果摘要：前 3 行 + 统计（灰色缩进）——想看全貌去日志，UI 不刷屏
+        text = event.data.content[0].content
+        lines = text.splitlines()
+        body = '\n'.join(f'  {line}' for line in lines[:3])
+        summary = f'  (…共 {len(text)} 字符 / {len(lines)} 行)'
+        print(_paint(_RESULT_COLOR, f'[result] {body}\n{summary}'), flush=True)
+
+
+def build_agent(session: Session, args, ui_state: dict) -> Agent:
     prompt = PromptRegistry()
     prompt.section('identity', -100, 'You are a coding agent powered by DeepSeek Harness (Python demo).')
     prompt.section('persona', 0, 'You run on the {{model}} model. Your workspace is {{workspace}}; tool paths resolve relative to it, and nothing outside it is readable or writable.\nVerify work by running code or tests. Keep answers brief.')
@@ -533,62 +591,9 @@ def build_agent(session: Session, args) -> Agent:
 
     agent = Agent(session=session, llm=llm, prompt=prompt, tools=build_tools(workspace=args.workspace), options=options)
 
-    reasoning_started = False
-    request_no = 0
-    tool_no = 0
-
-    def _close_reasoning() -> None:
-        nonlocal reasoning_started
-        if reasoning_started:
-            print('\n' if not _USE_COLOR else f'{_RESET}\n', end='', flush=True)
-            reasoning_started = False
-
     def on_event(event) -> None:
-        # UI 是日志的投影：这里只负责"怎么显示"，一切状态都在事件里。
-        nonlocal reasoning_started, request_no, tool_no
-        if event.type == 'turn/start':
-            _close_reasoning()
-            print(_paint(_DIM, f'\n════ turn {event.data["turn"]} ════'), flush=True)
-        elif event.type == 'step/start':
-            # 边界分隔线：长任务有进度感（回合.步骤 两级）
-            print(_paint(_DIM, f'── step {event.data["turn"]}.{event.data["step"]} ──'), flush=True)
-        elif event.type == 'request/header':
-            # 每次新请求前关闭可能未闭合的思维链（例如失败重试场景）。
-            _close_reasoning()
-            request_no += 1
-            print(_paint(_DIM, f'[req {request_no} {event.data["model"]}]'), flush=True)
-        elif event.type == 'assistant/chunk':
-            text = event.data['chunk']['text']
-            if text:
-                _close_reasoning()
-                print(text, end='', flush=True)
-        elif event.type == 'assistant/reasoning/chunk':
-            if not args.hide_reasoning and event.data['reasoning']:
-                if not reasoning_started:
-                    print(_paint(f'{_REASONING_COLOR}{_REASONING_DIM}', '[思考] '),
-                          end='', flush=True)
-                    reasoning_started = True
-                print(event.data['reasoning'], end='', flush=True)
-        elif event.type == 'assistant/reasoning':
-            if not args.hide_reasoning and event.data['reasoning']:
-                # 思维链流式片段已经实时打印，这里补一个换行，避免和正式回答粘在一起。
-                _close_reasoning()
-        elif event.type in ('step/end', 'turn/end'):
-            _close_reasoning()
-        elif event.type == 'tool/call':
-            _close_reasoning()
-            tool_no += 1
-            print(_paint(
-                _TOOL_COLOR,
-                f'\n[tool {tool_no}] {event.data["name"]}({event.data["arguments"]})',
-            ), flush=True)
-        elif event.type == 'tool/result':
-            # 结果摘要：前 3 行 + 统计（灰色缩进）——想看全貌去日志，UI 不刷屏
-            text = event.data.content[0].content
-            lines = text.splitlines()
-            body = '\n'.join(f'  {line}' for line in lines[:3])
-            summary = f'  (…共 {len(text)} 字符 / {len(lines)} 行)'
-            print(_paint(_RESULT_COLOR, f'[result] {body}\n{summary}'), flush=True)
+        # UI 是日志的投影：渲染逻辑在模块级 _render_event（resume 重放共用同一份）
+        _render_event(event, args.hide_reasoning, ui_state)
 
     session.on_event(on_event)
     return agent
@@ -602,13 +607,17 @@ async def run(args) -> None:
             f'session {args.session!r} already exists at {session_path} — '
             f'pass --resume to continue it, pick a new --session id, or delete the file',
         )
+    # 渲染状态（request_no/tool_no/思维链开关）——resume 重放与新事件共用，
+    # 所以打开会话 = 看到完整历史对话，序号从 1 连续到新回合。
+    ui_state = {'reasoning_started': False, 'request_no': 0, 'tool_no': 0}
     session = Session(id=args.session)
     if args.resume and session_path.exists():
         for event in load_events(session_path):
             session.adopt(event)
+            _render_event(event, args.hide_reasoning, ui_state)  # 重放历史到终端
         print(f'resumed {args.session}: {len(session.events)} events restored')
     session.bind_store(session_path)
-    agent = build_agent(session, args)
+    agent = build_agent(session, args, ui_state)
     agent.followup(args.prompt)
     await agent.when_idle()
     print()
