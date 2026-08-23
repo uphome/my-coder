@@ -13,18 +13,19 @@ conda activate agent-demo
 
 # 离线演示（脚本化假模型，不联网、不需要 key，跑通工具循环）
 # --workspace 必填：工具只能读写这个目录（安全边界由你声明）
-python main.py --fake --workspace . "read README.md and summarize"
+# Windows 控制台是 GBK：conda run 加 --no-capture-output 避免中文乱码
+conda run --no-capture-output -n agent-demo python main.py --fake --workspace . "read README.md and summarize"
 
 # 恢复上次会话（JSONL 重放：队列、回合号、请求配置全部还原）
-python main.py --fake --workspace . --resume "continue"
+conda run --no-capture-output -n agent-demo python main.py --fake --workspace . --resume "continue"
 
-# 真实模型（DeepSeek 官方 API，OpenAI 兼容格式）
+# 真实模型（DeepSeek 官方 API，OpenAI 兼容格式；敏感工具执行前会弹 [approval] 确认）
 # Windows PowerShell: $env:DEEPSEEK_API_KEY = "sk-..."
 export DEEPSEEK_API_KEY=sk-...
-python main.py --workspace . "读一下 main.py 并用 todo_write 列出你的三步计划"
+conda run --no-capture-output -n agent-demo python main.py --workspace . "读一下 main.py 并用 todo_write 列出你的三步计划"
 
 # 测试
-python -m pytest -q
+conda run -n agent-demo python -m pytest -q
 ```
 
 思维链（如 DeepSeek 的 `reasoning_content`）默认会以彩色 `[思考]` 实时显示，

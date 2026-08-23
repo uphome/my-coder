@@ -8,9 +8,9 @@ Python 复刻 deepseek-harness 架构的教学 demo（agent 框架本身，不�
 # 一切 Python 命令必须走 conda 环境 agent-demo（base 里没有 pytest/httpx）
 conda run -n agent-demo python -m pytest -q        # 31 个测试，唯一验证手段（无 lint/typecheck 配置）
 
-# 跑 CLI 演示（Windows 控制台是 GBK，中文输出需 UTF-8，否则乱码）
-# --workspace 必填：工具只能读写该目录（纯用户态路径边界，非 OS 沙箱）
-PYTHONIOENCODING=utf-8 conda run -n agent-demo python main.py --fake --workspace . "read README.md and summarize"
+# 跑 CLI 演示（Windows 控制台是 GBK：用 --no-capture-output 避免 conda run 二次打印乱码；
+# --workspace 必填：工具只能读写该目录（纯用户态路径边界，非 OS 沙箱））
+PYTHONIOENCODING=utf-8 conda run --no-capture-output -n agent-demo python main.py --fake --workspace . "read README.md and summarize"
 # 真实模型需要 .env 里的 DEEPSEEK_API_KEY（不入库）
 ```
 

@@ -129,16 +129,23 @@
 - harness 对照：harness 用 `fs/write-intent` / `fs/edit-intent` 事件瀑布
   （waterfall）实现审批桥；demo 用"声明 + 钩子"简化版，功能等价
 
-## 阶段一验收（进行中）
+## 阶段一验收（✅ 已完成）
 
-> "找 bug 并修复、跑测试"端到端跑通——工具集已齐（读/搜/改/写/执行 +
-> 刹车），下一步用真实模型（.env 的 DEEPSEEK_API_KEY）或 --fake 演示完整任务。
+> "找 bug 并修复、跑测试"端到端跑通。2026-08 用真实模型（deepseek-chat +
+> .env 的 DEEPSEEK_API_KEY）验收实录：
+
+- 模型自主组合工具：grep 定位 → read_file(offset) 分页 → bash 跑 pytest
+- approval 门实时生效：`[approval] bash(...)? [y/N]` 人工批准后才执行
+- 真实 pytest 结果回传：`31 passed in 1.12s`，模型正确报告
+- resume 重放：676 事件恢复后继续新任务（记忆 = 日志投影的实战验证）
+- 运行提示：`conda run --no-capture-output` 可避免 Windows 控制台中文乱码
+  （仅 `PYTHONIOENCODING` 不够，conda run 捕获 stdout 后按 GBK 再打印）
 
 ## 阶段一收尾清单
 
 - [x] read_file 升级 / grep / glob / 路径沙箱 / edit / bash / approval（各带测试）
-- [ ] 用真实模型端到端验收"找 bug 并修复、跑测试"
-- [ ] 更新 ARCHITECTURE.md 阶段一表格（全部 ✅）与 README 模块清单/安全警告
+- [x] 用真实模型端到端验收（读→搜→分页→执行→批准→验证→报告 全链路）
+- [x] 更新 ARCHITECTURE.md 阶段一表格（全部 ✅）与 README 模块清单/安全警告
 
 ## 实施约定（延续项目哲学）
 
