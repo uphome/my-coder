@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import re
+import sys
 from pathlib import Path
 
 from agent import Agent
@@ -27,6 +28,18 @@ from values import TextBlock
 _REASONING_COLOR = '\033[36m'   # cyan
 _REASONING_DIM = '\033[2m'      # dim
 _RESET = '\033[0m'
+_TOOL_COLOR = '\033[33m'        # yellow —— 工具调用
+_RESULT_COLOR = '\033[90m'      # bright black —— 工具结果（灰，弱化刷屏）
+_DIM = '\033[2m'                # dim —— 分隔线 / 请求计数
+
+# 管道/重定向（非 tty）时禁用颜色：UI 是日志的投影，颜色只是装饰，
+# 不能让 ANSI 码污染被重定向的输出。
+_USE_COLOR = sys.stdout.isatty()
+
+
+def _paint(code: str, text: str) -> str:
+    """按是否 tty 决定要不要包 ANSI 颜色码。"""
+    return f'{code}{text}{_RESET}' if _USE_COLOR else text
 
 # 搜索预算（对齐 harness 的 tool-fs-search，也是 Claude Code 的默认值）：
 # 常规上限不进模型 schema，模型只看到"前 N 条 + 截断提示"。
@@ -521,18 +534,29 @@ def build_agent(session: Session, args) -> Agent:
     agent = Agent(session=session, llm=llm, prompt=prompt, tools=build_tools(workspace=args.workspace), options=options)
 
     reasoning_started = False
+    request_no = 0
+    tool_no = 0
 
     def _close_reasoning() -> None:
         nonlocal reasoning_started
         if reasoning_started:
-            print(f'{_RESET}\n', end='', flush=True)
+            print('\n' if not _USE_COLOR else f'{_RESET}\n', end='', flush=True)
             reasoning_started = False
 
     def on_event(event) -> None:
-        nonlocal reasoning_started
-        if event.type == 'request/header':
+        # UI 是日志的投影：这里只负责"怎么显示"，一切状态都在事件里。
+        nonlocal reasoning_started, request_no, tool_no
+        if event.type == 'turn/start':
+            _close_reasoning()
+            print(_paint(_DIM, f'\n════ turn {event.data["turn"]} ════'), flush=True)
+        elif event.type == 'step/start':
+            # 边界分隔线：长任务有进度感（回合.步骤 两级）
+            print(_paint(_DIM, f'── step {event.data["turn"]}.{event.data["step"]} ──'), flush=True)
+        elif event.type == 'request/header':
             # 每次新请求前关闭可能未闭合的思维链（例如失败重试场景）。
             _close_reasoning()
+            request_no += 1
+            print(_paint(_DIM, f'[req {request_no} {event.data["model"]}]'), flush=True)
         elif event.type == 'assistant/chunk':
             text = event.data['chunk']['text']
             if text:
@@ -541,10 +565,8 @@ def build_agent(session: Session, args) -> Agent:
         elif event.type == 'assistant/reasoning/chunk':
             if not args.hide_reasoning and event.data['reasoning']:
                 if not reasoning_started:
-                    print(
-                        f'{_REASONING_COLOR}{_REASONING_DIM}[思考] ',
-                        end='', flush=True,
-                    )
+                    print(_paint(f'{_REASONING_COLOR}{_REASONING_DIM}', '[思考] '),
+                          end='', flush=True)
                     reasoning_started = True
                 print(event.data['reasoning'], end='', flush=True)
         elif event.type == 'assistant/reasoning':
@@ -555,11 +577,18 @@ def build_agent(session: Session, args) -> Agent:
             _close_reasoning()
         elif event.type == 'tool/call':
             _close_reasoning()
-            print(f'\n[tool] {event.data["name"]}({event.data["arguments"]})', flush=True)
+            tool_no += 1
+            print(_paint(
+                _TOOL_COLOR,
+                f'\n[tool {tool_no}] {event.data["name"]}({event.data["arguments"]})',
+            ), flush=True)
         elif event.type == 'tool/result':
-            result = event.data
-            block = result.content[0]
-            print(f'[result] {block.content[:200]}{"…" if len(block.content) > 200 else ""}', flush=True)
+            # 结果摘要：前 3 行 + 统计（灰色缩进）——想看全貌去日志，UI 不刷屏
+            text = event.data.content[0].content
+            lines = text.splitlines()
+            body = '\n'.join(f'  {line}' for line in lines[:3])
+            summary = f'  (…共 {len(text)} 字符 / {len(lines)} 行)'
+            print(_paint(_RESULT_COLOR, f'[result] {body}\n{summary}'), flush=True)
 
     session.on_event(on_event)
     return agent

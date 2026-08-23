@@ -13,6 +13,7 @@
 | edit 工具 | ✅ 已完成（含测试） |
 | bash 工具 | ✅ 已完成（含测试） |
 | approval 确认门 | ✅ 已完成（含测试） |
+| CLI 显示优化（A+B 档） | ✅ 已完成（颜色分层 + 结果摘要 + 进度指示） |
 | 阶段一收尾（更新 README / ARCHITECTURE 定稿） | 🔶 进行中 |
 
 > 当前全量测试：31 passed（AGENTS.md 里的数字保持同步）。
@@ -128,6 +129,20 @@
 - 三个敏感工具同时声明 `execution_mode='sequential'`（确认是交互，逐个来）
 - harness 对照：harness 用 `fs/write-intent` / `fs/edit-intent` 事件瀑布
   （waterfall）实现审批桥；demo 用"声明 + 钩子"简化版，功能等价
+
+## CLI 显示优化（A+B 档，已完成）
+
+UI 是日志的投影：on_event 只负责"怎么显示"，状态全在事件里。
+
+- **A 档 颜色分层**：`[tool N]` 黄色、`[result]` 灰色缩进、分隔线/`[req N]` dim——
+  一眼分清"模型说的 vs 系统做的"
+- **A 档 结果摘要**：工具结果只显示前 3 行 + `(…共 N 字符 / M 行)` 统计，
+  看全貌去日志（之前硬切 200 字符断在行中间）
+- **B 档 进度指示**：`════ turn N ════` / `── step N.M ──` 边界分隔线 +
+  `[req N model]` 请求计数 + `[tool N]` 工具序号
+- **tty 感知**：`_USE_COLOR = sys.stdout.isatty()`——管道/重定向时禁用 ANSI，
+  颜色只是装饰，不污染被重定向的输出（`_paint()` 统一入口）
+- 真实终端里工具调用是黄色、结果灰色；管道里纯文本
 
 ## 阶段一验收（✅ 已完成）
 
