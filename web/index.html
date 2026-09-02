@@ -12,6 +12,7 @@
     --tool-call: #c9a227; --tool-result: #8a8a8a;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
+  [hidden] { display: none !important; }   /* hidden 属性永远生效——需覆盖子元素的 display:flex 等 */
   html, body { height: 100%; }
   body {
     background: var(--bg); color: var(--text);
@@ -151,8 +152,18 @@
     font-family: Consolas, monospace; word-break: break-all;
   }
   .tool-card.call { border: 1px solid var(--tool-call); color: var(--tool-call); }
-  .tool-card.result { border: 1px solid var(--border); color: var(--tool-result); }
-  .tool-card.error { border-color: #d14545; color: #d14545; }
+  /* 调用↔结果配对：结果缩进在调用卡下，默认只显示前 2 行，点击展开 */
+  .tool-item { display: flex; flex-direction: column; gap: 4px; }
+  .tool-result {
+    margin-left: 14px; padding: 5px 10px;
+    border-left: 2px solid var(--border);
+    color: var(--tool-result); font-size: 12px; cursor: pointer;
+    word-break: break-word;
+  }
+  .tool-result:hover { border-left-color: var(--muted); }
+  .tool-result.error { border-left-color: #d14545; color: #d14545; }
+  .tool-result-preview, .tool-result-full { white-space: pre-wrap; }
+  .tool-result-meta { color: var(--muted); font-size: 11px; margin-top: 3px; }
   footer {
     padding: 12px 20px 16px; background: var(--panel);
     border-top: 1px solid var(--border);
@@ -245,6 +256,7 @@ function ensureAssistant() {
   current = el('div', 'msg assistant');
   currentThinking = null;
   current._activity = null;
+  current._pendingResults = [];
   const text = el('div', 'text');
   current.appendChild(text);
   messagesEl.appendChild(current);
@@ -309,9 +321,17 @@ function addToolCall(name, argsText) {
   const act = ensureActivity();
   act.count += 1;
   act.label.textContent = `工具活动（${act.count}）`;
-  const card = el('div', 'tool-card call');
-  card.textContent = `▶ ${name}(${argsText})`;
-  act.body.appendChild(card);
+  // 调用↔结果配对：每张调用卡一个"结果占位"，结果到达时填入最早未配对的
+  const item = el('div', 'tool-item');
+  const call = el('div', 'tool-card call');
+  call.textContent = `▶ ${name}(${argsText})`;
+  item.appendChild(call);
+  const slot = el('div', 'tool-result');
+  slot.hidden = true;
+  item.appendChild(slot);
+  act.body.appendChild(item);
+  current._pendingResults = current._pendingResults || [];
+  current._pendingResults.push(slot);
   if (streaming) {           // 实时执行中自动展开：用户能看到工具进度
     act.box.classList.add('open');
     act.body.hidden = false;
@@ -319,11 +339,43 @@ function addToolCall(name, argsText) {
   scrollBottom();
 }
 
+function renderToolResult(slot, content, isError) {
+  slot.classList.toggle('error', isError);
+  const lines = content.split('\n');
+  const preview = el('div', 'tool-result-preview');
+  preview.textContent = lines.slice(0, 2).join('\n');
+  const full = el('div', 'tool-result-full');
+  full.hidden = true;
+  full.textContent = content;
+  const meta = el('div', 'tool-result-meta');
+  meta.textContent = `(…共 ${content.length} 字符 / ${lines.length} 行${isError ? '，错误' : ''})`;
+  slot.appendChild(preview);
+  slot.appendChild(full);
+  slot.appendChild(meta);
+  slot.addEventListener('click', () => {
+    const expanded = full.hidden;
+    full.hidden = !expanded;
+    preview.hidden = expanded;
+    meta.textContent = expanded ? '收起'
+      : `(…共 ${content.length} 字符 / ${lines.length} 行${isError ? '，错误' : ''})`;
+  });
+}
+
 function addToolResult(content, isError) {
-  const act = current ? current._activity : null;
-  const card = el('div', 'tool-card result' + (isError ? ' error' : ''));
-  card.textContent = content;
-  if (act) act.body.appendChild(card);
+  const pending = (current && current._pendingResults) || [];
+  let slot;
+  if (pending.length) {
+    slot = pending.shift();          // 填最早未配对的空槽
+  } else {
+    // 异常情况（无前置调用）：单独建一个结果块
+    const act = ensureActivity();
+    const item = el('div', 'tool-item');
+    slot = el('div', 'tool-result');
+    item.appendChild(slot);
+    act.body.appendChild(item);
+  }
+  renderToolResult(slot, content, isError);
+  slot.hidden = false;
   scrollBottom();
 }
 
