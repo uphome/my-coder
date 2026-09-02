@@ -16,8 +16,33 @@
   body {
     background: var(--bg); color: var(--text);
     font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  }
+  #layout { display: flex; height: 100%; }
+  /* 左侧会话栏（仿 DeepSeek） */
+  #sidebar {
+    width: 250px; min-width: 250px; background: var(--panel);
+    border-right: 1px solid var(--border);
     display: flex; flex-direction: column;
   }
+  #new-btn {
+    margin: 12px; padding: 8px; border: 1px dashed var(--border);
+    border-radius: 8px; background: none; color: var(--muted);
+    font-size: 13px; cursor: pointer;
+  }
+  #new-btn:hover { color: var(--text); border-color: var(--muted); }
+  #session-list { flex: 1; overflow-y: auto; padding-bottom: 12px; }
+  .session-item {
+    padding: 9px 14px; cursor: pointer;
+    border-left: 2px solid transparent;
+  }
+  .session-item:hover { background: var(--thinking-bg); }
+  .session-item.active { background: var(--thinking-bg); border-left-color: var(--user-bubble); }
+  .session-item .title {
+    font-size: 13px; white-space: nowrap; overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .session-item .meta { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  #main-col { flex: 1; min-width: 0; display: flex; flex-direction: column; }
   header {
     padding: 12px 20px; background: var(--panel);
     border-bottom: 1px solid var(--border);
@@ -36,6 +61,36 @@
   .msg.assistant .text {
     white-space: pre-wrap; word-break: break-word; line-height: 1.6;
   }
+  /* Markdown 渲染内容样式（marked 输出） */
+  .msg.assistant .text > :first-child { margin-top: 0; }
+  .msg.assistant .text p { margin: .5em 0; }
+  .msg.assistant .text h1, .msg.assistant .text h2, .msg.assistant .text h3,
+  .msg.assistant .text h4 { margin: 1em 0 .4em; line-height: 1.3; }
+  .msg.assistant .text h1 { font-size: 1.4em; }
+  .msg.assistant .text h2 { font-size: 1.25em; }
+  .msg.assistant .text h3 { font-size: 1.1em; }
+  .msg.assistant .text ul, .msg.assistant .text ol { padding-left: 1.6em; margin: .5em 0; }
+  .msg.assistant .text pre {
+    background: #101010; border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px 12px; overflow-x: auto; margin: .7em 0; line-height: 1.45;
+  }
+  .msg.assistant .text code {
+    font-family: Consolas, "Courier New", monospace; font-size: .88em;
+    background: #101010; padding: 1px 5px; border-radius: 4px;
+  }
+  .msg.assistant .text pre code { background: none; padding: 0; }
+  .msg.assistant .text a { color: #6ea8fe; text-decoration: none; }
+  .msg.assistant .text a:hover { text-decoration: underline; }
+  .msg.assistant .text table { border-collapse: collapse; margin: .7em 0; font-size: .92em; }
+  .msg.assistant .text th, .msg.assistant .text td {
+    border: 1px solid var(--border); padding: 5px 12px;
+  }
+  .msg.assistant .text th { background: var(--thinking-bg); }
+  .msg.assistant .text blockquote {
+    border-left: 3px solid var(--border); margin: .6em 0;
+    padding: 2px 0 2px 12px; color: var(--muted);
+  }
+  .msg.assistant .text hr { border: none; border-top: 1px solid var(--border); margin: 1em 0; }
   /* 思考折叠块（仿 DeepSeek） */
   .thinking {
     margin-bottom: 10px; background: var(--thinking-bg);
@@ -87,31 +142,46 @@
 </style>
 </head>
 <body>
-<header>
-  <h1>agent-demo</h1>
-  <span id="model-label">…</span>
-</header>
-<main id="messages">
-  <div class="hint">输入任务开始对话——模型可以读文件、搜索代码、执行命令（敏感操作会被拒绝，直到 Web 版 approval 落地）。</div>
-</main>
-<footer>
-  <div id="input-row">
-    <textarea id="input" rows="1" placeholder="给 agent 一个任务…" autofocus></textarea>
-    <button id="send">发送</button>
-    <button id="stop" hidden>停止</button>
-  </div>
-</footer>
+<div id="layout">
+  <aside id="sidebar">
+    <button id="new-btn">＋ 新建会话</button>
+    <div id="session-list"></div>
+  </aside>
+  <section id="main-col">
+    <header>
+      <h1>agent-demo</h1>
+      <span id="model-label">…</span>
+    </header>
+    <main id="messages">
+      <div class="hint">选择一个会话，或新建会话开始对话——模型可以读文件、搜索代码、执行命令（Web 版 approval 落地前敏感操作会被拒绝）。</div>
+    </main>
+    <footer>
+      <div id="input-row">
+        <textarea id="input" rows="1" placeholder="给 agent 一个任务…" autofocus></textarea>
+        <button id="send">发送</button>
+        <button id="stop" hidden>停止</button>
+      </div>
+    </footer>
+  </section>
+</div>
+<script src="vendor/marked.min.js"></script>
+<script src="vendor/purify.min.js"></script>
 <script>
 'use strict';
 const messagesEl = document.getElementById('messages');
 const input = document.getElementById('input');
 const sendBtn = document.getElementById('send');
 const stopBtn = document.getElementById('stop');
+const sessionListEl = document.getElementById('session-list');
+const newBtn = document.getElementById('new-btn');
 
 let current = null;      // 当前 assistant 消息节点
 let currentThinking = null;
 let currentCards = null;
+let currentRaw = '';     // 当前 assistant 文本的原始 markdown（流式累积）
 let controller = null;
+let currentSid = null;   // 当前会话 id（服务端 init 默认 'web'）
+let busy = false;
 
 /* ---------- DOM 工具 ---------- */
 function el(tag, className) {
@@ -143,6 +213,16 @@ function ensureAssistant() {
 
 function scrollBottom() { messagesEl.scrollTop = messagesEl.scrollHeight; }
 
+/* Markdown → 消毒 HTML（模型输出的 md 渲染，DOMPurify 拦脚本注入） */
+function renderMarkdown(text) {
+  return DOMPurify.sanitize(marked.parse(text));
+}
+
+function renderCurrentText() {
+  const textEl = current.querySelector('.text');
+  textEl.innerHTML = renderMarkdown(currentRaw);
+}
+
 function makeThinking() {
   const box = el('div', 'thinking');
   const toggle = el('button', 'thinking-toggle');
@@ -173,29 +253,78 @@ function addToolResult(content, isError) {
   scrollBottom();
 }
 
-/* ---------- 历史加载 ---------- */
-async function loadHistory() {
-  try {
-    const res = await fetch('/history');
-    const history = await res.json();
-    for (const m of history) {
-      if (m.role === 'user') {
-        addUserMessage(m.text);
-      } else if (m.role === 'assistant') {
-        ensureAssistant();
-        if (m.tool_calls.length) {
-          for (const t of m.tool_calls) addToolCall(t.name, t.arguments);
-        }
-        if (m.tool_results.length) {
-          for (const r of m.tool_results) addToolResult(r.content, r.is_error);
-        }
-        if (m.text) {
-          current.querySelector('.text').textContent = m.text;
-        }
-        current = null; currentThinking = null; currentCards = null;
+/* ---------- 会话管理 ---------- */
+function clearMessages() {
+  messagesEl.innerHTML = '';
+  current = null; currentThinking = null; currentCards = null; currentRaw = '';
+}
+
+function renderHistory(history) {
+  clearMessages();
+  if (!history.length) {
+    const hint = el('div', 'hint');
+    hint.textContent = '这个会话还是空的——发一条消息开始。';
+    messagesEl.appendChild(hint);
+    return;
+  }
+  for (const m of history) {
+    if (m.role === 'user') {
+      addUserMessage(m.text);
+    } else if (m.role === 'assistant') {
+      ensureAssistant();
+      for (const t of m.tool_calls) addToolCall(t.name, t.arguments);
+      for (const r of m.tool_results) addToolResult(r.content, r.is_error);
+      if (m.text) {
+        currentRaw = m.text;
+        renderCurrentText();
       }
+      current = null; currentThinking = null; currentCards = null;
+      currentRaw = '';
     }
-  } catch (e) { console.error('load history failed', e); }
+  }
+}
+
+async function loadSessions() {
+  try {
+    const res = await fetch('/sessions');
+    const items = await res.json();
+    sessionListEl.innerHTML = '';
+    for (const s of items) {
+      const item = el('div', 'session-item' + (s.id === currentSid ? ' active' : ''));
+      const title = el('div', 'title');
+      title.textContent = s.summary;
+      const meta = el('div', 'meta');
+      meta.textContent = `${s.id} · ${s.events} 事件`;
+      item.appendChild(title);
+      item.appendChild(meta);
+      item.addEventListener('click', () => switchSession(s.id));
+      sessionListEl.appendChild(item);
+    }
+  } catch (e) { console.error('load sessions failed', e); }
+}
+
+async function switchSession(sid) {
+  if (busy || sid === currentSid) return;
+  try {
+    const res = await fetch(`/sessions/${encodeURIComponent(sid)}/switch`, { method: 'POST' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    currentSid = data.id;
+    renderHistory(data.history);
+    loadSessions();
+  } catch (e) { console.error('switch session failed', e); }
+}
+
+async function newSession() {
+  if (busy) return;
+  try {
+    const res = await fetch('/sessions/new', { method: 'POST' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    currentSid = data.id;
+    renderHistory(data.history);
+    loadSessions();
+  } catch (e) { console.error('new session failed', e); }
 }
 
 /* ---------- SSE 流解析 ---------- */
@@ -203,7 +332,8 @@ function handle(payload) {
   switch (payload.type) {
     case 'chunk':
       ensureAssistant();
-      current.querySelector('.text').textContent += payload.text;
+      currentRaw += payload.text;
+      renderCurrentText();   // 流式逐 chunk 渲染 Markdown
       scrollBottom();
       break;
     case 'reasoning': {
@@ -261,18 +391,22 @@ async function send() {
     if (e.name !== 'AbortError') console.error(e);
   } finally {
     current = null; currentThinking = null; currentCards = null;
+    currentRaw = '';
     setBusy(false);
+    loadSessions();   // 事件数/摘要已变，刷新会话列表
   }
 }
 
-function setBusy(busy) {
-  sendBtn.disabled = busy;
-  input.disabled = busy;
-  stopBtn.hidden = !busy;
-  sendBtn.textContent = busy ? '…' : '发送';
+function setBusy(value) {
+  busy = value;
+  sendBtn.disabled = value;
+  input.disabled = value;
+  stopBtn.hidden = !value;
+  sendBtn.textContent = value ? '…' : '发送';
 }
 
 /* ---------- 事件绑定 ---------- */
+newBtn.addEventListener('click', newSession);
 sendBtn.addEventListener('click', send);
 stopBtn.addEventListener('click', () => {
   if (controller) { controller.abort(); stopBtn.hidden = true; }
@@ -285,7 +419,15 @@ input.addEventListener('input', () => {
   input.style.height = Math.min(input.scrollHeight, 160) + 'px';
 });
 
-loadHistory();
+/* ---------- 初始化：会话列表 + 当前会话（服务端默认 'web'）历史 ---------- */
+currentSid = 'web';
+(async function init() {
+  await loadSessions();
+  try {
+    const res = await fetch('/history');
+    renderHistory(await res.json());
+  } catch (e) { console.error('load history failed', e); }
+})();
 </script>
 </body>
 </html>

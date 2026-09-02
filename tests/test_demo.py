@@ -714,8 +714,8 @@ def test_web_chat_streams_events(tmp_path):
     import web_app
     from fastapi.testclient import TestClient
 
-    # 最小方案：单会话 + SSE 流（--fake 离线验证全链路）
-    web_app.init_web(tmp_path, fake=True)
+    # SSE 流全链路（--fake 离线验证；sessions_dir 隔离，不污染真实会话）
+    web_app.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
     client = TestClient(web_app.app)
 
     assert client.get('/').status_code == 200          # 页面可访问
@@ -733,3 +733,38 @@ def test_web_chat_streams_events(tmp_path):
     history = client.get('/history').json()
     assert history[0]['role'] == 'user'
     assert any(m['role'] == 'assistant' and m['text'] for m in history)
+
+
+def test_web_session_management(tmp_path):
+    import web_app
+    from fastapi.testclient import TestClient
+
+    web_app.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
+    client = TestClient(web_app.app)
+
+    # 隔离目录初始化即含空的 web 会话（"会话存在 = 有文件"）；
+    # 聊天后摘要更新为首条用户消息
+    initial = client.get('/sessions').json()
+    assert [s['id'] for s in initial] == ['web']
+    assert initial[0]['summary'] == '(empty)'
+    client.post('/chat', json={'message': 'hello web'})
+    items = client.get('/sessions').json()
+    assert items[0]['summary'].startswith('hello web')
+    assert items[0]['events'] > 0
+
+    # 新建会话并切换（空历史）
+    fresh = client.post('/sessions/new').json()
+    assert fresh['id'] != 'web' and fresh['history'] == []
+    assert client.get('/history').json() == []
+
+    # 切回 web 会话：历史还原（恢复 = 重放）
+    back = client.post(f"/sessions/{fresh['id']}/switch").json()
+    assert back['id'] == fresh['id']
+    switched = client.post('/sessions/web/switch').json()
+    assert switched['id'] == 'web'
+    assert switched['history'][0]['role'] == 'user'
+    assert switched['history'][0]['text'] == 'hello web'
+
+    # 非法/不存在会话 id：拒绝而不是穿路径
+    assert client.post('/sessions/%2e%2e%2fswitch').status_code in (400, 404)
+    assert client.post('/sessions/no-such-session/switch').status_code == 404
