@@ -135,7 +135,12 @@ def event_to_payload(event) -> dict | None:
 
 
 def message_to_payload(message) -> dict:
-    """折叠出的模型消息 → 历史渲染用（页面加载时一次性展示）。"""
+    """折叠出的模型消息 → 历史渲染用（页面加载时一次性展示）。
+
+    tool/result 在内部是 user 角色消息（README：wire 层才变 role: tool），
+    但历史渲染里它们应并入工具活动块而不是当用户消息——这里显式标记
+    role='tool_result'，避免前端把"空文本的 user 角色消息"渲染成空白气泡。
+    """
     texts = [b.text for b in message.content if getattr(b, 'type', '') == 'text']
     tool_calls = [
         {'name': b.name, 'arguments': b.arguments}
@@ -145,8 +150,11 @@ def message_to_payload(message) -> dict:
         {'content': b.content[:500], 'is_error': getattr(b, 'is_error', False)}
         for b in message.content if getattr(b, 'type', '') == 'tool-result'
     ]
+    role = message.role
+    if role == 'user' and not texts and tool_results:
+        role = 'tool_result'  # 纯工具结果消息：并入当前工具活动块
     return {
-        'role': message.role,
+        'role': role,
         'text': '\n'.join(texts),
         'tool_calls': tool_calls,
         'tool_results': tool_results,

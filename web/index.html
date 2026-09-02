@@ -38,7 +38,8 @@
   }
   .session-item:hover { background: var(--thinking-bg); }
   .session-item.active { background: var(--thinking-bg); border-left-color: var(--user-bubble); }
-  .session-del {
+  /* 删除按钮：用更高优先级覆盖全局 button 的蓝色背景（button 规则在后面） */
+  .session-item .session-del {
     position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
     background: none; border: none; color: var(--muted);
     font-size: 16px; line-height: 1; cursor: pointer;
@@ -105,7 +106,8 @@
     border: 1px solid var(--border); border-radius: 8px;
     overflow: hidden;
   }
-  .thinking-toggle {
+  /* 思考折叠块按钮：高优先级覆盖全局 button 的蓝色背景（button 规则在后面） */
+  .thinking .thinking-toggle {
     width: 100%; padding: 8px 12px; text-align: left;
     background: none; border: none; color: var(--muted);
     font-size: 13px; cursor: pointer;
@@ -118,7 +120,32 @@
     white-space: pre-wrap; word-break: break-word; line-height: 1.5;
   }
   /* 工具卡片 */
-  .tool-cards { margin-bottom: 10px; display: flex; flex-direction: column; gap: 6px; }
+  /* 回合分隔线：标识新回合开始（历史/多回合里不再"突兀冒出"用户消息） */
+  .turn-sep {
+    display: flex; align-items: center; gap: 10px;
+    margin: 20px 0 12px; color: var(--muted);
+    font-size: 11px; font-weight: 600;
+  }
+  .turn-sep::before, .turn-sep::after {
+    content: ''; flex: 1; border-top: 1px solid var(--border);
+  }
+  /* 工具活动折叠块：连续工具调用收成一行可展开（解决卡片刷屏） */
+  .tool-activity {
+    margin-bottom: 10px; border: 1px solid var(--border);
+    border-radius: 8px; overflow: hidden;
+  }
+  .tool-activity-head {
+    padding: 7px 12px; background: var(--thinking-bg);
+    color: var(--muted); font-size: 12px; cursor: pointer;
+    display: flex; align-items: center; gap: 6px;
+    user-select: none;
+  }
+  .tool-activity-head:hover { color: var(--text); }
+  .tool-activity-head .arrow { transition: transform .15s; }
+  .tool-activity.open .arrow { transform: rotate(90deg); }
+  .tool-activity-body {
+    padding: 8px 12px 10px; display: flex; flex-direction: column; gap: 6px;
+  }
   .tool-card {
     border-radius: 6px; padding: 6px 10px; font-size: 12px;
     font-family: Consolas, monospace; word-break: break-all;
@@ -185,11 +212,12 @@ const newBtn = document.getElementById('new-btn');
 
 let current = null;      // 当前 assistant 消息节点
 let currentThinking = null;
-let currentCards = null;
 let currentRaw = '';     // 当前 assistant 文本的原始 markdown（流式累积）
 let controller = null;
 let currentSid = null;   // 当前会话 id（服务端 init 默认 'web'）
 let busy = false;
+let turnNo = 0;          // 回合计数（每条用户消息 = 新回合，用于分隔线）
+let streaming = false;   // 是否正在实时流（工具活动块自动展开看进度）
 
 /* ---------- DOM 工具 ---------- */
 function el(tag, className) {
@@ -199,6 +227,11 @@ function el(tag, className) {
 }
 
 function addUserMessage(text) {
+  // 每条用户消息 = 一个新回合：先画分隔线（历史/多回合有清晰的回合边界）
+  turnNo += 1;
+  const sep = el('div', 'turn-sep');
+  sep.textContent = `回合 ${turnNo}`;
+  messagesEl.appendChild(sep);
   const row = el('div', 'msg user');
   const bubble = el('div', 'bubble');
   bubble.textContent = text;
@@ -211,12 +244,37 @@ function ensureAssistant() {
   if (current) return current;
   current = el('div', 'msg assistant');
   currentThinking = null;
-  currentCards = el('div', 'tool-cards');
-  current.appendChild(currentCards);
+  current._activity = null;
   const text = el('div', 'text');
   current.appendChild(text);
   messagesEl.appendChild(current);
   return current;
+}
+
+/* 工具活动折叠块：同一条 assistant 消息内的连续工具调用收成可展开块 */
+function ensureActivity() {
+  if (current._activity) return current._activity;
+  const box = el('div', 'tool-activity');
+  const head = el('div', 'tool-activity-head');
+  const arrow = el('span', 'arrow');
+  arrow.textContent = '▶';
+  const label = el('span');
+  label.textContent = '工具活动';
+  head.appendChild(arrow);
+  head.appendChild(label);
+  const body = el('div', 'tool-activity-body');
+  body.hidden = true;            // 默认折叠
+  box.appendChild(head);
+  box.appendChild(body);
+  head.addEventListener('click', () => {
+    const open = box.classList.toggle('open');
+    body.hidden = !open;
+  });
+  // 插在正文之前（思考块由 thinking 自己插到最前）
+  current.insertBefore(box, current.querySelector('.text'));
+  const activity = { box, head, body, label, count: 0 };
+  current._activity = activity;
+  return activity;
 }
 
 function scrollBottom() { messagesEl.scrollTop = messagesEl.scrollHeight; }
@@ -248,23 +306,36 @@ function makeThinking() {
 
 function addToolCall(name, argsText) {
   ensureAssistant();
+  const act = ensureActivity();
+  act.count += 1;
+  act.label.textContent = `工具活动（${act.count}）`;
   const card = el('div', 'tool-card call');
   card.textContent = `▶ ${name}(${argsText})`;
-  currentCards.appendChild(card);
+  act.body.appendChild(card);
+  if (streaming) {           // 实时执行中自动展开：用户能看到工具进度
+    act.box.classList.add('open');
+    act.body.hidden = false;
+  }
   scrollBottom();
 }
 
 function addToolResult(content, isError) {
+  const act = current ? current._activity : null;
   const card = el('div', 'tool-card result' + (isError ? ' error' : ''));
   card.textContent = content;
-  currentCards.appendChild(card);
+  if (act) act.body.appendChild(card);
   scrollBottom();
 }
 
 /* ---------- 会话管理 ---------- */
 function clearMessages() {
   messagesEl.innerHTML = '';
-  current = null; currentThinking = null; currentCards = null; currentRaw = '';
+  current = null; currentThinking = null; currentRaw = '';
+  turnNo = 0;   // 每个会话的回合从 1 起
+}
+
+function closeAssistant() {
+  current = null; currentThinking = null; currentRaw = '';
 }
 
 function renderHistory(history) {
@@ -277,19 +348,26 @@ function renderHistory(history) {
   }
   for (const m of history) {
     if (m.role === 'user') {
+      // 真用户消息 = 新回合：先关闭上一个 assistant 节点，再画分隔线 + 气泡
+      closeAssistant();
       addUserMessage(m.text);
+    } else if (m.role === 'tool_result') {
+      // 工具结果消息（内部是 user 角色）：并入当前 assistant 的工具活动块
+      if (current) {
+        for (const r of m.tool_results) addToolResult(r.content, r.is_error);
+      }
     } else if (m.role === 'assistant') {
+      closeAssistant();   // 新的一步：强制新建 assistant 节点
       ensureAssistant();
       for (const t of m.tool_calls) addToolCall(t.name, t.arguments);
-      for (const r of m.tool_results) addToolResult(r.content, r.is_error);
       if (m.text) {
         currentRaw = m.text;
         renderCurrentText();
       }
-      current = null; currentThinking = null; currentCards = null;
-      currentRaw = '';
+      // 保留 current：随后的 tool_result 消息并入它的工具活动块
     }
   }
+  closeAssistant();
 }
 
 async function loadSessions() {
@@ -395,6 +473,7 @@ async function send() {
   addUserMessage(text);
   input.value = '';
   controller = new AbortController();
+  streaming = true;
   setBusy(true);
   try {
     const res = await fetch('/chat', {
@@ -422,8 +501,9 @@ async function send() {
   } catch (e) {
     if (e.name !== 'AbortError') console.error(e);
   } finally {
-    current = null; currentThinking = null; currentCards = null;
+    current = null; currentThinking = null;
     currentRaw = '';
+    streaming = false;
     setBusy(false);
     loadSessions();   // 事件数/摘要已变，刷新会话列表
   }
