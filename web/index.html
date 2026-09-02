@@ -32,11 +32,19 @@
   #new-btn:hover { color: var(--text); border-color: var(--muted); }
   #session-list { flex: 1; overflow-y: auto; padding-bottom: 12px; }
   .session-item {
-    padding: 9px 14px; cursor: pointer;
+    position: relative;
+    padding: 9px 26px 9px 14px; cursor: pointer;
     border-left: 2px solid transparent;
   }
   .session-item:hover { background: var(--thinking-bg); }
   .session-item.active { background: var(--thinking-bg); border-left-color: var(--user-bubble); }
+  .session-del {
+    position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+    background: none; border: none; color: var(--muted);
+    font-size: 16px; line-height: 1; cursor: pointer;
+    padding: 2px 6px; border-radius: 4px;
+  }
+  .session-del:hover { color: #d14545; background: rgba(209, 69, 69, .15); }
   .session-item .title {
     font-size: 13px; white-space: nowrap; overflow: hidden;
     text-overflow: ellipsis;
@@ -298,6 +306,17 @@ async function loadSessions() {
       item.appendChild(title);
       item.appendChild(meta);
       item.addEventListener('click', () => switchSession(s.id));
+      // 非当前会话可删除（当前会话先切换走再删）
+      if (s.id !== currentSid) {
+        const del = el('button', 'session-del');
+        del.textContent = '×';
+        del.title = '删除会话';
+        del.addEventListener('click', (e) => {
+          e.stopPropagation();
+          deleteSession(s.id);
+        });
+        item.appendChild(del);
+      }
       sessionListEl.appendChild(item);
     }
   } catch (e) { console.error('load sessions failed', e); }
@@ -313,6 +332,19 @@ async function switchSession(sid) {
     renderHistory(data.history);
     loadSessions();
   } catch (e) { console.error('switch session failed', e); }
+}
+
+async function deleteSession(sid) {
+  if (!confirm(`删除会话「${sid}」？对话记录将不可恢复。`)) return;
+  try {
+    const res = await fetch(`/sessions/${encodeURIComponent(sid)}/delete`, { method: 'POST' });
+    if (!res.ok) {
+      const detail = await res.json().catch(() => ({}));
+      alert(detail.detail || `删除失败（HTTP ${res.status}）`);
+      return;
+    }
+    loadSessions();
+  } catch (e) { console.error('delete session failed', e); }
 }
 
 async function newSession() {

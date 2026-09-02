@@ -180,6 +180,20 @@ def switch_session(sid: str) -> dict:
     return _open_session(sid, allow_missing=False)
 
 
+@app.post('/sessions/{sid}/delete')
+def delete_session(sid: str) -> dict:
+    """删除会话文件。当前会话不可删（删了状态会混乱）——先切换走再删。"""
+    _check_init()
+    _validate_sid(sid)
+    if sid == _current_sid:
+        raise HTTPException(400, 'cannot delete the active session — switch away first')
+    path = (_sessions_dir or Path('.sessions')) / f'{sid}.jsonl'
+    if not path.exists():
+        raise HTTPException(404, f'session {sid!r} not found')
+    path.unlink()
+    return {'deleted': sid}
+
+
 @app.get('/history')
 def history() -> list[dict]:
     _check_init()

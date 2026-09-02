@@ -768,3 +768,12 @@ def test_web_session_management(tmp_path):
     # 非法/不存在会话 id：拒绝而不是穿路径
     assert client.post('/sessions/%2e%2e%2fswitch').status_code in (400, 404)
     assert client.post('/sessions/no-such-session/switch').status_code == 404
+
+    # 删除：非当前会话可删；当前会话拒绝（先切换走再删）
+    fresh2 = client.post('/sessions/new').json()
+    assert fresh2['id'] != 'web'
+    client.post('/sessions/web/switch')   # new 已切到 fresh2，先切回 web
+    assert client.post(f"/sessions/{fresh2['id']}/delete").status_code == 200
+    assert all(s['id'] != fresh2['id'] for s in client.get('/sessions').json())
+    assert client.post('/sessions/web/delete').status_code == 400  # 当前会话
+    assert client.post('/sessions/%2e%2e%2fdelete').status_code in (400, 404)
