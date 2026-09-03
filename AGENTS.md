@@ -6,7 +6,7 @@ Python 复刻 deepseek-harness 架构的教学 demo（agent 框架本身，不�
 
 ```sh
 # 一切 Python 命令必须走 conda 环境 agent-demo（base 里没有 pytest/httpx）
-conda run -n agent-demo python -m pytest -q        # 32 个测试，唯一验证手段（无 lint/typecheck 配置）
+conda run -n agent-demo python -m pytest -q        # 33 个测试，唯一验证手段（无 lint/typecheck 配置）
 
 # Web UI（DeepSeek 风格，默认 http://127.0.0.1:8000；--fake 离线演示）
 conda run --no-capture-output -n agent-demo python web_app.py --workspace . --fake

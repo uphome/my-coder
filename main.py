@@ -565,7 +565,7 @@ def _render_event(event, hide_reasoning: bool, state: dict) -> None:
         print(_paint(_RESULT_COLOR, f'[result] {body}\n{summary}'), flush=True)
 
 
-def build_agent(session: Session, args, ui_state: dict) -> Agent:
+def build_agent(session: Session, args, ui_state: dict, hooks=None) -> Agent:
     prompt = PromptRegistry()
     prompt.section('identity', -100, 'You are a coding agent powered by DeepSeek Harness (Python demo).')
     prompt.section('persona', 0, 'You run on the {{model}} model. Your workspace is {{workspace}}; tool paths resolve relative to it, and nothing outside it is readable or writable.\nVerify work by running code or tests. Keep answers brief.')
@@ -589,7 +589,7 @@ def build_agent(session: Session, args, ui_state: dict) -> Agent:
         )
         options = {'provider': 'deepseek', 'model': args.model}
 
-    agent = Agent(session=session, llm=llm, prompt=prompt, tools=build_tools(workspace=args.workspace), options=options)
+    agent = Agent(session=session, llm=llm, prompt=prompt, tools=build_tools(workspace=args.workspace), options=options, hooks=hooks)
 
     def on_event(event) -> None:
         # UI 是日志的投影：渲染逻辑在模块级 _render_event（resume 重放共用同一份）

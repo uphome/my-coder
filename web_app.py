@@ -4,16 +4,16 @@
 build_tools/loop 一行不改），session.on_event 订阅事件，经 asyncio.Queue
 桥接成 SSE 流推给浏览器。CLI 是终端投影，Web 是 DOM 投影，同一份日志。
 
-功能：多会话（左侧栏列出 .sessions/*.jsonl，可新建/切换）+ 流式输出 +
-思考折叠 + 工具卡片 + Markdown 渲染。approval 在 Web 下走默认实现
-（无 stdin → EOF → fail-safe 拒绝），Web 批准/拒绝按钮是迭代项。
-"""
+功能：多会话（左侧栏列出 .sessions/*.jsonl，可新建/切换/删除）+ 流式输出 +
+思考折叠 + 工具卡片（变体图标/状态点/摘要，仿 harness ui-tool）+ Markdown 渲染 +
+approval 按钮（钩子推送 approval_request 到 SSE，浏览器批准/拒绝）。"""
 from __future__ import annotations
 
 import argparse
 import asyncio
 import json
 import time
+import uuid
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
@@ -21,6 +21,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from persistence import load_events
 from session import Session
+from hooks import Hooks
 
 from main import build_agent, load_env
 
@@ -34,7 +35,56 @@ _session: Session | None = None
 _agent = None
 _current_sid: str = ''
 
+# Web approval：敏感工具（bash/write/edit）执行前推送请求给浏览器，等待人工批准/拒绝
+_approval_futures: dict[str, asyncio.Future] = {}
+_active_queue: asyncio.Queue | None = None
+APPROVAL_TIMEOUT_S = 300  # 用户不点则 fail-safe 拒绝（防模型永久卡住）
+
 DONE_MARKER = object()
+
+# 工具结果预览上限：展开卡片想看到全文（对齐 CLI 的 BASH_MAX_OUTPUT_CHARS 量级），
+# 只在真正超长时截断；chars/lines/truncated 让前端能显示统计与截断徽标。
+RESULT_MAX_CHARS = 20000
+
+
+def _result_stats(content: str) -> tuple[int, int]:
+    """工具结果统计：(字符数, 行数)——前端摘要行显示用。"""
+    return len(content), content.count('\n') + 1 if content else 0
+
+
+def _result_payload(block) -> dict:
+    """ToolResultBlock → 前端载荷：预览内容 + 全文统计（截断标记交给前端徽标）。"""
+    content = getattr(block, 'content', '') or ''
+    chars, lines = _result_stats(content)
+    return {
+        'call_id': getattr(block, 'tool_call_id', ''),
+        'content': content[:RESULT_MAX_CHARS],
+        'chars': chars,
+        'lines': lines,
+        'truncated': chars > RESULT_MAX_CHARS,
+        'is_error': bool(getattr(block, 'is_error', False)),
+    }
+
+
+async def web_approval(name: str, arguments: dict) -> bool:
+    """Web 版 approval 钩子：推送 approval_request 到 SSE 流，await 前端的 respond。
+
+    只在当前对话的 SSE 流活跃时可用；超时/无流一律 fail-safe 拒绝。
+    """
+    if _active_queue is None:
+        return False
+    aid = uuid.uuid4().hex
+    fut: asyncio.Future = asyncio.get_running_loop().create_future()
+    _approval_futures[aid] = fut
+    await _active_queue.put({
+        'type': 'approval_request', 'id': aid, 'name': name, 'arguments': arguments,
+    })
+    try:
+        return await asyncio.wait_for(fut, timeout=APPROVAL_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        return False
+    finally:
+        _approval_futures.pop(aid, None)
 
 
 def _check_init() -> None:
@@ -61,7 +111,9 @@ def _open_session(sid: str, *, allow_missing: bool) -> dict:
         log_path.touch()
     _session = session
     _current_sid = sid
-    _agent = build_agent(session, _args, {'reasoning_started': False, 'request_no': 0, 'tool_no': 0})
+    hooks = Hooks()
+    hooks.approval = web_approval   # Web 版确认：前端弹"批准/拒绝"按钮
+    _agent = build_agent(session, _args, {'reasoning_started': False, 'request_no': 0, 'tool_no': 0}, hooks=hooks)
     return {'id': sid, 'history': [message_to_payload(m) for m in session.derive_messages()]}
 
 
@@ -121,14 +173,15 @@ def event_to_payload(event) -> dict | None:
         reasoning = event.data['reasoning']
         return {'type': 'reasoning', 'text': reasoning} if reasoning else None
     if event.type == 'tool/call':
-        return {'type': 'tool_call', 'name': event.data['name'], 'arguments': event.data['arguments']}
+        return {
+            'type': 'tool_call',
+            'call_id': event.data['call_id'],
+            'name': event.data['name'],
+            'arguments': event.data['arguments'],  # 原始 JSON 字符串
+        }
     if event.type == 'tool/result':
         block = event.data.content[0]
-        return {
-            'type': 'tool_result',
-            'content': block.content[:500],
-            'is_error': getattr(block, 'is_error', False),
-        }
+        return {'type': 'tool_result', **_result_payload(block)}
     if event.type == 'turn/end':
         return {'type': 'turn_end', 'reason': event.data['reason']}
     return None
@@ -143,11 +196,11 @@ def message_to_payload(message) -> dict:
     """
     texts = [b.text for b in message.content if getattr(b, 'type', '') == 'text']
     tool_calls = [
-        {'name': b.name, 'arguments': b.arguments}
+        {'call_id': b.id, 'name': b.name, 'arguments': b.arguments}
         for b in message.content if getattr(b, 'type', '') == 'tool-call'
     ]
     tool_results = [
-        {'content': b.content[:500], 'is_error': getattr(b, 'is_error', False)}
+        _result_payload(b)
         for b in message.content if getattr(b, 'type', '') == 'tool-result'
     ]
     role = message.role
@@ -164,6 +217,17 @@ def message_to_payload(message) -> dict:
 @app.get('/')
 def index() -> FileResponse:
     return FileResponse(Path(__file__).parent / 'web' / 'index.html')
+
+
+@app.get('/meta')
+def meta() -> dict:
+    """前端元信息：workspace 根（工具路径相对化显示用）+ 模型名 + fake 标记。"""
+    _check_init()
+    return {
+        'workspace': str(Path(_args.workspace).resolve()),  # 绝对路径，前端剥前缀显示相对路径
+        'model': _args.model,
+        'fake': bool(_args.fake),
+    }
 
 
 @app.get('/sessions')
@@ -230,20 +294,41 @@ async def chat(request: Request) -> StreamingResponse:
     task = asyncio.create_task(run_agent())
 
     async def sse_stream():
+        global _active_queue
+        _active_queue = queue   # approval 钩子经它推送请求
         try:
             while True:
-                event = await queue.get()
-                if event is DONE_MARKER:
+                item = await queue.get()
+                if item is DONE_MARKER:
                     break
-                payload = event_to_payload(event)
+                if isinstance(item, dict):
+                    # Web approval 请求（钩子直接放的自定义载荷，非 session 事件）
+                    yield f'data: {json.dumps(item, ensure_ascii=False)}\n\n'
+                    continue
+                payload = event_to_payload(item)
                 if payload is not None:
                     yield f'data: {json.dumps(payload, ensure_ascii=False)}\n\n'
         finally:
             # 客户端断开（停止按钮 / 关页面）：取消 agent，记账由循环层完成
             task.cancel()
             unsubscribe()
+            if _active_queue is queue:
+                _active_queue = None
 
     return StreamingResponse(sse_stream(), media_type='text/event-stream')
+
+
+@app.post('/approval/respond')
+async def approval_respond(request: Request) -> dict:
+    """浏览器对 approval 请求的响应：批准（true）或拒绝（false），唤醒钩子。"""
+    body = await request.json()
+    aid = body.get('id')
+    fut = _approval_futures.get(aid)
+    if fut is None:
+        raise HTTPException(404, f'unknown approval id {aid!r}')
+    if not fut.done():
+        fut.set_result(bool(body.get('approved')))
+    return {'ok': True}
 
 
 def main() -> None:
