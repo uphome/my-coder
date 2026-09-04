@@ -282,7 +282,7 @@ def _scan_sessions() -> list[dict]:
     return items
 
 
-def init_web(workspace: Path, fake: bool = False, model: str = 'deepseek-chat',
+def init_web(workspace: Path, fake: bool = False, model: str = 'deepseek-v4-flash',
              sessions_dir: Path | None = None, sid: str = 'web') -> None:
     """初始化全局状态（测试可注入 workspace / fake / sessions_dir）。"""
     global _sessions_dir, _args
@@ -491,7 +491,7 @@ def main() -> None:
     parser.add_argument('--workspace', type=Path, required=True,
                         help='workspace root directory — tools may only read/write inside it (required)')
     parser.add_argument('--fake', action='store_true', help='offline scripted model (architecture demo)')
-    parser.add_argument('--model', default='deepseek-chat', help='model id for the OpenAI-compatible API')
+    parser.add_argument('--model', default='deepseek-v4-flash', help='model id for the OpenAI-compatible API')
     parser.add_argument('--host', default='127.0.0.1', help='bind host (default 127.0.0.1)')
     parser.add_argument('--port', default=8000, type=int, help='bind port (default 8000)')
     args = parser.parse_args()

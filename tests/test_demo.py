@@ -895,5 +895,8 @@ async def test_identity_prompt_is_neutral(tmp_path):
     assert headers, 'expected a request/header event'
     system = headers[0]['system']
     assert 'coding agent' in system
-    for banned in ('DeepSeek Harness', 'powered by', 'Python demo'):
+    # {{model}} 变量已渲染成实际模型名，且身份即模型名（不许自称别的模型）
+    assert 'fake-model' in system
+    for banned in ('DeepSeek Harness', 'powered by', 'Python demo',
+                   'Claude', 'Anthropic', 'GPT', 'OpenAI'):
         assert banned not in system, f'identity must not mention {banned!r}'
