@@ -85,6 +85,13 @@ button:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--accent
   font-size: 13px; white-space: nowrap; overflow: hidden;
   text-overflow: ellipsis; color: var(--text-1);
 }
+/* 双击改名的内联输入框 */
+.rename-input {
+  width: 100%; font-size: 13px; font-family: inherit;
+  background: var(--bg3); color: var(--text-1);
+  border: 1px solid var(--accent); border-radius: var(--r-s);
+  padding: 1px 6px; outline: none;
+}
 .session-item .meta { font-size: 11px; color: var(--text-3); margin-top: 2px; }
 /* 删除按钮：hover 时显现（桌面习惯，避免误触） */
 .session-item .session-del {
@@ -827,6 +834,8 @@ async function loadSessions() {
       const title = el('div', 'title');
       title.textContent = s.summary;
       title.title = s.summary;
+      // 双击标题就地改名（title 事件落日志；user 手动覆盖 auto 自动）
+      title.addEventListener('dblclick', (e) => { e.stopPropagation(); startRename(item, s); });
       const meta = el('div', 'meta');
       meta.textContent = `${s.id} · ${s.events} 事件`;
       item.appendChild(title);
@@ -842,6 +851,41 @@ async function loadSessions() {
       sessionListEl.appendChild(item);
     }
   } catch (e) { console.error('load sessions failed', e); }
+}
+
+/* 双击会话名 → 就地变输入框（Enter 保存 / Esc 取消 / 失焦保存） */
+function startRename(item, s) {
+  const title = item.querySelector('.title');
+  const box = document.createElement('input');
+  box.type = 'text';
+  box.className = 'rename-input';
+  box.value = s.summary === '(empty)' ? '' : s.summary;
+  box.placeholder = '会话名';
+  title.replaceWith(box);
+  box.focus();
+  box.select();
+  let finished = false;
+  const finish = (save) => {
+    if (finished) return;
+    finished = true;
+    const value = box.value.trim();
+    const cleanup = () => loadSessions();
+    if (!save || !value) return cleanup();
+    fetch(`/sessions/${encodeURIComponent(s.id)}/title`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: value }),
+    })
+      .then((r) => (r.ok ? null : r.json().catch(() => ({}))))
+      .then((err) => { if (err) alert(err.detail || '改名失败'); })
+      .catch((e) => console.error('rename failed', e))
+      .finally(cleanup);
+  };
+  box.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+    else if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+  });
+  box.addEventListener('blur', () => finish(true));
 }
 async function switchSession(sid) {
   if (busy || sid === currentSid) return;
@@ -997,7 +1041,9 @@ async function send() {
     finalizeTurn();
     streaming = false;
     setBusy(false);
-    loadSessions();   // 事件数/摘要已变，刷新会话列表
+    loadSessions();   // 事件数/标题已变，立即刷新
+    // 自动标题在回合结束后台生成（一次小 LLM 请求）：稍等再刷一次列表
+    setTimeout(loadSessions, 2500);
   }
 }
 function setBusy(value) {

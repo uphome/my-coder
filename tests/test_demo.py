@@ -777,3 +777,89 @@ def test_web_session_management(tmp_path):
     assert all(s['id'] != fresh2['id'] for s in client.get('/sessions').json())
     assert client.post('/sessions/web/delete').status_code == 400  # 当前会话
     assert client.post('/sessions/%2e%2e%2fdelete').status_code in (400, 404)
+
+def test_web_session_title_endpoint(tmp_path):
+    """手动改名：append session/title（user）→ 列表 summary 以标题优先，重放可恢复。"""
+    import web_app
+    from fastapi.testclient import TestClient
+
+    web_app.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
+    client = TestClient(web_app.app)
+
+    # 聊天产生内容 → fallback 摘要为首条消息
+    client.post('/chat', json={'message': 'hello rename me'})
+    items = client.get('/sessions').json()
+    assert items[0]['summary'].startswith('hello rename me')
+    assert items[0]['title'] is None
+
+    # 改名（非当前会话也可以：先新建一个并切走，再改回 web 的名字）
+    fresh = client.post('/sessions/new').json()
+    resp = client.post(f"/sessions/{fresh['id']}/title", json={'title': '我的自定义名字'})
+    assert resp.status_code == 200
+    assert resp.json()['source'] == 'user'
+    by_id = {s['id']: s for s in client.get('/sessions').json()}
+    assert by_id[fresh['id']]['summary'] == '我的自定义名字'
+    assert by_id[fresh['id']]['title_source'] == 'user'
+
+    # 标题 = 日志投影：切回该会话后，日志里存在 session/title 事件（可重放）
+    switched = client.post(f"/sessions/{fresh['id']}/switch").json()
+    assert switched['id'] == fresh['id']
+    log = (tmp_path / 'sess' / f"{fresh['id']}.jsonl").read_text(encoding='utf-8')
+    assert '"type": "session/title"' in log
+    assert '"source": "user"' in log
+
+    # 空标题拒绝
+    assert client.post(f"/sessions/{fresh['id']}/title", json={'title': '   '}).status_code == 400
+
+
+def test_auto_title_trigger_conditions(tmp_path):
+    """自动起名只在 真模型 + 无标题 + 首条消息 时触发（fake 一律跳过）。"""
+    import web_app
+    from session import Session
+
+    web_app.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
+    s = Session(id='x')
+    # fake 模式：不自动起名（没有真模型可调）
+    assert web_app._should_auto_title(s) is False
+
+    # 已有标题：不重复起名
+    from argparse import Namespace
+    web_app._args = Namespace(
+        fake=False, model='m', workspace=tmp_path, hide_reasoning=False,
+        session='x', sessions=str(tmp_path / 'sess'), prompt='', resume=False, verbose=False,
+    )
+    s.append('session/title', {'title': 't', 'source': 'user'})
+    assert web_app._should_auto_title(s) is False
+
+    # 已有用户消息（resume 继续对话）：不再自动起名（标题应基于第一条）
+    s2 = Session(id='x')
+    s2.append('user/message', create_user_message([TextBlock(text='hi')]), surface_op='append')
+    assert web_app._should_auto_title(s2) is False
+
+    # 干净会话 + 真模型：触发
+    s3 = Session(id='x')
+    assert web_app._should_auto_title(s3) is True
+
+
+def test_session_title_event_is_trace_not_surface(tmp_path):
+    """session/title 是痕迹事件：不进模型记忆（derive_messages），但重放保留。"""
+    import web_app
+    from session import Session
+    from persistence import save_event
+
+    web_app.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
+    s = Session(id='t')
+    s.append('session/title', {'title': '我的标题', 'source': 'user'})
+    assert [e.type for e in s.events] == ['session/title']
+    assert s.derive_messages() == []  # 不污染模型可见消息
+
+    # 持久化 → 新会话重放（adopt）仍能看到标题事件
+    path = tmp_path / 'sess' / 't.jsonl'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    for e in s.events:
+        save_event(path, e)
+    restored = Session(id='t')
+    for e in load_events(path):
+        restored.adopt(e)
+    titles = [e for e in restored.events if e.type == 'session/title']
+    assert titles and titles[-1].data['title'] == '我的标题'

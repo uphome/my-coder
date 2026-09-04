@@ -4,7 +4,8 @@
 build_tools/loop 一行不改），session.on_event 订阅事件，经 asyncio.Queue
 桥接成 SSE 流推给浏览器。CLI 是终端投影，Web 是 DOM 投影，同一份日志。
 
-功能：多会话（左侧栏列出 .sessions/*.jsonl，可新建/切换/删除）+ 流式输出 +
+功能：多会话（左侧栏列出 .sessions/*.jsonl，可新建/切换/删除/改名）+
+自动会话标题（对齐 harness session-title 的三级来源）+ 流式输出 +
 思考折叠 + 工具卡片（变体图标/状态点/摘要，仿 harness ui-tool）+ Markdown 渲染 +
 approval 按钮（钩子推送 approval_request 到 SSE，浏览器批准/拒绝）。"""
 from __future__ import annotations
@@ -19,9 +20,11 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from llm import LlmRequest
 from persistence import load_events
 from session import Session
 from hooks import Hooks
+from values import TextBlock, create_user_message
 
 from main import build_agent, load_env
 
@@ -45,6 +48,93 @@ DONE_MARKER = object()
 # 工具结果预览上限：展开卡片想看到全文（对齐 CLI 的 BASH_MAX_OUTPUT_CHARS 量级），
 # 只在真正超长时截断；chars/lines/truncated 让前端能显示统计与截断徽标。
 RESULT_MAX_CHARS = 20000
+
+# ---- 会话标题（对齐 harness session-title 的三级来源设计）----
+# 日志里一条 session/title 事件（data: {'title', 'source'}）就是标题——
+# 标题 = 日志投影，恢复/列表都从日志读，不存在第二份状态源。
+# 来源：'user'（手动改名，优先级最高）/ 'auto'（LLM 自动起名）。
+# 'fallback' 不落日志：没有标题事件时，列表显示首条用户消息摘要（现有逻辑）。
+TITLE_MAX_CHARS = 40
+TITLE_SYSTEM = (
+    'You are a conversation titler. Given the first user message of a coding-agent '
+    'session, reply with ONLY a short title (same language as the message, under '
+    '12 words). No quotes, no punctuation, no explanation.'
+)
+AUTO_TITLE_TIMEOUT_S = 25  # 起名失败静默降级（fallback 摘要兜底），别拖垮主流程
+
+
+def _clean_title(raw: str) -> str:
+    """模型返回的标题规范化：去引号/多余空白/尾标点，限长。空则视为无标题。"""
+    title = (raw or '').strip().strip('"\'“”‘’「」『』').strip()
+    title = ' '.join(title.split()).strip(' .,;:。，；：！!？?、-—')
+    return title[:TITLE_MAX_CHARS]
+
+
+def _should_auto_title(session: Session) -> bool:
+    """首条消息后是否值得自动起名：真模型 + 还没有标题 + 尚无任何用户消息。
+
+    一旦会话已有 user/message（resume 继续对话）就不再自动起名——
+    标题应基于"第一条"消息，晚了不如让用户手动改。
+    """
+    if _args is None or _args.fake:
+        return False
+    if any(e.type == 'session/title' for e in session.events):
+        return False
+    if any(e.type == 'user/message' for e in session.events):
+        return False
+    return True
+
+
+async def _auto_title(session: Session, first_text: str) -> None:
+    """自动起名：复用 agent 的 LLM 客户端发一个小请求，结果落 session/title。
+
+    后台任务、与主对话并发互不干扰；任何失败（网络/超时/空输出）都静默
+    跳过——列表继续显示 fallback 摘要，起名失败绝不打扰主流程。
+    """
+    if _agent is None:
+        return
+    try:
+        request = LlmRequest(
+            system=TITLE_SYSTEM,
+            model=_args.model,
+            messages=(create_user_message([TextBlock(text=first_text[:400])]),),
+            max_tokens=30,
+        )
+        parts: list[str] = []
+
+        async def collect() -> None:
+            async for chunk in _agent.llm.stream(request):
+                if chunk.text:
+                    parts.append(chunk.text)
+                if chunk.finish_reason:
+                    break
+
+        await asyncio.wait_for(collect(), timeout=AUTO_TITLE_TIMEOUT_S)
+        title = _clean_title(''.join(parts))
+        if not title:
+            return
+        session.append('session/title', {'title': title, 'source': 'auto'})
+    except Exception as error:  # noqa: BLE001 - 起名失败不影响主流程
+        print(f'[title] auto-title skipped: {type(error).__name__}: {error}', flush=True)
+
+
+def _append_title(sid: str, title: str, source: str) -> None:
+    """往一个会话追加 session/title 事件（标题 = 日志投影，改完即落盘）。
+
+    目标是当前会话直接用全局 session；否则临时重放目标日志 + bind_store
+    append（不切换当前会话——从列表里改别的会话名是允许的）。
+    """
+    if sid == _current_sid and _session is not None:
+        _session.append('session/title', {'title': title, 'source': source})
+        return
+    path = (_sessions_dir or Path('.sessions')) / f'{sid}.jsonl'
+    if not path.exists():
+        raise HTTPException(404, f'session {sid!r} not found')
+    temp = Session(id=sid)
+    for event in load_events(path):
+        temp.adopt(event)
+    temp.bind_store(path)
+    temp.append('session/title', {'title': title, 'source': source})
 
 
 def _result_stats(content: str) -> tuple[int, int]:
@@ -124,15 +214,22 @@ def _validate_sid(sid: str) -> None:
 
 
 def _scan_sessions() -> list[dict]:
-    """扫描会话目录：id / 事件数 / 更新时间 / 首条用户消息摘要。"""
+    """扫描会话目录：id / 事件数 / 更新时间 / 标题 / 首条用户消息摘要。
+
+    磁盘行内快扫（不整包解析）：标题 = 最后一条 session/title 事件的 title
+    （user 手动 > auto 自动，按追加顺序后者覆盖）；无标题事件时列表显示
+    首条 user/message 摘要作为 fallback（对齐 harness 的三级来源）。
+    """
     items: list[dict] = []
     for path in sorted((_sessions_dir or Path('.sessions')).glob('*.jsonl')):
         events = 0
         summary = ''
+        title = ''
+        title_source = ''
         with path.open(encoding='utf-8') as fh:
             for line in fh:
                 events += 1
-                # 找第一条 user/message 当列表摘要（磁盘行内快扫，不整包解析）
+                # 找第一条 user/message 当 fallback 摘要
                 if not summary and '"type": "user/message"' in line:
                     try:
                         data = (json.loads(line).get('data') or {}).get('$message') or {}
@@ -142,11 +239,21 @@ def _scan_sessions() -> list[dict]:
                                 break
                     except (TypeError, ValueError, KeyError):
                         pass
+                # 最后一条 session/title 事件即当前标题（后者覆盖前者）
+                if '"type": "session/title"' in line:
+                    try:
+                        data = (json.loads(line).get('data') or {}).get('$dict') or {}
+                        title = data.get('title', '')
+                        title_source = data.get('source', '')
+                    except (TypeError, ValueError, KeyError):
+                        pass
         items.append({
             'id': path.stem,
             'events': events,
             'updated': path.stat().st_mtime,
-            'summary': summary or '(empty)',
+            'title': title or None,
+            'title_source': title_source or None,
+            'summary': title or summary or '(empty)',  # 标题优先，摘要兜底
         })
     items.sort(key=lambda item: item['updated'], reverse=True)
     return items
@@ -266,6 +373,22 @@ def delete_session(sid: str) -> dict:
     return {'deleted': sid}
 
 
+@app.post('/sessions/{sid}/title')
+async def session_title(sid: str, request: Request) -> dict:
+    """手动改名：校验后 append session/title（source='user'），覆盖自动标题。
+
+    目标会话不要求是当前会话（列表里改任意会话名）；标题即日志投影。
+    """
+    _check_init()
+    _validate_sid(sid)
+    body = await request.json()
+    title = _clean_title(str(body.get('title') or ''))
+    if not title:
+        raise HTTPException(400, 'title must not be empty')
+    _append_title(sid, title, source='user')
+    return {'id': sid, 'title': title, 'source': 'user'}
+
+
 @app.get('/history')
 def history() -> list[dict]:
     _check_init()
@@ -284,10 +407,19 @@ async def chat(request: Request) -> StreamingResponse:
     queue: asyncio.Queue = asyncio.Queue()
     unsubscribe = _session.on_event(lambda event: queue.put_nowait(event))
 
+    # 首条消息才触发自动起名：标题 = 日志投影，起名失败静默降级 fallback
+    need_title = _should_auto_title(_session)
+    if need_title:
+        session_for_title = _session
+
     async def run_agent() -> None:
         try:
             _agent.followup(message)
             await _agent.when_idle()
+            if need_title:
+                # 回合跑完再起名：标题基于首条消息全文，此刻消息已在日志里；
+                # 后台任务与响应返回解耦，浏览器回合结束后稍等再刷列表即可看到
+                asyncio.create_task(_auto_title(session_for_title, message))
         finally:
             await queue.put(DONE_MARKER)
 
