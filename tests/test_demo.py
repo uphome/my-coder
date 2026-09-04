@@ -907,3 +907,121 @@ async def test_identity_prompt_is_neutral(tmp_path):
     for banned in ('DeepSeek Harness', 'powered by', 'Python demo',
                    'Claude', 'Anthropic', 'GPT', 'OpenAI'):
         assert banned not in system, f'identity must not mention {banned!r}'
+
+def test_todo_write_folds_and_injects_into_prompt(tmp_path):
+    """todo_write 全链路：写整表 → 折叠读回 → 作为 live 段注入下次请求的 system。"""
+    import asyncio
+
+    from agent_demo.prompt import PromptRegistry
+    from agent_demo.registry import ToolSpec
+    from agent_demo.session import Session
+    from agent_demo.tools import build_tools
+    from agent_demo.tools.todo import fold_todos
+
+    session = Session(id='todo-test')
+    registry = build_tools(tmp_path)
+    spec: ToolSpec = registry._tools['todo_write']
+
+    class FakeAgent:  # todo_write executor 需要 agent.session 落日志
+        def __init__(self, s): self.session = s
+    agent = FakeAgent(session)
+
+    # 1) 规划 3 步：一步 in_progress
+    out = asyncio.run(spec.execute({'todos': [
+        {'content': '读代码', 'status': 'in_progress'},
+        {'content': '写修复', 'status': 'pending'},
+        {'content': '跑测试', 'status': 'pending'},
+    ]}, agent, None))
+    assert out.is_error is False and '2 pending, 1 in progress' in out.content
+
+    # 2) 折叠读回 = 最后一次 todo/write 快照
+    folded = fold_todos(session)
+    assert [t['content'] for t in folded] == ['读代码', '写修复', '跑测试']
+    assert folded[0]['status'] == 'in_progress'
+
+    # 3) 事件是痕迹（非 surface）：不进模型记忆，但可重放
+    assert [e.type for e in session.events] == ['todo/write']
+    assert session.derive_messages() == []
+
+    # 4) prompt live 段注入：assemble 一次，两次 render 拿到两次新鲜清单
+    prompt = PromptRegistry()
+    prompt.section('todo:state', 0, lambda ctx: _fmt_todos(ctx['agent']))
+    prompt.section('identity', -10, 'static preamble')
+    prompt.variable('x', lambda ctx: 'v')
+    from agent_demo.tools.todo import fold_todos as _fold
+    def _fmt_todos(agent):
+        todos = _fold(agent.session)
+        if not todos:
+            return ''
+        return 'TODOS: ' + '; '.join(f"{t['content']}={t['status']}" for t in todos)
+    assembly = prompt.assemble({'agent': type('A', (), {'session': session})()})
+    assert 'TODOS: 读代码=in_progress; 写修复=pending; 跑测试=pending' in prompt.render(assembly, {'agent': type('A', (), {'session': session})()})
+
+    # 5) 更新清单（完成一项）→ 下次 render 看到新状态（live 段不锁死在快照）
+    asyncio.run(spec.execute({'todos': [
+        {'content': '读代码', 'status': 'completed'},
+        {'content': '写修复', 'status': 'in_progress'},
+    ]}, agent, None))
+    rendered = prompt.render(assembly, {'agent': type('A', (), {'session': session})()})
+    assert '读代码=completed' in rendered and '写修复=in_progress' in rendered
+    assert '跑测试' not in rendered
+
+
+def test_todo_write_rejects_bad_inputs(tmp_path):
+    """todo 校验降级为 is_error（不炸循环）：空 content / 重复 / 多 in_progress。"""
+    import asyncio
+
+    from agent_demo.tools import build_tools
+
+    registry = build_tools(tmp_path)
+    spec = registry._tools['todo_write']
+    cases = [
+        [{'content': '  ', 'status': 'pending'}],                 # 空 content
+        [{'content': 'a', 'status': 'pending'}, {'content': 'a', 'status': 'completed'}],  # 重复
+        [{'content': 'a', 'status': 'in_progress'}, {'content': 'b', 'status': 'in_progress'}],  # 双活动
+    ]
+    for todos in cases:
+        out = asyncio.run(spec.execute({'todos': todos}, None, None))
+        assert out.is_error is True, f'should reject {todos}'
+
+
+@pytest.mark.asyncio
+async def test_todo_live_injection_across_steps(tmp_path):
+    """todo 的 live 注入在真实 loop 生效：第一步规划 → 第二步请求的 system 含清单。
+
+    FakeLlm 两步：第一步 todo_write（规划 2 项），第二步纯文本。两步是两次
+    模型请求（loop 的 while：工具执行后回到顶部再请求）——第二步的
+    request/header system 必须含第一步写的 todo（live 段每次 render 重新折叠）。
+    """
+    from argparse import Namespace
+
+    from agent_demo.factory import build_agent
+    from agent_demo.llm import FakeLlm
+    from agent_demo.session import Session
+
+    session = Session(id='todo-live')
+    args = Namespace(fake=True, model='fake-model', workspace=tmp_path, hide_reasoning=False,
+                     session='id', sessions=str(tmp_path), prompt='x', resume=False, verbose=False)
+    llm = FakeLlm(script=[
+        {
+            'tool_calls': [{'id': 't1', 'name': 'todo_write', 'arguments': json.dumps({
+                'todos': [
+                    {'content': 'step one', 'status': 'in_progress'},
+                    {'content': 'step two', 'status': 'pending'},
+                ]})}],
+            'finish_reason': 'tool_calls',
+        },
+        {'text': 'planned done', 'finish_reason': 'stop'},
+    ])
+    agent = build_agent(session, args, {'reasoning_started': False, 'request_no': 0, 'tool_no': 0})
+    agent.llm = llm  # 替换成两步脚本
+    agent.followup('do the multi-step work')
+    await agent.when_idle()
+
+    # 两次模型请求，system 各异：第二次必须带第一次规划的 todo 清单
+    systems = [e.data['system'] for e in session.events if e.type == 'request/header']
+    assert len(systems) == 2, f'expected 2 model requests, got {len(systems)}'
+    assert 'step one' not in systems[0]          # 规划前：无清单
+    assert 'Current todo list' in systems[1]      # 规划后：live 段注入
+    assert 'step one=in_progress' in systems[1] or 'step one' in systems[1]
+    assert 'step two' in systems[1]

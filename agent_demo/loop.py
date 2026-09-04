@@ -163,7 +163,9 @@ async def _run_step(agent, turn: int, step: int, assembly: dict) -> str:
         request = LlmRequest(
             provider=provider,
             model=model,
-            system=agent.prompt.render(assembly),
+            # ctx 给 live 段（todo 清单）每次请求重新折叠——规划 → 执行 → 再请求
+            # 时，system 里的清单是执行过后的最新状态
+            system=agent.prompt.render(assembly, ctx={'agent': agent}),
             messages=tuple(session.derive_messages()),
             tools=tuple(agent.tools.schemas()),
             max_tokens=config.get('max_tokens') or agent.options.get('max_tokens'),

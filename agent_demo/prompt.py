@@ -49,21 +49,30 @@ class PromptRegistry:
         """组装一次：求值所有变量 + 按 order 排序 sections。
 
         每个回合开头调用一次（loop.run_turn），得到本回合的提示词快照；
-        之后 render 只是纯字符串拼接，不再求值。
+        render 时：静态段纯插值，live 段（text 是 ctx->str 提供者）在
+        每次 render 重新求值——todo 状态这类"随工具执行而变化"的上下文
+        不能锁死在回合快照里，必须每次请求时新鲜折叠。
         """
         variables = {}
         for name, provider in self._variables.items():
             variables[name] = provider(ctx) if callable(provider) else provider
         sections = []
         for name, (_, text) in sorted(self._sections.items(), key=lambda item: (item[1][0], item[0])):
-            sections.append({'name': name, 'text': text(ctx) if callable(text) else text})
+            sections.append({'name': name, 'text': text, 'live': callable(text)})
         return {'sections': sections, 'variables': variables}
 
-    def render(self, assembly: dict) -> str:
-        """把组装结果折叠成最终 system 提示词：逐个 section 插值，非空段用空行连接。"""
+    def render(self, assembly: dict, ctx=None) -> str:
+        """把组装结果折叠成最终 system 提示词。
+
+        - live 段（如当前 todo 清单）在每次渲染时用 ctx 求值——同一回合内
+          多次模型请求（规划 → 执行工具 → 再请求）看到的是最新状态；
+        - 静态段按已固化的文本做 {{变量}} 插值；
+        - 空段自动省略（无 todo 时不占 token）。
+        """
         parts = []
         for section in assembly['sections']:
-            rendered = _interpolate(section['text'], assembly['variables'], f"section {section['name']!r}")
+            text = section['text'](ctx) if section['live'] else section['text']
+            rendered = _interpolate(text, assembly['variables'], f"section {section['name']!r}")
             if rendered:
                 parts.append(rendered)
         return '\n\n'.join(parts)

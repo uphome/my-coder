@@ -16,6 +16,7 @@ from .llm import FakeLlm, OpenAiCompatibleLlm
 from .prompt import PromptRegistry
 from .session import Session
 from .tools import build_tools
+from .tools.todo import fold_todos
 from .ui import render_event
 
 
@@ -33,10 +34,26 @@ def load_env(path: Path) -> None:
             os.environ[key] = value.strip()
 
 
+def _todo_context(session) -> str:
+    """当前 todo 清单 → prompt 文本（无清单返回空，render 自动省略该段）。
+
+    fold_todos 折叠日志里最后一次 todo/write 快照——todo 是"模型跨回合的
+    记忆锚点"：turn 1 规划、每步更新，turn 2（下个用户请求）从上下文看到
+    自己进行到哪，不会重复规划。空清单不占 token。
+    """
+    todos = fold_todos(session)
+    if not todos:
+        return ''
+    lines = [f'  {i}. [{t.get("status", "pending")}] {t.get("content", "")}'
+             for i, t in enumerate(todos, start=1)]
+    return 'Current todo list (rewrite it with todo_write to update):\n' + '\n'.join(lines)
+
+
 def build_agent(session: Session, args, ui_state: dict, hooks=None) -> Agent:
     prompt = PromptRegistry()
     prompt.section('identity', -100, 'You are {{model}}, a coding agent that helps with programming tasks. Read, search, edit, and run commands in the workspace to help the user — verify your work instead of guessing. Never claim to be a different AI model or company than {{model}}; if asked, state the model name exactly as given here.')
     prompt.section('persona', 0, 'You run on the {{model}} model. Your workspace is {{workspace}}; tool paths resolve relative to it, and nothing outside it is readable or writable.\nVerify work by running code or tests. Keep answers brief.')
+    prompt.section('todo:state', 100, lambda ctx: _todo_context(ctx['agent'].session))
     prompt.section('tool:todo', 110, 'Use todo_write to plan multi-step work before you start.')
     prompt.section('tool:bash', 105, 'Use bash to verify work (run tests, git status). Output is capped: redirect large outputs to a file and read it with read_file. In this repo run tests with "conda run -n agent-demo python -m pytest -q".')
     prompt.variable('model', lambda ctx: ctx['agent'].options.get('model', ''))
