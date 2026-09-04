@@ -1056,3 +1056,42 @@ def test_web_todo_dock_payloads(tmp_path):
     assert fresh['todos'] == []
     switched = client.post('/sessions/web/switch').json()
     assert [t['content'] for t in switched['todos']] == ['读代码', '写修复', '跑测试']
+
+
+def test_todo_fold_clears_on_turn_start(tmp_path):
+    """todo = 当前回合的计划：turn/end 保留完成清单，下个 turn/start 清空。"""
+    from agent_demo.session import Session
+    from agent_demo.tools.todo import fold_todos
+
+    s = Session(id='t')
+
+    # 回合内：写清单 → 一直可见（无 turn/start 打断）
+    s.append('turn/start', {'turn': 1})
+    s.append('todo/write', {'todos': [
+        {'content': 'a', 'status': 'completed'},
+        {'content': 'b', 'status': 'completed'},
+    ]})
+    s.append('turn/end', {'turn': 1, 'reason': 'completed'})
+    folded = fold_todos(s)
+    assert [t['content'] for t in folded] == ['a', 'b']  # 回合结束保留（收尾展示全勾）
+
+    # 下个回合开始：清空——todo 不带进新任务
+    s.append('turn/start', {'turn': 2})
+    assert fold_todos(s) is None
+
+    # 新回合里再规划 → 恢复
+    s.append('todo/write', {'todos': [{'content': 'c', 'status': 'pending'}]})
+    assert [t['content'] for t in fold_todos(s)] == ['c']
+
+    # resume 重放语义一致：adopt 同样的序列得到同样的折叠
+
+    from agent_demo.persistence import save_event
+    from agent_demo.session import Session as S2
+    path = tmp_path / 'turn.jsonl'
+    for e in s.events:
+        save_event(path, e)
+    restored = S2(id='t')
+    from agent_demo.persistence import load_events
+    for e in load_events(path):
+        restored.adopt(e)
+    assert [t['content'] for t in fold_todos(restored)] == ['c']

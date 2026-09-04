@@ -66,11 +66,20 @@ def fold_todos(session) -> list | None:
 
     这是 todo 的"读回"通道——和 derive_messages 一样是纯函数投影：
     同一段日志永远折叠出同一张表（resume 重放后清单自动恢复）。
+
+    对齐 harness 的 todos projection 折叠规则：
+    - `todo/write` → 整表替换（last-write-wins）
+    - `turn/start` → 清空（null）——todo 是"当前回合的工作计划"：
+      turn/end 保留完成清单可见（收尾展示全勾），但下个回合（用户发
+      新消息）开始就归零，dock / prompt 不再携带上个任务的旧清单
+    - 其他事件 → 保持现状
     """
-    latest = None
+    latest: list | None = None
     for event in session.events:
         if event.type == 'todo/write':
             latest = event.data.get('todos') if isinstance(event.data, dict) else None
+        elif event.type == 'turn/start':
+            latest = None
     return latest
 
 
