@@ -20,17 +20,20 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from llm import LlmRequest
-from persistence import load_events
-from session import Session
-from hooks import Hooks
-from values import TextBlock, create_user_message
+from .llm import LlmRequest
+from .persistence import load_events
+from .session import Session
+from .hooks import Hooks
+from .values import TextBlock, create_user_message
 
-from main import build_agent, load_env
+from .factory import build_agent, load_env
+
+# 仓库根 = 包上一级：静态资源（web/）与 .env 都在根
+_ROOT = Path(__file__).resolve().parent.parent
 
 app = FastAPI(title='agent-demo web')
 # 前端依赖（marked / DOMPurify 本地 vendor，免 CDN）
-app.mount('/vendor', StaticFiles(directory=Path(__file__).parent / 'web' / 'vendor'), name='vendor')
+app.mount('/vendor', StaticFiles(directory=_ROOT / 'web' / 'vendor'), name='vendor')
 
 _sessions_dir: Path | None = None
 _args: argparse.Namespace | None = None
@@ -346,7 +349,7 @@ def message_to_payload(message) -> dict:
 
 @app.get('/')
 def index() -> FileResponse:
-    return FileResponse(Path(__file__).parent / 'web' / 'index.html')
+    return FileResponse(_ROOT / 'web' / 'index.html')
 
 
 @app.get('/meta')
@@ -495,7 +498,7 @@ def main() -> None:
     parser.add_argument('--host', default='127.0.0.1', help='bind host (default 127.0.0.1)')
     parser.add_argument('--port', default=8000, type=int, help='bind port (default 8000)')
     args = parser.parse_args()
-    load_env(Path(__file__).parent / '.env')  # 与 CLI 一致：注入 .env 的 API key
+    load_env(_ROOT / '.env')  # 与 CLI 一致：注入 .env 的 API key
     init_web(args.workspace, fake=args.fake, model=args.model)
     import uvicorn
     uvicorn.run(app, host=args.host, port=args.port)

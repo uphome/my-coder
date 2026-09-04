@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from values import SessionEvent, event_from_json, event_to_json
+from .values import SessionEvent, event_from_json, event_to_json
 
 
 def save_event(path: Path, event: SessionEvent) -> None:

@@ -6,8 +6,8 @@
 """
 from __future__ import annotations
 
-from session import Session
-from values import Message
+from .session import Session
+from .values import Message
 
 # 两个队列：
 # next-turn=普通输入（等本轮干完再处理），

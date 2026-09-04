@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable, Optional
 
-from values import Message
+from .values import Message
 
 
 @dataclass(frozen=True)

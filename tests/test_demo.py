@@ -5,16 +5,16 @@ import json
 
 import pytest
 
-from agent import Agent
-from hooks import Hooks, PreStepContext, RequestErrorContext
-from inbox import Inbox
-from llm import FakeLlm, LlmRequest, StreamChunk, build_payload, _delta_reasoning, _to_wire_messages
-from main import build_tools
-from persistence import load_events, save_event
-from prompt import PromptRegistry
-from session import Session
-from tools import ToolOutcome, ToolRegistry, ToolSpec
-from values import (
+from agent_demo.agent import Agent
+from agent_demo.hooks import Hooks, PreStepContext, RequestErrorContext
+from agent_demo.inbox import Inbox
+from agent_demo.llm import FakeLlm, LlmRequest, StreamChunk, build_payload, _delta_reasoning, _to_wire_messages
+from agent_demo.tools import build_tools
+from agent_demo.persistence import load_events, save_event
+from agent_demo.prompt import PromptRegistry
+from agent_demo.session import Session
+from agent_demo.registry import ToolOutcome, ToolRegistry, ToolSpec
+from agent_demo.values import (
     TextBlock,
     ToolCallBlock,
     ToolResultBlock,
@@ -711,7 +711,7 @@ async def test_approval_gate_approves_and_skips(tmp_path):
 
 
 def test_web_chat_streams_events(tmp_path):
-    import web_app
+    from agent_demo import web_app
     from fastapi.testclient import TestClient
 
     # SSE 流全链路（--fake 离线验证；sessions_dir 隔离，不污染真实会话）
@@ -736,7 +736,7 @@ def test_web_chat_streams_events(tmp_path):
 
 
 def test_web_session_management(tmp_path):
-    import web_app
+    from agent_demo import web_app
     from fastapi.testclient import TestClient
 
     web_app.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
@@ -780,7 +780,7 @@ def test_web_session_management(tmp_path):
 
 def test_web_session_title_endpoint(tmp_path):
     """手动改名：append session/title（user）→ 列表 summary 以标题优先，重放可恢复。"""
-    import web_app
+    from agent_demo import web_app
     from fastapi.testclient import TestClient
 
     web_app.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
@@ -814,8 +814,8 @@ def test_web_session_title_endpoint(tmp_path):
 
 def test_auto_title_trigger_conditions(tmp_path):
     """自动起名只在 真模型 + 无标题 + 首条消息 时触发（fake 一律跳过）。"""
-    import web_app
-    from session import Session
+    from agent_demo import web_app
+    from agent_demo.session import Session
 
     web_app.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
     s = Session(id='x')
@@ -843,9 +843,9 @@ def test_auto_title_trigger_conditions(tmp_path):
 
 def test_session_title_event_is_trace_not_surface(tmp_path):
     """session/title 是痕迹事件：不进模型记忆（derive_messages），但重放保留。"""
-    import web_app
-    from session import Session
-    from persistence import save_event
+    from agent_demo import web_app
+    from agent_demo.session import Session
+    from agent_demo.persistence import save_event
 
     web_app.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
     s = Session(id='t')
@@ -866,7 +866,7 @@ def test_session_title_event_is_trace_not_surface(tmp_path):
 
 def test_auto_title_rejects_verbatim_copy():
     """自动起名逐字复读首条消息 → 判定为失败（不落 auto 事件，退回 fallback）。"""
-    import web_app
+    from agent_demo import web_app
     assert web_app._is_verbatim_copy('你好', '你好') is True
     assert web_app._is_verbatim_copy('总结README', '请帮我总结README') is True   # 子串
     assert web_app._is_verbatim_copy('代码审查', '请帮我审查这段代码') is False  # 概括 ≠ 复读
@@ -879,16 +879,15 @@ async def test_identity_prompt_is_neutral(tmp_path):
     之前 identity 写的是 'powered by DeepSeek Harness (Python demo)'，模型
     会照抄自我介绍——作品集项目不该把功劳归给被复刻对象，锁住文案防回归。
     """
-    import main
+    from agent_demo import factory
     from argparse import Namespace
-    from session import Session
-    from values import create_user_message, TextBlock
+    from agent_demo.session import Session
+    from agent_demo.values import create_user_message, TextBlock
 
-    main.load_env = lambda path: None  # fake 模式不需要 .env
     args = Namespace(fake=True, model='fake-model', workspace=tmp_path, hide_reasoning=False,
                      session='id', sessions=str(tmp_path), prompt='x', resume=False, verbose=False)
     session = Session(id='id')
-    agent = main.build_agent(session, args, {'reasoning_started': False, 'request_no': 0, 'tool_no': 0})
+    agent = factory.build_agent(session, args, {'reasoning_started': False, 'request_no': 0, 'tool_no': 0})
     agent.followup('hi')
     await agent.when_idle()
     headers = [e.data for e in session.events if e.type == 'request/header']

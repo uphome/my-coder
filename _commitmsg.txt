@@ -1,0 +1,14 @@
+﻿agent-demo: 包化重构——平铺 → agent_demo/ 包结构（求职作品级工程形态）
+
+NEXT_STEPS 蓝图落地（分步路线第 1 步）：
+- 框架文件迁入 agent_demo/，import 改包内相对（agent/loop/session/
+  inbox/prompt/values/persistence/hooks/llm/registry）
+- tools.py → agent_demo/registry.py（ToolSpec/ToolRegistry/ToolOutcome
+  改名避让新 tools/ 包同名）
+- 应用内容拆出 main.py：tools/（file_io/search/shell/todo +
+  build_tools 组装）、sandbox.py（路径沙箱）、ui.py（终端渲染）、
+  factory.py（build_agent/load_env，CLI 与 Web 共用）、constants.py
+  （预算/颜色/demo 脚本）；main.py → agent_demo/cli.py（瘦身入口）
+- web_app.py 迁入包：静态路径/web/.env 改用包上一级锚点
+- show_memory.py / tests 改包导入；38 测试全绿
+- 双入口验证：python -m agent_demo.cli / python -m agent_demo.web_app

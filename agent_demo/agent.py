@@ -10,13 +10,13 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from hooks import Hooks
-from inbox import Inbox, InboxNotifications
-from loop import run_turn
-from prompt import PromptRegistry
-from session import Session
-from tools import ToolRegistry
-from values import Message, TextBlock, create_user_message
+from .hooks import Hooks
+from .inbox import Inbox, InboxNotifications
+from .loop import run_turn
+from .prompt import PromptRegistry
+from .session import Session
+from .registry import ToolRegistry
+from .values import Message, TextBlock, create_user_message
 
 log = logging.getLogger('agent')
 
