@@ -330,6 +330,42 @@ main { flex: 1; overflow-y: auto; overflow-anchor: auto; }
 .approval-buttons .reject { background: #b23b35; }
 
 /* ============ 底部输入区 ============ */
+/* ============ 常驻 todo dock（有清单才显示；输入框上方） ============ */
+#todo-dock {
+  max-width: 840px; margin: 0 auto; padding: 0 22px 4px;
+}
+.todo-panel {
+  background: var(--bg1); border: 1px solid var(--border);
+  border-radius: var(--r-m); overflow: hidden;
+  box-shadow: var(--shadow-card);
+}
+.todo-panel-head {
+  width: 100%; display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px; background: none; border: none; color: var(--text-2);
+  font-size: 12.5px; cursor: pointer; text-align: left;
+  transition: color .12s ease, background .12s ease;
+}
+.todo-panel-head:hover { color: var(--text-1); background: var(--bg-hover); }
+.todo-panel-head .todo-ico { color: var(--v-todo); display: inline-flex; }
+.todo-panel-head .todo-title { font-weight: 600; }
+.todo-panel-head .todo-progress { margin-left: auto; font-size: 11px; color: var(--text-3); font-family: var(--font-mono); }
+.todo-panel-head .todo-progress .p-active { color: var(--accent); }
+.todo-panel-head .todo-progress .p-done { color: var(--ok); }
+.todo-panel-head .todo-chev { display: inline-flex; transition: transform .18s ease; font-size: 10px; color: var(--text-3); }
+.todo-panel.open .todo-chev { transform: rotate(180deg); }
+.todo-panel-list { display: none; }
+.todo-panel.open .todo-panel-list { display: block; }
+.todo-list { list-style: none; padding: 2px 10px 10px; display: flex; flex-direction: column; gap: 5px; }
+.todo-item { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--text-1); }
+.todo-item .glyph { width: 14px; height: 14px; flex-shrink: 0; }
+.todo-item[data-status="completed"] .content { color: var(--text-3); text-decoration: line-through; }
+/* 状态点：completed 绿勾 / in_progress 蓝转环 / pending 虚线 */
+.todo-item .glyph svg { display: block; }
+.glyph-done { color: var(--ok); }
+.glyph-run { color: var(--accent); animation: spin 1.2s linear infinite; transform-origin: 50% 50%; }
+.glyph-wait { color: var(--text-3); }
+@keyframes spin { to { transform: rotate(360deg); } }
+
 footer { padding: 10px 22px 18px; background: var(--bg1); border-top: 1px solid var(--border); }
 #input-row { max-width: 840px; margin: 0 auto; display: flex; gap: 8px; align-items: flex-end; }
 #input {
@@ -376,6 +412,7 @@ footer { padding: 10px 22px 18px; background: var(--bg1); border-top: 1px solid 
     <main id="messages">
       <div class="hint">选择一个会话，或新建会话开始对话。<br>模型可以读文件、搜索代码、执行命令；敏感操作需要你点「批准」。</div>
     </main>
+    <div id="todo-dock" hidden></div>
     <footer>
       <div id="input-row">
         <textarea id="input" rows="1" placeholder="给 agent 一个任务…" autofocus></textarea>
@@ -409,6 +446,7 @@ const stopBtn = document.getElementById('stop');
 const sessionListEl = document.getElementById('session-list');
 const newBtn = document.getElementById('new-btn');
 const modelLabel = document.getElementById('model-label');
+const todoDockEl = document.getElementById('todo-dock');
 
 let currentSid = 'web';       // 当前会话 id（服务端 init 默认 'web'）
 let busy = false;             // 请求进行中（禁发、显示停止）
@@ -417,6 +455,8 @@ let turnNo = 0;               // 回合计数（每条用户消息 = 新回合�
 let controller = null;
 let wsRoot = '';              // workspace 根（/meta 拉取，路径相对化显示用）
 let stickBottom = true;       // 用户是否贴着底部（智能滚动）
+let currentTodos = null;      // 当前 todo 清单（null = 无清单，dock 隐藏）
+let todoOpen = false;         // dock 是否展开（默认折叠）
 
 /* 当前助手消息节点（跨多个 chunk/tool 事件存活，直到回合结束或切换） */
 let cur = null;
@@ -780,6 +820,82 @@ function addToolResult(res) {
   stickIfNeeded();
 }
 
+/* ============ 常驻 todo dock（对齐 harness TodoDock：有清单才显示） ============ */
+const GLYPH_DONE = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><circle cx="7" cy="7" r="6.2" stroke="currentColor" stroke-width="1.2"/><path d="M4.2 7.2 L6.2 9.1 L9.8 5.1" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>';
+const GLYPH_RUN = '<svg class="glyph-run" width="14" height="14" viewBox="0 0 14 14" fill="none"><circle cx="7" cy="7" r="6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-dasharray="26 90"/></svg>';
+const GLYPH_WAIT = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><circle cx="7" cy="7" r="6.2" stroke="currentColor" stroke-width="1.2" stroke-dasharray="2.4 2.4"/></svg>';
+
+function todoCounts(todos) {
+  let done = 0, active = 0;
+  for (const t of todos) {
+    if (t.status === 'completed') done++;
+    else if (t.status === 'in_progress') active++;
+  }
+  return { done, active, pending: todos.length - done - active };
+}
+
+/* 渲染整个 dock：有清单显示、无清单隐藏；无状态 glyph 用 span 包 svg */
+function renderTodoDock() {
+  todoDockEl.innerHTML = '';
+  if (!currentTodos || !currentTodos.length) {
+    todoDockEl.hidden = true;
+    currentTodos = null;
+    return;
+  }
+  todoDockEl.hidden = false;
+  const panel = el('div', 'todo-panel' + (todoOpen ? ' open' : ''));
+  const head = el('button', 'todo-panel-head');
+  head.type = 'button';
+  const ico = document.createElement('span');
+  ico.className = 'todo-ico';
+  ico.innerHTML = svgIcon(ICON_PATHS.todo, ' width="14" height="14"');
+  const title = el('span', 'todo-title');
+  title.textContent = '待办';
+  const progress = el('span', 'todo-progress');
+  const counts = todoCounts(currentTodos);
+  const parts = [];
+  if (counts.done > 0) parts.push(`<span class="p-done">${counts.done} done</span>`);
+  if (counts.active > 0) parts.push(`<span class="p-active">${counts.active} active</span>`);
+  if (counts.pending > 0) parts.push(`<span>${counts.pending} pending</span>`);
+  progress.innerHTML = parts.join(' · ');
+  const chev = el('span', 'todo-chev');
+  chev.textContent = '▾';
+  head.appendChild(ico);
+  head.appendChild(title);
+  head.appendChild(progress);
+  head.appendChild(chev);
+  head.addEventListener('click', () => { todoOpen = !todoOpen; renderTodoDock(); });
+
+  const body = el('div', 'todo-panel-list');
+  const list = el('ul', 'todo-list');
+  for (const item of currentTodos) {
+    const li = el('li', 'todo-item');
+    li.dataset.status = item.status || 'pending';
+    const glyph = el('span', 'glyph');
+    const status = item.status || 'pending';
+    const glyphCls = status === 'completed' ? 'glyph-done' : (status === 'in_progress' ? 'glyph-run' : 'glyph-wait');
+    glyph.innerHTML = status === 'completed' ? `<span class="${glyphCls}">${GLYPH_DONE}</span>`
+      : status === 'in_progress' ? GLYPH_RUN
+      : `<span class="${glyphCls}">${GLYPH_WAIT}</span>`;
+    const content = el('span', 'content');
+    content.textContent = item.content || '';
+    content.title = item.content || '';
+    li.appendChild(glyph);
+    li.appendChild(content);
+    list.appendChild(li);
+  }
+  body.appendChild(list);
+  panel.appendChild(head);
+  panel.appendChild(body);
+  todoDockEl.appendChild(panel);
+}
+
+/* 会话切换 / 历史加载时恢复 dock */
+function setTodos(todos) {
+  currentTodos = (Array.isArray(todos) && todos.length) ? todos : null;
+  renderTodoDock();
+}
+
 /* ---------- 会话管理 ---------- */
 function clearMessages() {
   messagesEl.innerHTML = '';
@@ -894,6 +1010,7 @@ async function switchSession(sid) {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     currentSid = data.id;
+    setTodos(data.todos);
     renderHistory(data.history);
     loadSessions();
   } catch (e) { console.error('switch session failed', e); }
@@ -917,6 +1034,7 @@ async function newSession() {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     currentSid = data.id;
+    setTodos(data.todos);
     renderHistory(data.history);
     loadSessions();
   } catch (e) { console.error('new session failed', e); }
@@ -948,6 +1066,10 @@ function handle(payload) {
       break;
     case 'tool_result':
       addToolResult(payload);
+      break;
+    case 'todo_update':
+      // 常驻 dock 实时更新：模型每次重写清单，面板跟着变
+      setTodos(payload.todos);
       break;
     case 'approval_request':
       showApprovalCard(payload.id, payload.name, payload.arguments);
@@ -1085,7 +1207,9 @@ input.addEventListener('input', () => {
   await loadSessions();
   try {
     const res = await fetch('/history');
-    renderHistory(await res.json());
+    const data = await res.json();
+    setTodos(data.todos);
+    renderHistory(data.history);
   } catch (e) { console.error('load history failed', e); }
 })();
 </script>

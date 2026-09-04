@@ -26,6 +26,7 @@ from .hooks import Hooks
 from .llm import LlmRequest
 from .persistence import load_events
 from .session import Session
+from .tools.todo import fold_todos
 from .values import TextBlock, create_user_message
 
 # 仓库根 = 包上一级：静态资源（web/）与 .env 都在根
@@ -230,7 +231,11 @@ def _open_session(sid: str, *, allow_missing: bool) -> dict:
     hooks = Hooks()
     hooks.approval = web_approval   # Web 版确认：前端弹"批准/拒绝"按钮
     _agent = build_agent(session, _args, {'reasoning_started': False, 'request_no': 0, 'tool_no': 0}, hooks=hooks)
-    return {'id': sid, 'history': [message_to_payload(m) for m in session.derive_messages()]}
+    return {
+        'id': sid,
+        'history': [message_to_payload(m) for m in session.derive_messages()],
+        'todos': fold_todos(session) or [],  # 当前 todo 投影：切换会话时恢复 dock
+    }
 
 
 def _validate_sid(sid: str) -> None:
@@ -315,6 +320,10 @@ def event_to_payload(event) -> dict | None:
     if event.type == 'tool/result':
         block = event.data.content[0]
         return {'type': 'tool_result', **_result_payload(block)}
+    if event.type == 'todo/write':
+        # 常驻 dock 的实时更新：模型每次重写清单，前端面板跟着变
+        todos = event.data.get('todos') if isinstance(event.data, dict) else None
+        return {'type': 'todo_update', 'todos': todos or []}
     if event.type == 'turn/end':
         return {'type': 'turn_end', 'reason': event.data['reason']}
     return None
@@ -417,10 +426,14 @@ async def session_title(sid: str, request: Request) -> dict:
 
 
 @app.get('/history')
-def history() -> list[dict]:
+def history() -> dict:
+    """当前会话的历史消息 + 当前 todo 投影（页面加载/刷新时恢复 UI）。"""
     _check_init()
     assert _session is not None
-    return [message_to_payload(m) for m in _session.derive_messages()]
+    return {
+        'history': [message_to_payload(m) for m in _session.derive_messages()],
+        'todos': fold_todos(_session) or [],
+    }
 
 
 @app.post('/chat')

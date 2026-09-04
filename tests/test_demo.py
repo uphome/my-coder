@@ -725,7 +725,7 @@ def test_web_chat_streams_events(tmp_path):
     client = TestClient(web_app.app)
 
     assert client.get('/').status_code == 200          # 页面可访问
-    assert client.get('/history').json() == []          # 空会话
+    assert client.get('/history').json() == {'history': [], 'todos': []}  # 空会话
 
     resp = client.post('/chat', json={'message': 'hi'})
     assert resp.status_code == 200
@@ -736,7 +736,9 @@ def test_web_chat_streams_events(tmp_path):
     assert '"type": "turn_end"' in resp.text
 
     # 对话后历史可查（记忆 = 日志投影，Web 视角同样成立）
-    history = client.get('/history').json()
+    payload = client.get('/history').json()
+    assert payload['todos'] == []
+    history = payload['history']
     assert history[0]['role'] == 'user'
     assert any(m['role'] == 'assistant' and m['text'] for m in history)
 
@@ -762,7 +764,7 @@ def test_web_session_management(tmp_path):
     # 新建会话并切换（空历史）
     fresh = client.post('/sessions/new').json()
     assert fresh['id'] != 'web' and fresh['history'] == []
-    assert client.get('/history').json() == []
+    assert client.get('/history').json() == {'history': [], 'todos': []}
 
     # 切回 web 会话：历史还原（恢复 = 重放）
     back = client.post(f"/sessions/{fresh['id']}/switch").json()
@@ -1025,3 +1027,32 @@ async def test_todo_live_injection_across_steps(tmp_path):
     assert 'Current todo list' in systems[1]      # 规划后：live 段注入
     assert 'step one=in_progress' in systems[1] or 'step one' in systems[1]
     assert 'step two' in systems[1]
+
+
+def test_web_todo_dock_payloads(tmp_path):
+    """todo dock 的数据通道：SSE 帧 todo_update + /history 附带 todos + 会话切换恢复。"""
+    from fastapi.testclient import TestClient
+
+    from agent_demo import web_app
+
+    web_app.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
+    client = TestClient(web_app.app)
+
+    # fake 会话默认脚本不含 todo_write；先直接往日志写 todo，模拟已有清单
+    s = web_app._session
+    s.append('todo/write', {'todos': [
+        {'content': '读代码', 'status': 'completed'},
+        {'content': '写修复', 'status': 'in_progress'},
+        {'content': '跑测试', 'status': 'pending'},
+    ]})
+
+    # /history 附带当前 todos 投影
+    payload = client.get('/history').json()
+    assert [t['content'] for t in payload['todos']] == ['读代码', '写修复', '跑测试']
+    assert payload['todos'][1]['status'] == 'in_progress'
+
+    # 会话切换也带 todos（dock 在换会话时恢复）
+    fresh = client.post('/sessions/new').json()
+    assert fresh['todos'] == []
+    switched = client.post('/sessions/web/switch').json()
+    assert [t['content'] for t in switched['todos']] == ['读代码', '写修复', '跑测试']
