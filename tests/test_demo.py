@@ -863,3 +863,11 @@ def test_session_title_event_is_trace_not_surface(tmp_path):
         restored.adopt(e)
     titles = [e for e in restored.events if e.type == 'session/title']
     assert titles and titles[-1].data['title'] == '我的标题'
+
+def test_auto_title_rejects_verbatim_copy():
+    """自动起名逐字复读首条消息 → 判定为失败（不落 auto 事件，退回 fallback）。"""
+    import web_app
+    assert web_app._is_verbatim_copy('你好', '你好') is True
+    assert web_app._is_verbatim_copy('总结README', '请帮我总结README') is True   # 子串
+    assert web_app._is_verbatim_copy('代码审查', '请帮我审查这段代码') is False  # 概括 ≠ 复读
+    assert web_app._is_verbatim_copy('问候', '你好') is False
