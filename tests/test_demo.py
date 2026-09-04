@@ -871,3 +871,29 @@ def test_auto_title_rejects_verbatim_copy():
     assert web_app._is_verbatim_copy('总结README', '请帮我总结README') is True   # 子串
     assert web_app._is_verbatim_copy('代码审查', '请帮我审查这段代码') is False  # 概括 ≠ 复读
     assert web_app._is_verbatim_copy('问候', '你好') is False
+
+@pytest.mark.asyncio
+async def test_identity_prompt_is_neutral(tmp_path):
+    """agent 身份 = 中性编码助手：request/header 的 system 里不含品牌/血缘词。
+
+    之前 identity 写的是 'powered by DeepSeek Harness (Python demo)'，模型
+    会照抄自我介绍——作品集项目不该把功劳归给被复刻对象，锁住文案防回归。
+    """
+    import main
+    from argparse import Namespace
+    from session import Session
+    from values import create_user_message, TextBlock
+
+    main.load_env = lambda path: None  # fake 模式不需要 .env
+    args = Namespace(fake=True, model='fake-model', workspace=tmp_path, hide_reasoning=False,
+                     session='id', sessions=str(tmp_path), prompt='x', resume=False, verbose=False)
+    session = Session(id='id')
+    agent = main.build_agent(session, args, {'reasoning_started': False, 'request_no': 0, 'tool_no': 0})
+    agent.followup('hi')
+    await agent.when_idle()
+    headers = [e.data for e in session.events if e.type == 'request/header']
+    assert headers, 'expected a request/header event'
+    system = headers[0]['system']
+    assert 'coding agent' in system
+    for banned in ('DeepSeek Harness', 'powered by', 'Python demo'):
+        assert banned not in system, f'identity must not mention {banned!r}'
