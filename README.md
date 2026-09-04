@@ -11,28 +11,33 @@ Inbox、决策走钩子**。
 conda create -n agent-demo python=3.13 pytest pytest-asyncio httpx -y
 conda activate agent-demo
 
+# 安装本包（可选：装后可直接用 agent-demo / agent-demo-web 命令）
+pip install -e ".[dev]"
+
 # 离线演示（脚本化假模型，不联网、不需要 key，跑通工具循环）
 # --workspace 必填：工具只能读写这个目录（安全边界由你声明）
 # Windows 控制台是 GBK：conda run 加 --no-capture-output 避免中文乱码
-conda run --no-capture-output -n agent-demo python main.py --fake --workspace . "read README.md and summarize"
+conda run --no-capture-output -n agent-demo python -m agent_demo.cli --fake --workspace . "read README.md and summarize"
 
 # 恢复上次会话（JSONL 重放：队列、回合号、请求配置全部还原）
-conda run --no-capture-output -n agent-demo python main.py --fake --workspace . --resume "continue"
+conda run --no-capture-output -n agent-demo python -m agent_demo.cli --fake --workspace . --resume "continue"
 
 # 真实模型（DeepSeek 官方 API，OpenAI 兼容格式；敏感工具执行前会弹 [approval] 确认）
 # Windows PowerShell: $env:DEEPSEEK_API_KEY = "sk-..."
 export DEEPSEEK_API_KEY=sk-...
-conda run --no-capture-output -n agent-demo python main.py --workspace . "读一下 main.py 并用 todo_write 列出你的三步计划"
+conda run --no-capture-output -n agent-demo python -m agent_demo.cli --workspace . "读一下 README.md 并用 todo_write 列出你的三步计划"
 
-# 测试
+# 测试 + 质量门（ruff / mypy 全绿才提交）
 conda run -n agent-demo python -m pytest -q
+conda run -n agent-demo python -m ruff check agent_demo tests
+conda run -n agent-demo python -m mypy agent_demo
 ```
 
 思维链（如 DeepSeek 的 `reasoning_content`）默认会以彩色 `[思考]` 实时显示，
 但**不会回灌给模型**，只作为痕迹数据写入日志。不需要看思考过程时加 `--hide-reasoning`：
 
 ```sh
-python main.py --fake --workspace . --hide-reasoning "read README.md and summarize"
+python -m agent_demo.cli --fake --workspace . --hide-reasoning "read README.md and summarize"
 ```
 
 ## Web UI（DeepSeek 风格对话）
@@ -41,13 +46,13 @@ UI 是日志的投影的第二个渲染器：同一份事件流，CLI 渲染成�
 
 ```sh
 # 启动 Web 服务（默认 http://127.0.0.1:8000）
-conda run -n agent-demo python web_app.py --workspace . --fake    # 离线（不需要 key）
-conda run -n agent-demo python web_app.py --workspace .           # 真实模型
+conda run -n agent-demo python -m agent_demo.web_app --workspace . --fake    # 离线（不需要 key）
+conda run -n agent-demo python -m agent_demo.web_app --workspace .           # 真实模型
 ```
 
-浏览器打开 http://127.0.0.1:8000：流式输出、可折叠"已深度思考"、工具调用卡片；
-会话固定 `web`（刷新页面不丢对话）。最小方案：approval 在 Web 下默认拒绝
-（批准/拒绝按钮是迭代项）。
+浏览器打开 http://127.0.0.1:8000：流式输出、可折叠"已深度思考"、工具调用卡片
+（变体图标/状态点/摘要）；会话可新建/切换/删除/**双击改名**（自动标题：首条
+消息后由模型概括起名，逐字复读会被拒绝退回摘要）。
 
 运行后所有事件落在 `.sessions/<id>.jsonl`（每行一条事件），日志本身就是
 调试器——模型每一步看到什么、工具干了什么，都按 seq 记录在案。
@@ -64,16 +69,21 @@ conda run -n agent-demo python web_app.py --workspace .           # 真实模型
 ## 架构：四层单向依赖
 
 ```
-入口层  agent.py      被动状态机：send → inbox → wake → driver → idle
-                        │
-循环层  loop.py       turn/step 两级循环 + 三个钩子
-                        │
-状态层  session.py    追加式事件日志（唯一事实源）+ derive_messages 投影
+入口层  cli.py / web_app.py   CLI 与 Web 两个入口（经 factory.build_agent 组装）
+        factory.py          组装：prompt + llm（fake/真实）+ 工具 + 渲染订阅
+        │
+循环层  agent.py      被动状态机：send → inbox → wake → driver → idle
+        │
+状态层  loop.py       turn/step 两级循环 + 三个钩子
+        session.py    追加式事件日志（唯一事实源）+ derive_messages 投影
         inbox.py      双队列 pending 消息（spliced 事件的持久化投影）
         prompt.py     sections 按 order 拼接 + {{变量}} 严格插值
-        tools.py      工具注册表：schema + executor + 执行模式
-                        │
+        registry.py   工具类型：ToolSpec（schema + executor + 模式）
+        │
 值 层  values.py      不可变 Message/SessionEvent + JSONL 编解码
+应用内容：tools/（read_file/list_files/grep/glob/edit/write_file/bash/
+todo_write + build_tools 组装）、sandbox.py（workspace 路径边界）、
+ui.py（终端渲染）、constants.py（预算/颜色/demo 脚本）
 ```
 
 依赖方向只有一条：上层依赖下层，下层不感知上层。
@@ -113,7 +123,7 @@ conda run -n agent-demo python web_app.py --workspace .           # 真实模型
 {"seq":2,"type":"agent/inbox/spliced","data":{"target":"next-turn","start":0,"removed_count":1,"inserted":[]}}
 {"seq":3,"type":"step/start","data":{"turn":1,"step":1}}
 {"seq":4,"type":"user/message","data":{"$message":{...}},"surface_op":"append"}
-{"seq":5,"type":"request/header","data":{"provider":"deepseek","model":"deepseek-chat","system":"...","tools":[...]}}
+{"seq":5,"type":"request/header","data":{"provider":"deepseek","model":"deepseek-v4-flash","system":"...","tools":[...]}}
 {"seq":6,"type":"assistant/chunk","data":{"chunk":{"text":"..."}}}
 {"seq":7,"type":"assistant/reasoning/chunk","data":{"reasoning":"..."}}
 {"seq":8,"type":"assistant/reasoning","data":{"reasoning":"..."}}
@@ -130,20 +140,27 @@ conda run -n agent-demo python web_app.py --workspace .           # 真实模型
 
 ## 模块清单
 
+包 `agent_demo/`（框架四层 + 应用内容；全部经 `agent_demo/__init__.py` 组织）：
+
 | 文件 | 角色 |
 |---|---|
 | `values.py` | 值层：不可变 Message/SessionEvent + JSONL 编解码 |
 | `session.py` | 日志 + surface 折叠投影（append / derive_messages / adopt / request_header） |
 | `inbox.py` | 双队列（next-turn / next-step）+ claim 语义 + 持久化重放 |
 | `prompt.py` | sections 按 order 拼接 + `{{var}}` 严格插值（未注册/无值抛错） |
-| `tools.py` | 工具注册表（schema + executor + parallel/sequential + 超时） |
+| `registry.py` | 工具类型（ToolSpec：schema + executor + 模式 + 超时 + requires_approval） |
 | `llm.py` | OpenAI 兼容 SSE 流式客户端 + 可脚本化 FakeLlm + wire 格式纯函数（含思维链字段解析） |
-| `hooks.py` | pre_step / request / request_error 三个钩子的类型 |
+| `hooks.py` | pre_step / request / request_error 三钩子 + approval 钩子的类型 |
 | `loop.py` | turn/step 两级循环 + 流组装 + 工具分组执行 + 思维链痕迹落盘 |
 | `agent.py` | 被动状态机：wake / kick / when_idle / cancel |
 | `persistence.py` | JSONL 追加写 + 重放读 |
-| `main.py` | CLI + 示例工具（read_file 行号分页 / list_files / grep / glob / edit / write_file / bash / todo_write）+ 日志驱动 UI |
-| `tests/test_demo.py` | 31 个架构测试 |
+| `tools/` | 应用工具（file_io.py 读写/编辑、search.py grep/glob、shell.py bash、todo.py）+ `build_tools(workspace)` 组装 |
+| `sandbox.py` | workspace 路径边界（归一化 + 前缀匹配的轻量沙箱） |
+| `ui.py` | 终端渲染（_render_event / _paint，UI 是日志投影） |
+| `factory.py` | build_agent / load_env（CLI 与 Web 共用组装） |
+| `cli.py` | CLI 入口（argparse + run） |
+| `web_app.py` | Web UI（FastAPI + SSE：会话/标题/approval） |
+| `tests/test_demo.py` | 38 个架构测试 |
 
 ## 与 harness 的保真度对照
 

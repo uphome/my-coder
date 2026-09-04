@@ -190,47 +190,45 @@ UI 是日志的投影：on_event 只负责"怎么显示"，状态全在事件里
 - **迭代方向**：会话列表/切换、Web approval 按钮、思考块耗时显示、
   Ctrl-C 等价取消按钮（已有停止按钮）
 
-## 架构重构（求职作品级，规划中 · 暂缓执行）
+## 架构重构（求职作品级，✅ 已完成 2026-09）
 
-**定位转变**：项目将从"教学 demo"成长为**个人工具 / 求职作品**——教学 demo
-允许的简化（main.py 装下全部应用内容）开始成为债务。
+**定位转变**：项目已从"教学 demo"成长为**个人工具 / 求职作品**。
 
-**保留的卖点（重构不能丢）**：日志唯一事实源 / 被动状态机 / 钩子 / approval /
-路径沙箱——这些架构思想是差异化优势；好的结构应该配得上它们（好的结构本身
-就是更好的教学）。
+**保留的卖点（重构没有丢）**：日志唯一事实源 / 被动状态机 / 钩子 / approval /
+路径沙箱——框架四层（agent→loop→session→values）原封不动，只动了原 main.py
+里的"应用内容"（工具/沙箱/UI/执行后端/入口）。
 
-**当前问题**：`main.py` 592 行装了 5 类职责（CLI 入口 ~120 / 8 个工具实现
-~300 / 路径沙箱 ~50 / 执行后端 ~30 / UI 渲染 ~90），与文档宣称的"入口层"
-不符；`tests/test_demo.py` 单文件 583 行；无 lint/typecheck/打包/CI。
-
-**目标蓝图**：
+**执行结果**：
 
 ```text
 agent_demo/               包结构（取代平铺）
-├── cli.py                入口：argparse + run + REPL（将来）
-├── ui.py                 渲染（_render_event / _paint）
+├── cli.py                入口：argparse + run（原 main.py 瘦身 ~80 行）
+├── web_app.py            Web UI（从根迁入，import 改包内）
+├── factory.py            build_agent / load_env（CLI 与 Web 共用）
+├── ui.py                 渲染（render_event / paint）
+├── sandbox.py            路径边界（resolve_in_workspace / iter_files）
+├── constants.py          预算 / 颜色 / demo 脚本
 ├── 框架四层不动           agent / loop / session / inbox / prompt /
 │                          values / persistence / hooks / llm
-├── tools/                工具包（取代 main.py 里的 executor）
-│   ├── __init__.py       build_tools() 注册表组装
-│   ├── file_io.py        read_file / list_files / write_file / edit
-│   ├── search.py         grep / glob
-│   ├── shell.py          bash + _run_command 执行后端
-│   └── todo.py           todo_write
-├── sandbox.py            安全边界（_resolve_in_workspace）
-└── constants.py          预算 / 颜色常量
-tests/                    按主题拆分（test_tools / test_sandbox / ...）
-pyproject.toml            打包 + ruff / mypy 配置
+├── registry.py           原 tools.py 改名（ToolSpec/ToolRegistry/ToolOutcome）
+└── tools/                应用工具包
+    ├── __init__.py       build_tools() 注册表组装
+    ├── file_io.py        read_file / list_files / write_file / edit
+    ├── search.py         grep / glob
+    ├── shell.py          bash + _run_command 执行后端
+    └── todo.py           todo_write
+pyproject.toml            打包 + ruff / mypy / pytest 配置 + console scripts
+.github/workflows/ci.yml  CI（ruff + mypy + pytest × 3.11/3.12/3.13 + CLI 冒烟）
 ```
 
-**分步路线**（每步跑测试，31 个测试作安全网）：
-1. **模块化**：拆 `tools/` 包 + `ui.py` + `sandbox.py`，main.py 回归 ~150 行入口
-2. **打包**：pyproject.toml + `pip install -e .` + `agent-demo` 命令可跑
-3. **工程化**：ruff + mypy 接入、测试拆分、CI（GitHub Actions 跑 pytest）
-4. **继续功能**：阶段二 REPL 等
+- 步骤 1 模块化 ✅（38 测试全绿，git 全程识别 rename 保留历史）
+- 步骤 2 打包 ✅（`pip install -e .`，`agent-demo` / `agent-demo-web` 命令）
+- 步骤 3 工程化 ✅（ruff 清零 / mypy 清零 / CI workflow；质量门三绿才提交）
+- 步骤 4 继续功能：阶段二 REPL 等（仍未开始）
 
-**原则**：框架四层（agent→loop→session→values）原封不动——它们是架构卖点；
-重构只动 main.py 里的"应用内容"（工具/沙箱/UI/执行后端）。
+**测试拆分**（蓝图里的 tests/ 按主题拆分）尚未做：38 个测试仍在单文件
+`tests/test_demo.py`——当前质量门（ruff/mypy/pytest）已覆盖，拆分是纯可读性
+优化，留到有需要时再做。
 
 ## 实施约定（延续项目哲学）
 

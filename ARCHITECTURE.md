@@ -297,21 +297,28 @@ JSON 没有类型信息，用 `$xxx` 前缀 key 做类型标记：`$text`/`$tool
 
 ## 5. 文件职责清单
 
+包 `agent_demo/`（框架四层 + 应用内容）：
+
 | 文件 | 角色 |
 |---|---|
 | `values.py` | 值层：不可变 Message/SessionEvent + tagged dict 编解码 |
 | `session.py` | 日志 + surface 折叠投影（append / derive_messages / adopt / request_header） |
 | `inbox.py` | 双队列（next-turn / next-step）+ claim 语义 + 持久化重放 |
 | `prompt.py` | sections 按 order 拼接 + `{{var}}` 严格插值 |
-| `tools.py` | 工具注册表（schema + executor + parallel/sequential + 超时） |
+| `registry.py` | 工具类型（ToolSpec：schema + executor + 模式 + 超时 + requires_approval） |
 | `llm.py` | 能力层：SSE 流式客户端 + FakeLlm + wire 双向翻译（含思维链字段解析） |
 | `hooks.py` | 三个决策钩子的类型 |
 | `loop.py` | turn/step 两级循环 + 流组装 + 工具分组执行 + 思维链痕迹落盘 + 四层兜底 |
 | `agent.py` | 被动状态机：wake / kick / when_idle / cancel |
 | `persistence.py` | JSONL 追加写 + 重放读 |
-| `main.py` | CLI + 示例工具（read_file 行号分页 / list_files / grep / glob / edit / write_file / bash / todo_write，含 workspace 边界与 approval 声明）+ 日志驱动 UI |
+| `tools/` | 应用工具（file_io 读写/编辑、search grep/glob、shell bash、todo）+ `build_tools(workspace)` |
+| `sandbox.py` | workspace 路径边界（轻量沙箱：归一化 + 前缀匹配） |
+| `ui.py` | 终端渲染（_render_event / _paint，UI 是日志投影） |
+| `factory.py` | build_agent / load_env（CLI 与 Web 共用组装） |
+| `cli.py` | CLI 入口 |
+| `web_app.py` | Web UI（FastAPI + SSE：会话/标题/approval） |
 | `show_memory.py` | 教学脚本：重放日志展示"记忆 = 投影" |
-| `tests/test_demo.py` | 20 个架构测试 |
+| `tests/test_demo.py` | 38 个架构测试 |
 
 ---
 
@@ -321,7 +328,7 @@ JSON 没有类型信息，用 `$xxx` 前缀 key 做类型标记：`$text`/`$tool
 
 已定决策：
 - 方向：实用编码 agent（能真干活：执行命令、搜索代码、编辑文件）
-- 模型：DeepSeek 官方 API（deepseek-chat）
+- 模型：DeepSeek 官方 API（deepseek-v4-flash）
 - 节奏：一步步来，每步先讲设计再动手
 - 定位：教学 demo → **个人工具 / 求职作品**（工程化重构规划见 NEXT_STEPS.md
   "架构重构（求职作品级）"——框架四层不动，拆 main.py 的应用内容为
