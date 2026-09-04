@@ -55,10 +55,15 @@ RESULT_MAX_CHARS = 20000
 # 来源：'user'（手动改名，优先级最高）/ 'auto'（LLM 自动起名）。
 # 'fallback' 不落日志：没有标题事件时，列表显示首条用户消息摘要（现有逻辑）。
 TITLE_MAX_CHARS = 40
+# 起名 prompt 的核心约束：总结意图、禁止逐字复读原文——"你好"的标题应是
+# "问候"而不是把原话再抄一遍（对齐 chat.deepseek 的概括式起名）
 TITLE_SYSTEM = (
-    'You are a conversation titler. Given the first user message of a coding-agent '
-    'session, reply with ONLY a short title (same language as the message, under '
-    '12 words). No quotes, no punctuation, no explanation.'
+    'You are a conversation titler for a coding-agent session. Given the first '
+    'user message, reply with ONLY a short title that SUMMARIZES THE USER\'S '
+    'INTENT (same language as the message, under 12 words). '
+    'Rules: never repeat the user message verbatim or near-verbatim; condense it '
+    'into a category/action label (e.g. greeting, bug fix, code review, install '
+    'deps). No quotes, no punctuation, no explanation.'
 )
 AUTO_TITLE_TIMEOUT_S = 25  # 起名失败静默降级（fallback 摘要兜底），别拖垮主流程
 
@@ -68,6 +73,20 @@ def _clean_title(raw: str) -> str:
     title = (raw or '').strip().strip('"\'“”‘’「」『』').strip()
     title = ' '.join(title.split()).strip(' .,;:。，；：！!？?、-—')
     return title[:TITLE_MAX_CHARS]
+
+
+def _is_verbatim_copy(title: str, first_text: str) -> bool:
+    """标题是否只是逐字/近逐字复读首条消息——是则视为起名失败（退回 fallback）。
+
+    模型对短消息（寒暄/单句）容易偷懒把原文抄回来当标题，那不是标题。
+    归一化后比较：完全相等、或标题是原文的子串（方向各一）。
+    """
+    def norm(s: str) -> str:
+        return ''.join((s or '').split()).lower()
+    t, m = norm(title), norm(first_text)
+    if not t or not m:
+        return False
+    return t == m or t in m or m in t
 
 
 def _should_auto_title(session: Session) -> bool:
@@ -112,6 +131,10 @@ async def _auto_title(session: Session, first_text: str) -> None:
         await asyncio.wait_for(collect(), timeout=AUTO_TITLE_TIMEOUT_S)
         title = _clean_title(''.join(parts))
         if not title:
+            return
+        if _is_verbatim_copy(title, first_text):
+            # 逐字复读原文 = 起名失败：不落 auto 事件，列表继续显示 fallback
+            print('[title] auto-title rejected: verbatim copy of user message', flush=True)
             return
         session.append('session/title', {'title': title, 'source': 'auto'})
     except Exception as error:  # noqa: BLE001 - 起名失败不影响主流程
