@@ -6,6 +6,8 @@
 """
 from __future__ import annotations
 
+from typing import cast
+
 from .session import Session
 from .values import Message
 
@@ -44,7 +46,7 @@ class Inbox:
         # 重放恢复：把日志里的 spliced 事件全部 _apply 一遍，队列原地复活。
         for event in session.events:
             if event.type == 'agent/inbox/spliced':
-                self._apply(event.data)
+                self._apply(cast(dict, event.data))
 
     @property
     def next_turn(self) -> tuple[Message, ...]:

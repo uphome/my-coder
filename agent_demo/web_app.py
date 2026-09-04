@@ -20,13 +20,13 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+
+from .factory import build_agent, load_env
+from .hooks import Hooks
 from .llm import LlmRequest
 from .persistence import load_events
 from .session import Session
-from .hooks import Hooks
 from .values import TextBlock, create_user_message
-
-from .factory import build_agent, load_env
 
 # 仓库根 = 包上一级：静态资源（web/）与 .env 都在根
 _ROOT = Path(__file__).resolve().parent.parent
@@ -197,7 +197,7 @@ async def web_approval(name: str, arguments: dict) -> bool:
     })
     try:
         return await asyncio.wait_for(fut, timeout=APPROVAL_TIMEOUT_S)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         return False
     finally:
         _approval_futures.pop(aid, None)
@@ -356,6 +356,7 @@ def index() -> FileResponse:
 def meta() -> dict:
     """前端元信息：workspace 根（工具路径相对化显示用）+ 模型名 + fake 标记。"""
     _check_init()
+    assert _args is not None  # init_web 已初始化（_check_init 保证）
     return {
         'workspace': str(Path(_args.workspace).resolve()),  # 绝对路径，前端剥前缀显示相对路径
         'model': _args.model,
@@ -418,6 +419,7 @@ async def session_title(sid: str, request: Request) -> dict:
 @app.get('/history')
 def history() -> list[dict]:
     _check_init()
+    assert _session is not None
     return [message_to_payload(m) for m in _session.derive_messages()]
 
 
@@ -425,23 +427,25 @@ def history() -> list[dict]:
 async def chat(request: Request) -> StreamingResponse:
     """发起一轮对话并以 SSE 流返回事件；客户端断开即取消 agent。"""
     _check_init()
+    assert _session is not None and _agent is not None  # 单例运行时保证非空
+    session, agent = _session, _agent
     body = await request.json()
     message = (body.get('message') or '').strip()
     if not message:
         raise HTTPException(400, 'message must not be empty')
 
     queue: asyncio.Queue = asyncio.Queue()
-    unsubscribe = _session.on_event(lambda event: queue.put_nowait(event))
+    unsubscribe = session.on_event(lambda event: queue.put_nowait(event))
 
     # 首条消息才触发自动起名：标题 = 日志投影，起名失败静默降级 fallback
-    need_title = _should_auto_title(_session)
+    need_title = _should_auto_title(session)
     if need_title:
-        session_for_title = _session
+        session_for_title = session
 
     async def run_agent() -> None:
         try:
-            _agent.followup(message)
-            await _agent.when_idle()
+            agent.followup(message)
+            await agent.when_idle()
             if need_title:
                 # 回合跑完再起名：标题基于首条消息全文，此刻消息已在日志里；
                 # 后台任务与响应返回解耦，浏览器回合结束后稍等再刷列表即可看到

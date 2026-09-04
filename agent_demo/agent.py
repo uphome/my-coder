@@ -9,13 +9,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import cast
 
 from .hooks import Hooks
 from .inbox import Inbox, InboxNotifications
 from .loop import run_turn
 from .prompt import PromptRegistry
-from .session import Session
 from .registry import ToolRegistry
+from .session import Session
 from .values import Message, TextBlock, create_user_message
 
 log = logging.getLogger('agent')
@@ -80,7 +81,7 @@ class Agent:
         last = 0
         for event in self.session.events:
             if event.type == 'turn/start':
-                last = event.data['turn']
+                last = cast(dict, event.data)['turn']
         return last
 
     @property

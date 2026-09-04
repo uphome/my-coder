@@ -12,10 +12,9 @@ import asyncio
 import json
 import logging
 
-from .hooks import Hooks, PreStepContext, RequestContext, RequestErrorContext
+from .hooks import PreStepContext, RequestContext, RequestErrorContext
 from .llm import LlmError, LlmRequest, StreamChunk
-from .session import Session
-from .registry import ToolOutcome, ToolRegistry
+from .registry import ToolOutcome
 from .values import (
     Message,
     TextBlock,
@@ -65,7 +64,7 @@ class _BlockAssembler:
 
     def blocks(self) -> list:
         """输出最终 blocks：text（非空才有）+ 按 index 排序的工具调用。"""
-        blocks = []
+        blocks: list = []
         if self.text:
             blocks.append(TextBlock(text=self.text))
         for index in sorted(self._tool_calls):

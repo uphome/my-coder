@@ -10,8 +10,7 @@ from __future__ import annotations
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Literal, Union
-
+from typing import Literal
 
 # 三种内容块：一条消息的内容是这些不可变块的 tuple。
 # type 字段是判别标签（discriminated union 的 Python 落地），
@@ -45,7 +44,7 @@ class ToolResultBlock:
     is_error: bool = False
 
 
-ContentBlock = Union[TextBlock, ToolCallBlock, ToolResultBlock]
+ContentBlock = TextBlock | ToolCallBlock | ToolResultBlock
 
 
 # 消息来源：回答"这条消息是谁产生的"。
@@ -81,7 +80,7 @@ class PluginSource:
     plugin: str = ''
 
 
-MessageSource = Union[UserSource, ModelSource, ToolSource, PluginSource]
+MessageSource = UserSource | ModelSource | ToolSource | PluginSource
 
 
 @dataclass(frozen=True)
@@ -93,7 +92,9 @@ class Message:
     source: MessageSource
 
 
-def create_message(role: str, content, source: MessageSource) -> Message:
+def create_message(
+    role: Literal['system', 'user', 'assistant'], content, source: MessageSource,
+) -> Message:
     """底层工厂：生成新 id、把 content 转 tuple。上层用三个便捷工厂。"""
     return Message(id=str(uuid.uuid4()), role=role, content=tuple(content), source=source)
 

@@ -8,16 +8,21 @@ import pytest
 from agent_demo.agent import Agent
 from agent_demo.hooks import Hooks, PreStepContext, RequestErrorContext
 from agent_demo.inbox import Inbox
-from agent_demo.llm import FakeLlm, LlmRequest, StreamChunk, build_payload, _delta_reasoning, _to_wire_messages
-from agent_demo.tools import build_tools
+from agent_demo.llm import (
+    FakeLlm,
+    LlmRequest,
+    StreamChunk,
+    _delta_reasoning,
+    build_payload,
+)
 from agent_demo.persistence import load_events, save_event
 from agent_demo.prompt import PromptRegistry
-from agent_demo.session import Session
 from agent_demo.registry import ToolOutcome, ToolRegistry, ToolSpec
+from agent_demo.session import Session
+from agent_demo.tools import build_tools
 from agent_demo.values import (
     TextBlock,
     ToolCallBlock,
-    ToolResultBlock,
     create_assistant_message,
     create_tool_result_message,
     create_user_message,
@@ -711,8 +716,9 @@ async def test_approval_gate_approves_and_skips(tmp_path):
 
 
 def test_web_chat_streams_events(tmp_path):
-    from agent_demo import web_app
     from fastapi.testclient import TestClient
+
+    from agent_demo import web_app
 
     # SSE 流全链路（--fake 离线验证；sessions_dir 隔离，不污染真实会话）
     web_app.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
@@ -736,8 +742,9 @@ def test_web_chat_streams_events(tmp_path):
 
 
 def test_web_session_management(tmp_path):
-    from agent_demo import web_app
     from fastapi.testclient import TestClient
+
+    from agent_demo import web_app
 
     web_app.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
     client = TestClient(web_app.app)
@@ -780,8 +787,9 @@ def test_web_session_management(tmp_path):
 
 def test_web_session_title_endpoint(tmp_path):
     """手动改名：append session/title（user）→ 列表 summary 以标题优先，重放可恢复。"""
-    from agent_demo import web_app
     from fastapi.testclient import TestClient
+
+    from agent_demo import web_app
 
     web_app.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
     client = TestClient(web_app.app)
@@ -844,8 +852,8 @@ def test_auto_title_trigger_conditions(tmp_path):
 def test_session_title_event_is_trace_not_surface(tmp_path):
     """session/title 是痕迹事件：不进模型记忆（derive_messages），但重放保留。"""
     from agent_demo import web_app
-    from agent_demo.session import Session
     from agent_demo.persistence import save_event
+    from agent_demo.session import Session
 
     web_app.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
     s = Session(id='t')
@@ -879,10 +887,10 @@ async def test_identity_prompt_is_neutral(tmp_path):
     之前 identity 写的是 'powered by DeepSeek Harness (Python demo)'，模型
     会照抄自我介绍——作品集项目不该把功劳归给被复刻对象，锁住文案防回归。
     """
-    from agent_demo import factory
     from argparse import Namespace
+
+    from agent_demo import factory
     from agent_demo.session import Session
-    from agent_demo.values import create_user_message, TextBlock
 
     args = Namespace(fake=True, model='fake-model', workspace=tmp_path, hide_reasoning=False,
                      session='id', sessions=str(tmp_path), prompt='x', resume=False, verbose=False)

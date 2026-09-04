@@ -6,22 +6,24 @@ Python 复刻 deepseek-harness 架构的教学 demo（agent 框架本身，不�
 
 ```sh
 # 一切 Python 命令必须走 conda 环境 agent-demo（base 里没有 pytest/httpx）
-conda run -n agent-demo python -m pytest -q        # 33 个测试，唯一验证手段（无 lint/typecheck 配置）
+# 质量门：ruff + mypy + pytest 三绿才可提交（pyproject.toml 已配好）
+conda run -n agent-demo python -m ruff check agent_demo tests
+conda run -n agent-demo python -m mypy agent_demo
+conda run -n agent-demo python -m pytest        # 38 个测试
+
+# CLI（可 pip install -e . 后直接 agent-demo；或模块方式跑）
+conda run --no-capture-output -n agent-demo python -m agent_demo.cli --workspace . --fake "read README.md and summarize"
 
 # Web UI（DeepSeek 风格，默认 http://127.0.0.1:8000；--fake 离线演示）
-conda run --no-capture-output -n agent-demo python web_app.py --workspace . --fake
-
-# 跑 CLI 演示（Windows 控制台是 GBK：用 --no-capture-output 避免 conda run 二次打印乱码；
-# --workspace 必填：工具只能读写该目录（纯用户态路径边界，非 OS 沙箱））
-PYTHONIOENCODING=utf-8 conda run --no-capture-output -n agent-demo python main.py --fake --workspace . "read README.md and summarize"
-# 真实模型需要 .env 里的 DEEPSEEK_API_KEY（不入库）
+conda run --no-capture-output -n agent-demo python -m agent_demo.web_app --workspace . --fake
 ```
 
-注意：`conda run` 的 `-c` 参数不支持多行/换行脚本；如需内联 Python，写到临时文件再跑。
+注意：Windows 控制台是 GBK，用 `--no-capture-output` 避免 conda run 二次打印乱码；`conda run` 的 `-c` 参数不支持多行/换行脚本，内联 Python 写到临时文件再跑。
 
 ## 架构（改动任何代码前必读）
 
-四层单向依赖：入口 `agent.py`（被动状态机）→ 循环 `loop.py`（turn/step 两级）→ 状态 `session.py`/`inbox.py`/`prompt.py`/`tools.py` → 能力 `llm.py`/`hooks.py` → 值 `values.py` + `persistence.py`。上层依赖下层，下层不感知上层。
+包结构 `agent_demo/`（取代早期平铺）。依赖方向不变，仍是四层单向：
+入口（`cli.py` / `web_app.py` → `factory.py` 组装）→ 框架循环（`agent.py` 被动状态机 / `loop.py` turn-step）→ 状态（`session.py`/`inbox.py`/`prompt.py`/`registry.py`）→ 能力（`llm.py`/`hooks.py`）→ 值（`values.py` + `persistence.py`）。应用内容独立成包：工具在 `agent_demo/tools/`（file_io/search/shell/todo + build_tools 组装）、渲染在 `ui.py`、路径边界在 `sandbox.py`、常量在 `constants.py`。上层依赖下层，下层不感知上层。
 
 **日志（`.sessions/<id>.jsonl`）是唯一事实源**：模型记忆（`derive_messages`）、inbox 队列、回合号、模型路由全部是日志的重放投影。恢复 = 重放（`adopt`），没有独立的对话状态。本仓库已建 CodeGraph 索引（`.codegraph/`），理解/定位代码先 `codegraph_explore`。
 
@@ -42,7 +44,8 @@ PYTHONIOENCODING=utf-8 conda run --no-capture-output -n agent-demo python main.p
 
 ## 入口与工具
 
-- `main.py`：CLI 入口；`--fake` 用脚本化假模型离线跑通全流程（不需要 API key）；`--resume` 演示日志重放恢复
+- `agent_demo/cli.py`：CLI 入口；`--fake` 用脚本化假模型离线跑通全流程（不需要 API key）；`--resume` 演示日志重放恢复
+- `agent_demo/web_app.py`：Web UI（FastAPI + SSE，会话管理/标题/approval）；`factory.py` 的 `build_agent`/`load_env` 被 CLI 与 Web 共用
 - `show_memory.py`：教学脚本，重放日志展示"记忆 = 日志投影"
-- 工具注册在 `main.py:build_tools(workspace)`（read_file 行号分页 / list_files / grep / glob / edit / write_file / bash / todo_write），通过 `tools.py` 的 `ToolSpec`（schema + executor + 模式 + 超时 + requires_approval 绑定注册）；`--workspace` 必填（路径边界）；bash/write_file/edit 执行前需人工确认；阶段一实施进度见 `NEXT_STEPS.md`
+- 工具在 `agent_demo/tools/`：`build_tools(workspace)` 组装（read_file 行号分页 / list_files / grep / glob / edit / write_file / bash / todo_write），工具类型（`ToolSpec`：schema + executor + 模式 + 超时 + requires_approval）在 `registry.py`；`--workspace` 必填（路径边界，`sandbox.py` 实现）；bash/write_file/edit 执行前需人工确认；阶段一实施进度见 `NEXT_STEPS.md`
 - `.env` 存 `DEEPSEEK_API_KEY`/`DEEPSEEK_BASE_URL`；`.sessions/`、`.codegraph/`、`.env` 均不入库

@@ -6,8 +6,8 @@ LlmError 是结构化的模型失败（code + message），循环的 request_err
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
 
 import httpx
 
@@ -208,9 +208,10 @@ class FakeLlm:
         self.model = model
 
     async def stream(self, request: LlmRequest, signal=None) -> AsyncIterator[StreamChunk]:
-        step = self._script.pop(0) if self._script else {'text': '', 'finish_reason': 'stop'}
+        step: dict = self._script.pop(0) if self._script else {'text': '', 'finish_reason': 'stop'}
         if 'error' in step:
-            raise LlmError(step['error']['code'], step['error']['message'])
+            error = step['error']
+            raise LlmError(error['code'], error['message'])
         reasoning = step.get('reasoning', '')
         if reasoning:
             mid = len(reasoning) // 2 or 1

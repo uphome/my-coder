@@ -73,7 +73,7 @@ def register(registry, workspace: Path) -> None:
         if len(matches) > GREP_MAX_MATCHES:
             # 截断页脚：模型必须知道"还有更多"，否则会以为搜索就这些
             header = f'Found {len(kept)} of {len(matches)} matches'
-            body += '\n\n(Showing first %d; narrow pattern, path, or include to see more.)' % GREP_MAX_MATCHES
+            body += f'\n\n(Showing first {GREP_MAX_MATCHES}; narrow pattern, path, or include to see more.)'
         else:
             header = f'Found {len(matches)} matches'
         return ToolOutcome(content=f'{header}\n\n{body}')

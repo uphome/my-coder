@@ -7,8 +7,8 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Awaitable, Callable
 
 
 @dataclass(frozen=True)
@@ -94,7 +94,7 @@ class ToolRegistry:
         _validate_arguments(name, spec.parameters, arguments)
         try:
             return await asyncio.wait_for(spec.execute(arguments, agent, signal), timeout=spec.timeout_s)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return ToolOutcome(content=f'tool {name!r} timed out after {spec.timeout_s}s', is_error=True)
 
 

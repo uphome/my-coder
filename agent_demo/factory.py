@@ -42,6 +42,7 @@ def build_agent(session: Session, args, ui_state: dict, hooks=None) -> Agent:
     prompt.variable('model', lambda ctx: ctx['agent'].options.get('model', ''))
     prompt.variable('workspace', lambda ctx: str(args.workspace))
 
+    llm: object  # FakeLlm / OpenAiCompatibleLlm 鸭子类型共用 stream()，Agent 不校验具体类
     if args.fake:
         llm = FakeLlm(script=DEMO_SCRIPT, provider='fake', model='fake-model')
         options = {'provider': 'fake', 'model': 'fake-model'}

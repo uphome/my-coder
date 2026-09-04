@@ -7,7 +7,8 @@ assistant/message、tool/result）必须携带 surface_op='append'——"哪些
 """
 from __future__ import annotations
 
-from typing import Callable
+from collections.abc import Callable
+from typing import cast
 
 from .values import Message, SessionEvent, new_event
 
@@ -94,18 +95,19 @@ class Session:
         for seq in self._surface:
             event = self._log[seq]
             if event.type == 'user/message':
-                out.append(event.data)
+                out.append(cast(Message, event.data))
             elif event.type == 'assistant/message':
-                message = event.data['message']
+                # assistant/message 的 data = {'message': Message}——表面上的入口点
+                message = cast(dict, event.data)['message']
                 if message.content:
                     out.append(message)
             elif event.type == 'tool/result':
-                out.append(event.data)
+                out.append(cast(Message, event.data))
         return out
 
     def request_header(self) -> dict | None:
         """最后一次请求配置快照——resume 时恢复"上次用什么模型"。"""
         for event in reversed(self._log):
             if event.type == 'request/header':
-                return event.data
+                return cast(dict, event.data)
         return None

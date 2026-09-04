@@ -1,0 +1,12 @@
+﻿agent-demo: 工程化收尾——pyproject + ruff/mypy 清零 + CI（重构步骤 2-3）
+
+- pyproject.toml：打包（editable 安装）+ ruff/mypy/pytest 配置 +
+  console scripts（agent-demo / agent-demo-web）
+- ruff：33 处修复清零（未用 import 自动清 + Union→X|Y + f-string）
+- mypy：41 处修复清零（值层事件 data 判别 cast、web_app 全局单例
+  assert 收窄、factory llm 分支类型标注、教学代码不开 check_untyped_defs）
+- .github/workflows/ci.yml：ruff + mypy + pytest × 3.11/3.12/3.13 +
+  CLI fake 冒烟
+- .gitignore：*.egg-info / .pytest_tmp
+- AGENTS.md：命令/模块路径/测试数同步（38）
+- 质量门三绿：ruff clean + mypy clean + 38 passed

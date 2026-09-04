@@ -22,7 +22,7 @@ GLOB_MAX_RESULTS = 100   # glob 内联保留的最大路径数
 # 截断提示教模型把大输出重定向到文件，再用 read_file 分页读。
 BASH_MAX_OUTPUT_CHARS = 8000
 
-DEMO_SCRIPT = [
+DEMO_SCRIPT: list[dict] = [
     {
         'reasoning': '用户让我总结 README，先读取文件内容再回答。',
         'tool_calls': [{'id': 'call-1', 'name': 'read_file', 'arguments': '{"file_path": "README.md"}'}],

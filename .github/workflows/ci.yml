@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install package with dev deps
+        run: |
+          pip install -e ".[dev]"
+
+      - name: ruff
+        run: ruff check agent_demo tests
+
+      - name: mypy
+        run: mypy agent_demo
+
+      - name: pytest
+        run: pytest
+
+      # 安装即用的双命令冒烟：--fake 不需要 API key
+      - name: CLI smoke (fake)
+        run: |
+          agent-demo --fake --workspace . --session ci-smoke "read README.md" > /dev/null
+          rm -f .sessions/ci-smoke.jsonl

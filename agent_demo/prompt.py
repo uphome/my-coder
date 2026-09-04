@@ -55,7 +55,7 @@ class PromptRegistry:
         for name, provider in self._variables.items():
             variables[name] = provider(ctx) if callable(provider) else provider
         sections = []
-        for name, (order, text) in sorted(self._sections.items(), key=lambda item: (item[1][0], item[0])):
+        for name, (_, text) in sorted(self._sections.items(), key=lambda item: (item[1][0], item[0])):
             sections.append({'name': name, 'text': text(ctx) if callable(text) else text})
         return {'sections': sections, 'variables': variables}
 
