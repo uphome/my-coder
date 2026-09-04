@@ -27,6 +27,7 @@ class LlmRequest:
     messages: tuple = ()
     tools: tuple = ()
     max_tokens: int | None = None
+    thinking: bool | None = None  # None=默认（v4 模型默认开）；False=显式关（标题等短请求别浪费 thinking）
 
 
 @dataclass(frozen=True)
@@ -121,6 +122,9 @@ def build_payload(request: LlmRequest, default_model: str) -> dict:
         payload['tool_choice'] = 'auto'
     if request.max_tokens:
         payload['max_tokens'] = request.max_tokens
+    if request.thinking is not None:
+        # DeepSeek v4 默认 thinking=enabled：显式关/开都要传 thinking 参数
+        payload['thinking'] = {'type': 'enabled' if request.thinking else 'disabled'}
     return payload
 
 

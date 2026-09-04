@@ -93,11 +93,16 @@ def _is_verbatim_copy(title: str, first_text: str) -> bool:
     return t == m or t in m or m in t
 
 
+def _first_text_of(message) -> str:
+    """从 user/message 事件载荷（一条 Message）提取文本（TextBlock 拼接）。"""
+    texts = [b.text for b in getattr(message, 'content', ()) if getattr(b, 'type', '') == 'text']
+    return ''.join(texts)
+
+
 def _should_auto_title(session: Session) -> bool:
     """首条消息后是否值得自动起名：真模型 + 还没有标题 + 尚无任何用户消息。
 
-    一旦会话已有 user/message（resume 继续对话）就不再自动起名——
-    标题应基于"第一条"消息，晚了不如让用户手动改。
+    用于 chat 请求开始时（user/message 尚未 append）的判断。
     """
     if _args is None or _args.fake:
         return False
@@ -106,6 +111,21 @@ def _should_auto_title(session: Session) -> bool:
     if any(e.type == 'user/message' for e in session.events):
         return False
     return True
+
+
+def _first_user_message_just_landed(session: Session) -> bool:
+    """事件已落日志后的判断：这是否恰是第一条 user/message（且无标题、真模型）。
+
+    事件监听回调发生在 append 之后，此刻 session 里 user/message 计数已是 1——
+    若还套用 _should_auto_title（要求 0 条）就永远 False。所以单独判断：
+    真模型 + 无 title + user/message 恰好 1 条（= 刚落地的那条是第一条）。
+    """
+    if _args is None or _args.fake:
+        return False
+    if any(e.type == 'session/title' for e in session.events):
+        return False
+    user_messages = [e for e in session.events if e.type == 'user/message']
+    return len(user_messages) == 1
 
 
 async def _auto_title(session: Session, first_text: str) -> None:
@@ -122,6 +142,7 @@ async def _auto_title(session: Session, first_text: str) -> None:
             model=_args.model,
             messages=(create_user_message([TextBlock(text=first_text[:400])]),),
             max_tokens=30,
+            thinking=False,  # 起名是短请求：关 thinking，别让 30 token 预算被思维链耗尽
         )
         parts: list[str] = []
 
@@ -181,6 +202,19 @@ def _result_payload(block) -> dict:
         'truncated': chars > RESULT_MAX_CHARS,
         'is_error': bool(getattr(block, 'is_error', False)),
     }
+
+
+# 后台任务注册表：保住未完成任务的强引用，防事件循环 GC 丢弃
+# （asyncio 文档明确：create_task 的返回值若无引用，任务可能在执行前被回收）
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _spawn(coro) -> asyncio.Task:
+    """创建并登记一个后台任务；完成时自动从注册表移除。"""
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
 
 
 async def web_approval(name: str, arguments: dict) -> bool:
@@ -450,19 +484,24 @@ async def chat(request: Request) -> StreamingResponse:
     queue: asyncio.Queue = asyncio.Queue()
     unsubscribe = session.on_event(lambda event: queue.put_nowait(event))
 
-    # 首条消息才触发自动起名：标题 = 日志投影，起名失败静默降级 fallback
-    need_title = _should_auto_title(session)
-    if need_title:
-        session_for_title = session
+    # 自动起名：首条用户消息一旦落日志立即触发（不等回合结束——回合可能因
+    # approval / 长任务迟迟不结束；标题只依赖第一条消息，尽早起名体验最好）。
+    # 对齐 harness：监听 user/message，title 事件是独立小请求。
+    title_spawned = {'done': False}
+
+    def _watch_first_user_message(event) -> None:
+        if title_spawned['done']:
+            return
+        if event.type == 'user/message' and _first_user_message_just_landed(session):
+            title_spawned['done'] = True
+            _spawn(_auto_title(session, _first_text_of(event.data)))
+
+    watch = session.on_event(_watch_first_user_message)
 
     async def run_agent() -> None:
         try:
             agent.followup(message)
             await agent.when_idle()
-            if need_title:
-                # 回合跑完再起名：标题基于首条消息全文，此刻消息已在日志里；
-                # 后台任务与响应返回解耦，浏览器回合结束后稍等再刷列表即可看到
-                asyncio.create_task(_auto_title(session_for_title, message))
         finally:
             await queue.put(DONE_MARKER)
 
@@ -487,6 +526,7 @@ async def chat(request: Request) -> StreamingResponse:
             # 客户端断开（停止按钮 / 关页面）：取消 agent，记账由循环层完成
             task.cancel()
             unsubscribe()
+            watch()   # 退订首条消息监听（会话切换后不留悬挂监听）
             if _active_queue is queue:
                 _active_queue = None
 
