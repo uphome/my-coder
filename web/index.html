@@ -1127,6 +1127,9 @@ function showApprovalCard(approvalId, name, argsRaw) {
 async function send() {
   const text = input.value.trim();
   if (!text || busy) return;
+  // 新回合开始：todo = 当前回合的计划，dock 清空（对齐后端 turn/start 投影）。
+  // 若本回合模型重新规划 todo_write，todo_update 帧会重新唤起 dock。
+  setTodos(null);
   addUserMessage(text);
   input.value = '';
   input.style.height = 'auto';
