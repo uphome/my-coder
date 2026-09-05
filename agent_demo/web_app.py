@@ -46,13 +46,36 @@ app.mount('/vendor', StaticFiles(directory=_ROOT / 'web' / 'vendor'), name='vend
 
 _sessions_dir: Path | None = None
 _args: argparse.Namespace | None = None
+
+# ---- 会话 seat 注册表（Web 并发隔离的核心）----
+# 每个打开的会话一个 Seat：session（事件日志）+ agent（状态机/driver）+
+# 该会话自己的活跃 SSE 队列与审批等待表。不同会话互不共享可变状态，
+# 因此可以同时并行跑多个 agent（标签页 A 跑会话 X、标签页 B 跑会话 Y）。
+# "焦点"概念仍在（_current_sid/_session/_agent 指向最近切换的会话），
+# 但那只是前端"正在看哪个"的便捷别名——运行中的资源都挂在 Seat 里。
+class Seat:
+    def __init__(self, sid: str, session, agent) -> None:
+        self.sid = sid
+        self.session = session
+        self.agent = agent
+        # 该会话当前活跃的 SSE 队列（approval 请求经它推给本会话的浏览器）。
+        # 每会话同时最多一条活跃对话流（前端单标签页串行使用）；None = 空闲。
+        self.queue: asyncio.Queue | None = None
+        # 该会话自己的审批等待表（aid → Future）；拒绝/批准经 /approval/respond 唤醒。
+        self.approvals: dict[str, asyncio.Future] = {}
+        # 会话上下文快照（供 _context_payload 等按会话取数，不依赖全局焦点）
+        self.context = None
+
+_seats: dict[str, Seat] = {}
 _session: Session | None = None
 _agent = None
 _current_sid: str = ''
 
+# 与历史测试兼容的便捷函数：焦点会话的 seat（无焦点时 None）
+def _focus_seat() -> Seat | None:
+    return _seats.get(_current_sid)
+
 # Web approval：敏感工具（bash/write/edit）执行前推送请求给浏览器，等待人工批准/拒绝
-_approval_futures: dict[str, asyncio.Future] = {}
-_active_queue: asyncio.Queue | None = None
 APPROVAL_TIMEOUT_S = 300  # 用户不点则 fail-safe 拒绝（防模型永久卡住）
 
 DONE_MARKER = object()
@@ -136,18 +159,20 @@ def _first_user_message_just_landed(session: Session) -> bool:
     return len(user_messages) == 1
 
 
-async def _auto_title(session: Session, first_text: str) -> None:
-    """自动起名：复用 agent 的 LLM 客户端发一个小请求，结果落 session/title。
+async def _auto_title(seat: Seat, first_text: str) -> None:
+    """自动起名：复用该会话 agent 的 LLM 客户端发一个小请求，结果落 session/title。
 
     后台任务、与主对话并发互不干扰；任何失败（网络/超时/空输出）都静默
     跳过——列表继续显示 fallback 摘要，起名失败绝不打扰主流程。
+    按 seat 取 agent（并发隔离：起名请求用本会话的 llm，不读全局焦点）。
     """
-    if _agent is None:
+    agent = seat.agent
+    if agent is None:
         return
     try:
         request = LlmRequest(
             system=TITLE_SYSTEM,
-            model=_args.model,
+            model=agent.options.get('model', ''),
             messages=(create_user_message([TextBlock(text=first_text[:400])]),),
             max_tokens=30,
             thinking=False,  # 起名是短请求：关 thinking，别让 30 token 预算被思维链耗尽
@@ -155,7 +180,7 @@ async def _auto_title(session: Session, first_text: str) -> None:
         parts: list[str] = []
 
         async def collect() -> None:
-            async for chunk in _agent.llm.stream(request):
+            async for chunk in agent.llm.stream(request):
                 if chunk.text:
                     parts.append(chunk.text)
                 if chunk.finish_reason:
@@ -169,7 +194,7 @@ async def _auto_title(session: Session, first_text: str) -> None:
             # 逐字复读原文 = 起名失败：不落 auto 事件，列表继续显示 fallback
             print('[title] auto-title rejected: verbatim copy of user message', flush=True)
             return
-        session.append('session/title', {'title': title, 'source': 'auto'})
+        seat.session.append('session/title', {'title': title, 'source': 'auto'})
     except Exception as error:  # noqa: BLE001 - 起名失败不影响主流程
         print(f'[title] auto-title skipped: {type(error).__name__}: {error}', flush=True)
 
@@ -177,11 +202,12 @@ async def _auto_title(session: Session, first_text: str) -> None:
 def _append_title(sid: str, title: str, source: str) -> None:
     """往一个会话追加 session/title 事件（标题 = 日志投影，改完即落盘）。
 
-    目标是当前会话直接用全局 session；否则临时重放目标日志 + bind_store
-    append（不切换当前会话——从列表里改别的会话名是允许的）。
+    优先用该会话的 Seat（在跑/打开过的会话直接 append，不打断 agent）；
+    否则临时重放目标日志 + bind_store append（从列表里改没打开过的会话）。
     """
-    if sid == _current_sid and _session is not None:
-        _session.append('session/title', {'title': title, 'source': source})
+    seat = _seats.get(sid)
+    if seat is not None:
+        seat.session.append('session/title', {'title': title, 'source': source})
         return
     path = (_sessions_dir or Path('.sessions')) / f'{sid}.jsonl'
     if not path.exists():
@@ -225,25 +251,31 @@ def _spawn(coro) -> asyncio.Task:
     return task
 
 
-async def web_approval(name: str, arguments: dict) -> bool:
-    """Web 版 approval 钩子：推送 approval_request 到 SSE 流，await 前端的 respond。
+def _approval_for(seat: Seat):
+    """生成绑定到某个会话 seat 的 approval 钩子（build_agent 时挂载）。
 
-    只在当前对话的 SSE 流活跃时可用；超时/无流一律 fail-safe 拒绝。
+    Web 并发隔离的关键：审批必须回到"提出请求的那个会话"的浏览器。
+    旧实现读全局 _active_queue——两会话并行时 A 的审批会推到 B 的流。
+    现在钩子闭包捕获自己的 seat：请求推 seat.queue、等待表存 seat.approvals，
+    各会话天然隔离。无活跃流/超时一律 fail-safe 拒绝。
     """
-    if _active_queue is None:
-        return False
-    aid = uuid.uuid4().hex
-    fut: asyncio.Future = asyncio.get_running_loop().create_future()
-    _approval_futures[aid] = fut
-    await _active_queue.put({
-        'type': 'approval_request', 'id': aid, 'name': name, 'arguments': arguments,
-    })
-    try:
-        return await asyncio.wait_for(fut, timeout=APPROVAL_TIMEOUT_S)
-    except TimeoutError:
-        return False
-    finally:
-        _approval_futures.pop(aid, None)
+    async def approval(name: str, arguments: dict) -> bool:
+        queue = seat.queue
+        if queue is None:
+            return False  # 该会话当前没有活跃 SSE 流
+        aid = uuid.uuid4().hex
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        seat.approvals[aid] = fut
+        await queue.put({
+            'type': 'approval_request', 'id': aid, 'name': name, 'arguments': arguments,
+        })
+        try:
+            return await asyncio.wait_for(fut, timeout=APPROVAL_TIMEOUT_S)
+        except TimeoutError:
+            return False
+        finally:
+            seat.approvals.pop(aid, None)
+    return approval
 
 
 def _check_init() -> None:
@@ -251,15 +283,20 @@ def _check_init() -> None:
         raise HTTPException(503, 'web session not initialized')
 
 
-def _open_session(sid: str, *, allow_missing: bool) -> dict:
-    """打开一个会话（校验 id → adopt 重放 → 重建 agent），返回会话描述。
+def _open_session_seat(sid: str, *, allow_missing: bool) -> Seat:
+    """取/建一个会话的 Seat（不切换全局焦点）。
 
-    allow_missing=True：会话文件不存在时也允许（首次启动/新建，首条消息才落盘）。
+    Seat get-or-create 语义：同一 sid 第二次调用复用已有 Seat（其 agent
+    若在跑继续跑、事件日志自然延续），而不是重建——这正是并发隔离的要义：
+    两会话并行时各自 Seat 独立，互不销毁。首次调用 adopt 重放日志 =
+    恢复该会话的记忆。
     """
-    global _session, _agent, _current_sid
     log_path = (_sessions_dir or Path('.sessions')) / f'{sid}.jsonl'
     if not allow_missing and not log_path.exists():
         raise HTTPException(404, f'session {sid!r} not found')
+    seat = _seats.get(sid)
+    if seat is not None:
+        return seat
     session = Session(id=sid)
     if log_path.exists():
         for event in load_events(log_path):
@@ -268,16 +305,31 @@ def _open_session(sid: str, *, allow_missing: bool) -> dict:
     if not log_path.exists():
         # 新会话立即落盘（空文件）：列表可见、可切换——"会话存在 = 有文件"
         log_path.touch()
-    _session = session
-    _current_sid = sid
+    seat = Seat(sid, session, None)
+    _seats[sid] = seat  # 先登记：审批钩子闭包引用 seat，创建 agent 前就位
     hooks = Hooks()
-    hooks.approval = web_approval   # Web 版确认：前端弹"批准/拒绝"按钮
-    _agent = build_agent(session, _args, {'reasoning_started': False, 'request_no': 0, 'tool_no': 0}, hooks=hooks)
+    hooks.approval = _approval_for(seat)   # Web 版确认：弹本会话的批准/拒绝
+    seat.agent = build_agent(
+        session, _args,
+        {'reasoning_started': False, 'request_no': 0, 'tool_no': 0},
+        hooks=hooks,
+    )
+    return seat
+
+
+def _open_session(sid: str, *, allow_missing: bool) -> dict:
+    """打开/切换到会话：Seat get-or-create + 设置全局焦点（_session/_agent 别名）。"""
+    global _session, _agent, _current_sid
+    seat = _open_session_seat(sid, allow_missing=allow_missing)
+    # 设置全局焦点（便捷别名：测试与旧路由仍读 _session/_agent）
+    _session = seat.session
+    _agent = seat.agent
+    _current_sid = sid
     return {
         'id': sid,
-        'history': [message_to_payload(m) for m in session.derive_messages()],
-        'todos': fold_todos(session) or [],  # 当前 todo 投影：切换会话时恢复 dock
-        'context': _context_payload(session),  # 上下文占用：切换会话时恢复圆环
+        'history': [message_to_payload(m) for m in seat.session.derive_messages()],
+        'todos': fold_todos(seat.session) or [],  # 当前 todo 投影：切换会话时恢复 dock
+        'context': _context_payload(seat.session),  # 上下文占用：切换会话时恢复圆环
     }
 
 
@@ -336,8 +388,17 @@ def _scan_sessions() -> list[dict]:
 def init_web(workspace: Path, fake: bool = False, model: str = 'deepseek-v4-flash',
              sessions_dir: Path | None = None, sid: str = 'web',
              compact_at: int | None = None) -> None:
-    """初始化全局状态（测试可注入 workspace / fake / sessions_dir / compact_at）。"""
-    global _sessions_dir, _args
+    """初始化全局状态（测试可注入 workspace / fake / sessions_dir / compact_at）。
+
+    Seat 注册表是模块级缓存：init_web 每次调用都要清空重来——测试每个
+    init_web 用独立 sessions_dir，若不清空，旧目录的 seat（同 sid 如 'web'）
+    会被复用，把上个会话的内存日志带进新初始化。
+    """
+    global _sessions_dir, _args, _session, _agent, _current_sid
+    _seats.clear()
+    _session = None
+    _agent = None
+    _current_sid = ''
     _sessions_dir = Path(sessions_dir or '.sessions')
     _args = argparse.Namespace(
         fake=fake, model=model, workspace=workspace, hide_reasoning=False,
@@ -347,8 +408,12 @@ def init_web(workspace: Path, fake: bool = False, model: str = 'deepseek-v4-flas
     _open_session(sid, allow_missing=True)
 
 
-def event_to_payload(event) -> dict | None:
-    """会话事件 → 前端最小协议（只挑前端关心的；其余事件前端不渲染）。"""
+def event_to_payload(event, session: Session | None = None) -> dict | None:
+    """会话事件 → 前端最小协议（只挑前端关心的；其余事件前端不渲染）。
+
+    session 参数：turn/end 附带的 context 属于"这个事件的会话"（并发下
+    多个会话各自跑，不能读全局焦点会话的占用）——SSE 循环按 seat 传入。
+    """
     if event.type == 'assistant/chunk':
         text = event.data['chunk']['text']
         return {'type': 'chunk', 'text': text} if text else None
@@ -370,11 +435,12 @@ def event_to_payload(event) -> dict | None:
         todos = event.data.get('todos') if isinstance(event.data, dict) else None
         return {'type': 'todo_update', 'todos': todos or []}
     if event.type == 'turn/end':
-        # 回合结束附带上下文占用（圆环数据）：真实 usage 估算 / 1M 窗口
+        # 回合结束附带上下文占用（圆环数据）：真实 usage 估算 / 1M 窗口。
+        # 用事件所属会话的占用（并发隔离：不要读全局焦点会话的）
         return {
             'type': 'turn_end',
             'reason': event.data['reason'],
-            'context': _context_payload(),
+            'context': _context_payload(session),
         }
     return None
 
@@ -508,27 +574,40 @@ async def session_title(sid: str, request: Request) -> dict:
 
 
 @app.get('/history')
-def history() -> dict:
-    """当前会话的历史消息 + 当前 todo 投影（页面加载/刷新时恢复 UI）。"""
+def history(sid: str | None = None) -> dict:
+    """指定会话的历史消息 + 当前 todo 投影（页面加载/刷新时恢复 UI）。
+
+    query ?sid= 可选：缺省 = 全局焦点会话（旧前端/测试不带 sid 也能跑）；
+    多标签页并行时前端带自己看的 sid，各取各的 Seat。
+    """
     _check_init()
-    assert _session is not None
+    target_sid = sid or _current_sid
+    seat = _seats.get(target_sid)
+    if seat is None:
+        raise HTTPException(404, f'session {target_sid!r} not open — switch to it first')
     return {
-        'history': [message_to_payload(m) for m in _session.derive_messages()],
-        'todos': fold_todos(_session) or [],
-        'context': _context_payload(),
+        'history': [message_to_payload(m) for m in seat.session.derive_messages()],
+        'todos': fold_todos(seat.session) or [],
+        'context': _context_payload(seat.session),
     }
 
 
 @app.post('/chat')
 async def chat(request: Request) -> StreamingResponse:
-    """发起一轮对话并以 SSE 流返回事件；客户端断开即取消 agent。"""
+    """发起一轮对话并以 SSE 流返回事件；客户端断开即取消该会话 agent。
+
+    body.sid 可选：缺省 = 全局焦点会话（旧前端/测试不带 sid 也能跑）。
+    显式带 sid 时定位到对应 seat——两会话各开一条 SSE 流，互不干扰。
+    """
     _check_init()
-    assert _session is not None and _agent is not None  # 单例运行时保证非空
-    session, agent = _session, _agent
+    assert _session is not None and _agent is not None  # 初始化后必有焦点 seat
     body = await request.json()
     message = (body.get('message') or '').strip()
     if not message:
         raise HTTPException(400, 'message must not be empty')
+    sid = body.get('sid') or _current_sid
+    seat = _seats.get(sid) or _open_session_seat(sid, allow_missing=True)
+    session, agent = seat.session, seat.agent
 
     queue: asyncio.Queue = asyncio.Queue()
     unsubscribe = session.on_event(lambda event: queue.put_nowait(event))
@@ -543,7 +622,7 @@ async def chat(request: Request) -> StreamingResponse:
             return
         if event.type == 'user/message' and _first_user_message_just_landed(session):
             title_spawned['done'] = True
-            _spawn(_auto_title(session, _first_text_of(event.data)))
+            _spawn(_auto_title(seat, _first_text_of(event.data)))
 
     watch = session.on_event(_watch_first_user_message)
 
@@ -557,8 +636,9 @@ async def chat(request: Request) -> StreamingResponse:
     task = asyncio.create_task(run_agent())
 
     async def sse_stream():
-        global _active_queue
-        _active_queue = queue   # approval 钩子经它推送请求
+        # 本会话的活跃队列挂到 seat：per-seat approval 钩子经它推送请求。
+        # （旧实现写全局 _active_queue——两会话并行时会被互相覆盖）
+        seat.queue = queue
         try:
             while True:
                 item = await queue.get()
@@ -568,25 +648,27 @@ async def chat(request: Request) -> StreamingResponse:
                     # Web approval 请求（钩子直接放的自定义载荷，非 session 事件）
                     yield f'data: {json.dumps(item, ensure_ascii=False)}\n\n'
                     continue
-                payload = event_to_payload(item)
+                payload = event_to_payload(item, session)
                 if payload is not None:
                     yield f'data: {json.dumps(payload, ensure_ascii=False)}\n\n'
         finally:
-            # 客户端断开（停止按钮 / 关页面）：取消 agent，记账由循环层完成
+            # 客户端断开（停止按钮 / 关页面）：取消该会话 agent，记账由循环层完成
             task.cancel()
             unsubscribe()
             watch()   # 退订首条消息监听（会话切换后不留悬挂监听）
-            if _active_queue is queue:
-                _active_queue = None
+            if seat.queue is queue:   # 只有自己挂的才清（并发：别清掉别的流的）
+                seat.queue = None
 
     return StreamingResponse(sse_stream(), media_type='text/event-stream')
 
 
 @app.post('/compact')
-async def compact() -> dict:
-    """手动压缩当前会话：把旧回合折叠成 checkpoint（复用 run_compaction）。
+async def compact(request: Request) -> dict:
+    """手动压缩会话：把旧回合折叠成 checkpoint（复用 run_compaction）。
 
-    前置校验（对齐 dsh /compact 命令的串行语义）：
+    body.sid 可选（缺省 = 全局焦点会话；无 body 也允许——旧前端/测试
+    直接 POST 空体压缩当前会话）。前置校验（对齐 dsh /compact 命令的
+    串行语义）：
     - fake 模式拒绝：脚本模型不能生成摘要（自动压缩本来也不挂）
     - agent 运行中拒绝：压缩事务会动 surface，与进行中的回合冲突
     - 无可压段（旧回合不足）→ compacted=False + reason，由前端提示
@@ -595,13 +677,26 @@ async def compact() -> dict:
     assert _session is not None and _agent is not None
     if _args is not None and _args.fake:
         raise HTTPException(400, 'fake 模式不支持手动压缩（脚本模型不能生成摘要）')
-    if _agent.status != 'idle':
+    # body 可选：空体也允许（压缩焦点会话）
+    raw = await request.body()
+    sid = _current_sid
+    if raw:
+        try:
+            body = json.loads(raw)
+        except json.JSONDecodeError as error:
+            raise HTTPException(400, 'invalid JSON body') from error
+        sid = (body or {}).get('sid') or _current_sid
+    seat = _seats.get(sid)
+    if seat is None:
+        raise HTTPException(404, f'session {sid!r} not open — switch to it first')
+    agent = seat.agent
+    if agent.status != 'idle':
         raise HTTPException(409, 'agent 正在运行——回合结束后再压缩')
-    if select_compact_range(_agent.session, keep_turns=1) is None:
+    if select_compact_range(seat.session, keep_turns=1) is None:
         return {'compacted': False, 'reason': '没有可压缩的旧回合'}
     ok = await run_compaction(
-        _agent.session, _agent.llm, keep_turns=1,
-        model=_agent.options.get('model', ''),
+        seat.session, agent.llm, keep_turns=1,
+        model=agent.options.get('model', ''),
     )
     return {'compacted': ok,
             'reason': '压缩完成' if ok else '压缩未完成（摘要生成失败或摘要未通过校验）'}
@@ -609,15 +704,19 @@ async def compact() -> dict:
 
 @app.post('/approval/respond')
 async def approval_respond(request: Request) -> dict:
-    """浏览器对 approval 请求的响应：批准（true）或拒绝（false），唤醒钩子。"""
+    """浏览器对 approval 请求的响应：批准（true）或拒绝（false），唤醒钩子。
+
+    aid 在各 seat 的 approvals 里查（并发：每个会话的审批表独立，按 aid 唯一）。
+    """
     body = await request.json()
     aid = body.get('id')
-    fut = _approval_futures.get(aid)
-    if fut is None:
-        raise HTTPException(404, f'unknown approval id {aid!r}')
-    if not fut.done():
-        fut.set_result(bool(body.get('approved')))
-    return {'ok': True}
+    for seat in _seats.values():
+        fut = seat.approvals.get(aid)
+        if fut is not None:
+            if not fut.done():
+                fut.set_result(bool(body.get('approved')))
+            return {'ok': True, 'sid': seat.sid}
+    raise HTTPException(404, f'unknown approval id {aid!r}')
 
 
 def main() -> None:

@@ -1759,3 +1759,66 @@ def test_web_manual_compact_endpoint(tmp_path):
     body2 = client.post('/compact').json()
     assert body2['compacted'] is False
     assert body2['reason']
+
+
+def test_web_sessions_run_in_parallel_isolated(tmp_path):
+    """Web 并发隔离：两会话各自跑一轮 chat，事件/审批/焦点互不踩。
+
+    旧实现是全局单例（_session/_agent/_active_queue）：两会话同时跑时
+    B 会覆盖 A 的指针与 SSE 队列。seat 化后每个 sid 一个
+    {session, agent, queue}——验证：/chat 带 sid 路由到各自 seat、
+    消息只进自己的日志、焦点别名随切换走、agent 实例彼此不同。
+    """
+    from fastapi.testclient import TestClient
+
+    from agent_demo import web_app
+
+    web_app.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
+    client = TestClient(web_app.app)
+    assert _id_of(client) == 'web'
+
+    # 建第二个会话（new 返回描述并切为焦点）
+    b = client.post('/sessions/new').json()
+    assert b['id'] != 'web'
+
+    # 两个会话各自发一轮消息（fake llm 离线脚本，能跑完一个回合）
+    ra = client.post('/chat', json={'message': '任务甲：先读 A', 'sid': 'web'})
+    rb = client.post('/chat', json={'message': '任务乙：先读 B', 'sid': b['id']})
+    assert ra.status_code == 200 and rb.status_code == 200
+    assert '"type": "turn_end"' in ra.text and '"type": "turn_end"' in rb.text
+
+    # 焦点 = 最后切换/操作的会话（兼容旧路由无 sid 语义）
+    assert web_app._current_sid == b['id']
+    assert web_app._session.id == b['id']
+
+    # 两会话的 agent 是不同实例，各自日志只有自己的消息
+    seat_a = web_app._seats['web']
+    seat_b = web_app._seats[b['id']]
+    assert seat_a.agent is not seat_b.agent          # 独立 agent
+    assert seat_a.session is not seat_b.session      # 独立事件日志
+
+    def user_texts(seat):
+        return [m.content[0].text for m in seat.session.derive_messages()
+                if m.content and getattr(m.content[0], 'type', '') == 'text'
+                and m.role == 'user']
+
+    assert user_texts(seat_a) == ['任务甲：先读 A']   # A 的日志只有甲
+    assert user_texts(seat_b) == ['任务乙：先读 B']   # B 的日志只有乙
+
+    # /history 带 sid 各取各的（不带 = 焦点 b）
+    ha = client.get('/history', params={'sid': 'web'}).json()
+    hb = client.get('/history').json()
+    assert any('任务甲' in (m.get('text') or '') for m in ha['history'])
+    assert any('任务乙' in (m.get('text') or '') for m in hb['history'])
+
+    # 切回 A：seat 复用（同实例，agent 事件日志延续）——不重建销毁
+    switched = client.post('/sessions/web/switch').json()
+    assert web_app._session.id == 'web'
+    assert web_app._seats['web'] is seat_a             # 复用而非重建
+    assert any('任务甲' in (m.get('text') or '') for m in switched['history'])
+
+
+def _id_of(client) -> str:
+    """当前焦点会话 id（init 后默认 'web'）。"""
+    from agent_demo import web_app
+    return web_app._current_sid
