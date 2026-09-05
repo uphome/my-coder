@@ -121,21 +121,32 @@ def create_tool_result_message(call_id: str, content: str, is_error: bool) -> Me
 class SessionEvent:
     """一条会话事件：日志（唯一事实源）的最小单位。
 
-    seq 单调递增；surface_op='append' 是枢纽字段——标记"这条事件
-    会浮上水面变成模型消息"，只有 user/message、assistant/message、
-    tool/result 三类能带它，其余事件（chunk、边界、todo）是痕迹数据。
+    seq 单调递增；surface_op 是枢纽字段——标记"这条事件在 surface 上
+    如何浮上水面"：
+    - 'append'：追加到 surface 尾（user/message、assistant/message、
+      tool/result 三类 surface 事件，compaction 的 checkpoint 也是普通
+      user/message + append 之外的选择见下）
+    - 'replace'：遮蔽一段旧 surface 区间并原位顶替（compaction 用）——
+      被遮蔽的 seq 记录在 shadowed 字段，原始事件仍在日志（append-only
+      不删行），只是从投影（模型可见）中消失
+    - None：痕迹数据（chunk、边界、todo），永不浮上水面
+    只有三类 surface 事件能带 surface_op；其余事件（chunk、边界、todo）
+    是痕迹数据。
     """
     seq: int
     time: float
     type: str
     data: object = None
     surface_op: str | None = None
+    shadowed: tuple | None = None  # surface_op='replace' 时：被遮蔽的 (start_seq, end_seq)
     ignorable: bool = False
 
 
-def new_event(seq: int, type_: str, data=None, surface_op: str | None = None) -> SessionEvent:
+def new_event(seq: int, type_: str, data=None, surface_op: str | None = None,
+              shadowed: tuple | None = None) -> SessionEvent:
     """事件工厂：打上当前时间戳，seq 由调用方（Session）保证单调。"""
-    return SessionEvent(seq=seq, time=time.time(), type=type_, data=data, surface_op=surface_op)
+    return SessionEvent(seq=seq, time=time.time(), type=type_, data=data,
+                        surface_op=surface_op, shadowed=shadowed)
 
 
 # ---- JSONL 编解码：tagged dict 方案 ----
@@ -239,17 +250,20 @@ def event_to_json(event: SessionEvent) -> dict:
         'type': event.type,
         'data': data_to_json(event.data),
         'surface_op': event.surface_op,
+        'shadowed': list(event.shadowed) if event.shadowed else None,
         'ignorable': event.ignorable,
     }
 
 
 def event_from_json(data: dict) -> SessionEvent:
     """event_to_json 的严格逆操作：load_events 读回一行时调用。"""
+    shadowed = data.get('shadowed')
     return SessionEvent(
         seq=data['seq'],
         time=data['time'],
         type=data['type'],
         data=data_from_json(data['data']),
         surface_op=data.get('surface_op'),
+        shadowed=tuple(shadowed) if shadowed else None,
         ignorable=data.get('ignorable', False),
     )

@@ -1095,3 +1095,72 @@ def test_todo_fold_clears_on_turn_start(tmp_path):
     for e in load_events(path):
         restored.adopt(e)
     assert [t['content'] for t in fold_todos(restored)] == ['c']
+
+
+def test_surface_replace_shadows_and_derives_in_place():
+    """surface replace：遮蔽旧区间 + checkpoint 原位顶替 + 日志完整 + 重放一致。"""
+    from agent_demo.session import Session
+    from agent_demo.values import TextBlock, create_assistant_message, create_user_message
+
+    def user(text):
+        return create_user_message([TextBlock(text=text)])
+
+    def assistant(text):
+        return {'message': create_assistant_message([TextBlock(text=text)])}
+
+    s = Session(id='t')
+    s.append('user/message', user('Q1'), surface_op='append')
+    s.append('assistant/message', assistant('A1'), surface_op='append')
+    s.append('user/message', user('Q2'), surface_op='append')
+    s.append('assistant/message', assistant('A2'), surface_op='append')
+    assert [m.content[0].text for m in s.derive_messages()] == ['Q1', 'A1', 'Q2', 'A2']
+
+    # replace：遮蔽前两条（Q1/A1 = seq 0-1），checkpoint 原位顶替
+    s.append('user/message', user('[checkpoint] early summary'),
+             surface_op='replace', shadowed=(0, 1))
+    assert s.surface == (4, 2, 3)          # checkpoint(4) 在原区间头部
+    assert [m.content[0].text for m in s.derive_messages()] == ['[checkpoint] early summary', 'Q2', 'A2']
+
+    # 日志 append-only：被遮蔽事件仍在（审计/恢复不丢）
+    assert len(s.events) == 5
+    assert [e.surface_op for e in s.events] == ['append', 'append', 'append', 'append', 'replace']
+    assert s.events[4].shadowed == (0, 1)
+
+    # 校验：非 surface 不能带 surface_op；replace 必须带 shadowed
+    import pytest as _pytest
+    with _pytest.raises(ValueError):
+        s.append('turn/start', {'turn': 2}, surface_op='append')
+    with _pytest.raises(ValueError):
+        s.append('user/message', user('x'), surface_op='replace')  # 缺 shadowed
+    with _pytest.raises(ValueError):
+        s.append('user/message', user('x'), surface_op='append', shadowed=(0, 1))  # append 带 shadowed
+
+    # 连续 replace（再压 Q2/A2）：新 checkpoint 继续原位
+    s.append('user/message', user('[checkpoint2] full summary'),
+             surface_op='replace', shadowed=(2, 3))
+    assert [m.content[0].text for m in s.derive_messages()] == ['[checkpoint] early summary', '[checkpoint2] full summary']
+
+
+def test_surface_replace_replays_identically(tmp_path):
+    """resume：replace 遮蔽随日志重放重建，投影与压前一致。"""
+    from agent_demo.persistence import load_events, save_event
+    from agent_demo.session import Session
+    from agent_demo.values import TextBlock, create_user_message
+
+    s = Session(id='r')
+    s.append('user/message', create_user_message([TextBlock(text='hi')]), surface_op='append')
+    s.append('user/message', create_user_message([TextBlock(text='[cp] summarized')]),
+             surface_op='replace', shadowed=(0, 0))
+
+    path = tmp_path / 'r.jsonl'
+    for e in s.events:
+        save_event(path, e)
+    restored = Session(id='r')
+    for e in load_events(path):
+        restored.adopt(e)
+
+    assert restored.surface == s.surface
+    assert [m.content[0].text for m in restored.derive_messages()] == ['[cp] summarized']
+    # replace 的 shadowed 区间经 JSONL 往返后保留
+    rep = [e for e in restored.events if e.surface_op == 'replace'][0]
+    assert rep.shadowed == (0, 0)
