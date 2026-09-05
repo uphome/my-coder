@@ -156,6 +156,54 @@ def _extract_path(arguments: dict) -> str | None:
     return None
 
 
+def estimate_context_tokens(session: Session) -> int:
+    """估算当前模型可见上下文的 token 数（粗估：字符 / 2，中文约 1.5~2 字/token）。
+
+    教学实现：真实 token 计费需 provider usage，demo 用字符近似对齐
+    "压缩要真省"的直觉——估算偏保守没关系，阈值可调。仅统计
+    derive_messages() 折叠出的文本（模型真正看到的）。
+    """
+    total_chars = 0
+    for message in session.derive_messages():
+        for block in getattr(message, 'content', ()):
+            if getattr(block, 'type', '') == 'text':
+                total_chars += len(block.text)
+    # 粗略：英文约 4 字符/token、中文约 1.5 字符/token；教学用 /2 折中，
+    # 让触发偏早不偏晚（宁压缩勿溢出）
+    return max(1, total_chars // 2)
+
+
+def wire_auto_compaction(agent, *, max_tokens: int, keep_turns: int = 3) -> object:
+    """给 agent 挂自动压缩监听；返回退订函数。
+
+    接线方式（决策走注册声明，不动 loop）：session.on_event 监听
+    turn/end——回合收尾后量上下文，超 max_tokens 就在后台压缩。
+    llm 复用 agent.llm（摘要请求同客户端）；任务登记防 asyncio GC。
+    """
+    return agent.session.on_event(
+        lambda event: _on_turn_event(agent, event, max_tokens, keep_turns))
+
+
+def _on_turn_event(agent, event, max_tokens: int, keep_turns: int) -> None:
+    """同步监听回调：turn/end completed 且上下文超阈值 → 调度后台压缩。"""
+    if event.type != 'turn/end' or event.data.get('reason') != 'completed':
+        return
+    if estimate_context_tokens(agent.session) < max_tokens:
+        return
+    import asyncio
+
+    task = asyncio.ensure_future(run_compaction(
+        agent.session, agent.llm, keep_turns=keep_turns,
+        model=agent.options.get('model', ''),
+    ))
+    # 持引用防事件循环 GC 丢弃未完成的后台压缩
+    _background_compactions.add(task)
+    task.add_done_callback(_background_compactions.discard)
+
+
+_background_compactions: set = set()
+
+
 def extract_file_ops(session: Session, start_seq: int, end_seq: int) -> FileOps:
     """从被压区间 [start_seq..end_seq] 的 tool/call 痕迹提取文件操作。
 

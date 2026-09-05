@@ -1391,3 +1391,57 @@ async def test_compaction_failure_degrades():
     s2 = fresh()
     assert await run_compaction(s2, StubLlm('模型偷懒复读的摘要内容' * 100), keep_turns=1) is False
     assert not any(e.surface_op == 'replace' for e in s2.events)
+
+
+@pytest.mark.asyncio
+async def test_auto_compaction_fires_on_threshold(tmp_path):
+    """自动压缩：turn/end 后上下文超阈值 → 触发压缩；低于阈值不触发。"""
+    from agent_demo.compaction import wire_auto_compaction
+    from agent_demo.session import Session
+    from agent_demo.values import TextBlock, create_assistant_message, create_user_message
+
+    def user(text):
+        return create_user_message([TextBlock(text=text)])
+
+    def asst(text):
+        return {'message': create_assistant_message([TextBlock(text=text)])}
+
+    class StubLlm:
+        async def stream(self, request, signal=None):
+            from agent_demo.llm import StreamChunk
+            yield StreamChunk(text='## 主要请求\n- 总结\n## 下一步\n1. 无', finish_reason='stop')
+
+    def build():
+        s = Session(id='a')
+        long_txt = '任务：全面重构工具并补充边界测试覆盖空文件越界非法输入等场景。' * 20
+        s.append('turn/start', {'turn': 1})
+        s.append('user/message', user(long_txt), surface_op='append')
+        s.append('assistant/message', asst('收到，先读实现再分步重构。' * 8), surface_op='append')
+        s.append('turn/end', {'turn': 1, 'reason': 'completed'})
+        s.append('turn/start', {'turn': 2})
+        s.append('user/message', user('继续'), surface_op='append')
+        return s
+
+    # 超阈值（估算 ~几百）→ turn2 结束触发压缩
+    s = build()
+    agent = type('A', (), {'session': s, 'llm': StubLlm(), 'options': {'model': 'm'}})()
+    unsub = wire_auto_compaction(agent, max_tokens=100, keep_turns=1)
+    s.append('assistant/message', asst('继续推进。' * 3), surface_op='append')
+    s.append('turn/end', {'turn': 2, 'reason': 'completed'})
+    await asyncio.sleep(0.3)
+    unsub()
+    assert any(e.type == 'compaction/summary' for e in s.events)
+    assert any(e.type == 'compaction/end' for e in s.events)
+    assert any(e.type == 'turn/end' for e in s.events)
+
+    # 低于阈值 → 不触发
+    s2 = Session(id='a2')
+    s2.append('turn/start', {'turn': 1})
+    s2.append('user/message', user('hi'), surface_op='append')
+    s2.append('assistant/message', asst('hello'), surface_op='append')
+    agent2 = type('A', (), {'session': s2, 'llm': StubLlm(), 'options': {'model': 'm'}})()
+    unsub2 = wire_auto_compaction(agent2, max_tokens=100000, keep_turns=1)
+    s2.append('turn/end', {'turn': 1, 'reason': 'completed'})
+    await asyncio.sleep(0.2)
+    unsub2()
+    assert not any(e.type == 'compaction/start' for e in s2.events)
