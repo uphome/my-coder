@@ -156,6 +156,82 @@ def _extract_path(arguments: dict) -> str | None:
     return None
 
 
+def last_prompt_usage(session: Session) -> dict | None:
+    """最后一条带 usage 的 assistant/message 的 usage 明细（真实测量的上下文）。
+
+    真实来源：assistant/message 事件里的 usage——provider 实测的
+    "这次请求输入多少 token"，含 prompt_cache_hit/miss（DeepSeek 的
+    缓存命中拆分），最接近当前上下文规模（学 PI：真实测量优先）。
+    只认最新一条：更早的 assistant/message 的 usage 是旧请求的，
+    不能代表当前上下文（新消息追加后旧 usage 即过期）。
+    返回 None 表示没有任何真实测量可用（如 fake 模式）。
+    """
+    for event in reversed(session.events):
+        if event.type != 'assistant/message':
+            continue
+        data = event.data if isinstance(event.data, dict) else {}
+        usage = data.get('usage')
+        if isinstance(usage, dict) and usage.get('prompt_tokens'):
+            return usage
+        return None  # 最新一条 assistant/message 没 usage → 无真实测量
+    return None
+
+
+def session_token_totals(session: Session) -> dict | None:
+    """会话级真实 token 账（对齐 dsh token-meter 的 totals 投影）。
+
+    把日志里每条带 usage 的 assistant/message 分别累加输入/输出：
+      - input_tokens：prompt 总输入（DeepSeek 的 prompt_tokens 含缓存命中）
+      - output_tokens：completion 输出
+      - cache_hit_tokens / cache_miss_tokens：仅当该请求同时报了
+        DeepSeek 的缓存拆分（prompt_cache_hit/miss_tokens）才计入——
+        某请求没报拆分就不进缓存账（学 dsh：宁缺毋滥，不拿部分数据假装完整）。
+    返回 None：整场没有任何真实 usage（如 fake 模式，前端就不显示）。
+    """
+    totals = {'input_tokens': 0, 'output_tokens': 0,
+              'cache_hit_tokens': 0, 'cache_miss_tokens': 0}
+    saw_usage = False
+    for event in session.events:
+        if event.type != 'assistant/message':
+            continue
+        data = event.data if isinstance(event.data, dict) else {}
+        usage = data.get('usage')
+        if not isinstance(usage, dict):
+            continue
+        prompt = usage.get('prompt_tokens')
+        output = usage.get('completion_tokens')
+        if not isinstance(prompt, (int, float)) or prompt < 0:
+            continue  # 这条 usage 不可用，跳过（对齐 dsh normalizeUsage 丢弃）
+        totals['input_tokens'] += int(prompt)
+        if isinstance(output, (int, float)) and output >= 0:
+            totals['output_tokens'] += int(output)
+        hit = usage.get('prompt_cache_hit_tokens')
+        miss = usage.get('prompt_cache_miss_tokens')
+        if isinstance(hit, (int, float)) and isinstance(miss, (int, float)):
+            totals['cache_hit_tokens'] += int(hit)
+            totals['cache_miss_tokens'] += int(miss)
+        saw_usage = True
+    return totals if saw_usage else None
+
+
+def cache_hit_rate(session: Session) -> float | None:
+    """会话级缓存命中率（0..1，token 加权）；无真实测量返回 None。
+
+    口径对齐 dsh：分母 = 全会话 Σ(prompt_cache_hit + prompt_cache_miss)
+    （只统计报了缓存拆分的请求），分子 = Σ hit。这是"总账式"聚合
+    （≈token 加权平均），不是逐请求百分比再平均，也不是最近一次快照。
+    """
+    totals = session_token_totals(session)
+    if totals is None:
+        return None
+    hit = totals['cache_hit_tokens']
+    miss = totals['cache_miss_tokens']
+    total = hit + miss
+    if total <= 0:
+        return None
+    return hit / total
+
+
 def estimate_context_tokens(session: Session) -> int:
     """估算当前模型可见上下文 token（真实 usage 优先，字符估算兜底）。
 
@@ -165,15 +241,9 @@ def estimate_context_tokens(session: Session) -> int:
     兜底：无 usage 时按文本字符 /2 粗估（英文约 4 字符/token、中文约
     1.5，取折中让触发偏早不偏晚——宁压缩勿溢出）。
     """
-    # 真实 usage：扫最后一条带 usage 的 assistant/message
-    for event in reversed(session.events):
-        if event.type != 'assistant/message':
-            continue
-        data = event.data if isinstance(event.data, dict) else {}
-        usage = data.get('usage')
-        if isinstance(usage, dict) and usage.get('prompt_tokens'):
-            return int(usage['prompt_tokens'])
-        break  # 最新的 assistant/message 没 usage → 用估算兜底
+    usage = last_prompt_usage(session)
+    if usage is not None:
+        return int(usage['prompt_tokens'])
     total_chars = 0
     for message in session.derive_messages():
         for block in getattr(message, 'content', ()):

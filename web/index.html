@@ -113,6 +113,64 @@ header {
 }
 header h1 { font-size: 14px; font-weight: 600; letter-spacing: .2px; }
 header h1 .dot { color: var(--ok); }
+/* ============ 上下文占用圆环（dsh ContextMeter 同款，放大版）============
+   常态：发送按钮左侧一枚触发钮（45px，内含 22px SVG 圆环，无文字常驻），
+   几乎不占行宽；点开才是悬浮明细面板（不占布局）。
+   输入行内与按钮同高，圆环不随输入框高度跳动。 */
+.ctx-wrap { position: relative; display: inline-flex; align-items: center; }
+.ctx-ring {
+  display: grid; place-items: center;
+  flex: none; width: 45px; height: 45px;   /* 与发送/停止按钮同高同宽：行内完全对齐 */
+  border: none; border-radius: 999px;
+  background: transparent; color: var(--text-3);
+  cursor: pointer; transition: background .12s ease;
+}
+.ctx-ring:hover { background: var(--bg2); }
+.ctx-ring svg { display: block; }
+.ctx-track { fill: none; stroke: var(--border-strong); stroke-width: 2; }
+.ctx-fill {
+  fill: none; stroke: var(--ok); stroke-width: 2; stroke-linecap: round;
+  stroke-dasharray: 0 34.56;   /* 2π×5.5 ≈ 34.56：JS 按 percent 更新 */
+  transform: rotate(-90deg); transform-origin: 50% 50%;
+  transition: stroke-dasharray .3s ease, stroke .3s ease;
+}
+.ctx-ring.warn .ctx-fill { stroke: var(--warn); }   /* 过半（逼近压缩线）警示 */
+.ctx-ring.danger .ctx-fill { stroke: var(--err); }  /* 临近窗口上限 */
+/* 悬浮明细面板：absolute 定位在圆环上方，不参与任何流布局 */
+.ctx-panel {
+  position: absolute; bottom: calc(100% + 8px); right: 0;
+  z-index: 100; width: 250px; box-sizing: border-box;
+  padding: 10px 12px; border-radius: var(--r-m);
+  background: var(--bg1); border: 1px solid var(--border);
+  box-shadow: var(--shadow-card); font-size: 12px; line-height: 1.6;
+  color: var(--text-2); cursor: default; text-align: left;
+  font-family: var(--font-ui);
+}
+.ctx-panel .cp-head { display: flex; align-items: baseline; gap: 6px; }
+.ctx-panel .cp-headline { color: var(--text-3); font-size: 11px; }
+.ctx-panel .cp-pct { font-weight: 600; color: var(--text-1); font-size: 13px; }
+.ctx-panel .cp-figures { margin-left: auto; font-variant-numeric: tabular-nums; color: var(--text-3); font-family: var(--font-mono); font-size: 11px; }
+/* 面板各行之间留距离（占位行 / 缓存行 / 警示行各自独立成段） */
+.ctx-panel .cp-row { margin-top: 6px; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.ctx-panel .cp-row .cp-label { color: var(--text-3); font-size: 11px; }
+.ctx-panel .cp-total { color: var(--text-1); font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.ctx-panel .cp-cache { color: var(--ok); font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+/* 手动压缩操作行：数据区下方独立成段，与上面分隔 */
+.ctx-panel .cp-actions {
+  margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--border);
+  display: flex; align-items: center; gap: 8px;
+}
+.ctx-panel .cp-compact {
+  border: 1px solid var(--border-strong); border-radius: 999px;
+  background: none; color: var(--text-2); font-size: 11.5px;
+  padding: 4px 12px; cursor: pointer; transition: all .12s ease;
+  font-family: var(--font-ui);
+}
+.ctx-panel .cp-compact:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+.ctx-panel .cp-compact:disabled { opacity: .5; cursor: not-allowed; }
+.ctx-panel .cp-compact-msg { font-size: 11px; color: var(--text-3); }
+.ctx-panel .cp-compact-msg.err { color: var(--err); }
+.ctx-panel .cp-warn { margin-top: 8px; font-size: 11px; color: var(--warn); border-top: 1px solid var(--border); padding-top: 6px; }
 #model-label {
   font-size: 11px; color: var(--text-3);
   font-family: var(--font-mono);
@@ -330,6 +388,29 @@ main { flex: 1; overflow-y: auto; overflow-anchor: auto; }
 .approval-buttons .reject { background: #b23b35; }
 
 /* ============ 底部输入区 ============ */
+/* ============ 压缩 checkpoint 卡片（与用户气泡区分，中性折叠卡） ============ */
+.checkpoint {
+  margin: 0 0 12px; border: 1px dashed var(--border-strong);
+  border-radius: var(--r-m); background: var(--bg1);
+  overflow: hidden; animation: fade-slide .2s ease both;
+}
+.checkpoint-head {
+  width: 100%; display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px; background: none; border: none; color: var(--text-2);
+  font-size: 12.5px; cursor: pointer; text-align: left;
+  transition: color .12s ease, background .12s ease;
+}
+.checkpoint-head:hover { color: var(--text-1); background: var(--bg-hover); }
+.checkpoint-head .cp-ico { font-size: 13px; }
+.checkpoint-head .cp-title { font-weight: 600; color: var(--text-1); }
+.checkpoint-head .cp-sub { margin-left: auto; font-size: 11px; color: var(--text-3); font-family: var(--font-mono); }
+.checkpoint-head .cp-chev { display: inline-flex; transition: transform .18s ease; font-size: 10px; color: var(--text-3); }
+.checkpoint.open .cp-chev { transform: rotate(90deg); }
+.cp-body { padding: 2px 14px 12px; }
+.cp-md { font-size: 12.5px; color: var(--text-2); max-height: 380px; overflow-y: auto; }
+.cp-md p { margin: .4em 0; }
+.cp-md h1, .cp-md h2, .cp-md h3 { margin: .8em 0 .3em; font-size: 1em; color: var(--text-1); }
+
 /* ============ 常驻 todo dock（有清单才显示；输入框上方） ============ */
 #todo-dock {
   max-width: 840px; margin: 0 auto; padding: 0 22px 4px;
@@ -379,8 +460,11 @@ footer { padding: 10px 22px 18px; background: var(--bg1); border-top: 1px solid 
 #input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 #input:disabled { opacity: .55; }
 .ctrl-btn {
-  border: none; border-radius: var(--r-l); padding: 11px 20px;
-  font-size: 14px; cursor: pointer; transition: filter .12s ease, transform .06s ease, background .12s ease;
+  border: none; border-radius: var(--r-l);
+  height: 45px; padding: 0 20px;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 14px; line-height: 1;
+  cursor: pointer; transition: filter .12s ease, transform .06s ease, background .12s ease;
   flex-shrink: 0;
 }
 .ctrl-btn:hover { filter: brightness(1.1); }
@@ -416,6 +500,34 @@ footer { padding: 10px 22px 18px; background: var(--bg1); border-top: 1px solid 
     <footer>
       <div id="input-row">
         <textarea id="input" rows="1" placeholder="给 agent 一个任务…" autofocus></textarea>
+        <div class="ctx-wrap" id="ctx-meter" hidden>
+          <button type="button" class="ctx-ring" id="ctx-ring" title="上下文占用">
+            <svg viewBox="0 0 14 14" width="22" height="22" aria-hidden>
+              <circle class="ctx-track" cx="7" cy="7" r="5.5"/>
+              <circle class="ctx-fill" cx="7" cy="7" r="5.5"/>
+            </svg>
+          </button>
+          <div class="ctx-panel" role="dialog" aria-label="上下文占用明细" hidden>
+            <div class="cp-head">
+              <span class="cp-headline">上下文已用</span>
+              <span class="cp-pct">0%</span>
+              <span class="cp-figures">~0 / 1.0M</span>
+            </div>
+            <div class="cp-row" id="ctx-session-row" hidden>
+              <span class="cp-label">会话累计消耗</span>
+              <span class="cp-total">—</span>
+            </div>
+            <div class="cp-row" id="ctx-cache-row" hidden>
+              <span class="cp-label">缓存命中率（全会话累计）</span>
+              <span class="cp-cache">—</span>
+            </div>
+            <div class="cp-actions">
+              <button type="button" id="ctx-compact" class="cp-compact">压缩旧对话</button>
+              <span class="cp-compact-msg" id="ctx-compact-msg" hidden></span>
+            </div>
+            <div class="cp-warn" hidden>过半：回合结束后将自动压缩旧对话</div>
+          </div>
+        </div>
         <button id="send" class="ctrl-btn">发送</button>
         <button id="stop" class="ctrl-btn" hidden>停止</button>
       </div>
@@ -447,6 +559,20 @@ const sessionListEl = document.getElementById('session-list');
 const newBtn = document.getElementById('new-btn');
 const modelLabel = document.getElementById('model-label');
 const todoDockEl = document.getElementById('todo-dock');
+const ctxMeter = document.getElementById('ctx-meter');       // .ctx-wrap 根
+const ctxRingBtn = document.getElementById('ctx-ring');       // 28px 圆环触发钮
+const ctxFill = ctxMeter.querySelector('.ctx-fill');
+const ctxPanel = ctxMeter.querySelector('.ctx-panel');
+const ctxPct = ctxPanel.querySelector('.cp-pct');
+const ctxFigures = ctxPanel.querySelector('.cp-figures');
+const ctxSessionRow = ctxPanel.querySelector('#ctx-session-row');
+const ctxTotal = ctxPanel.querySelector('.cp-total');
+const ctxCacheRow = ctxPanel.querySelector('#ctx-cache-row');
+const ctxCache = ctxPanel.querySelector('.cp-cache');
+const ctxWarn = ctxPanel.querySelector('.cp-warn');
+const ctxCompactBtn = ctxPanel.querySelector('#ctx-compact');
+const ctxCompactMsg = ctxPanel.querySelector('#ctx-compact-msg');
+const CTX_CIRC = 2 * Math.PI * 5.5;   // 圆环周长 ≈ 34.56
 
 let currentSid = 'web';       // 当前会话 id（服务端 init 默认 'web'）
 let busy = false;             // 请求进行中（禁发、显示停止）
@@ -457,6 +583,9 @@ let wsRoot = '';              // workspace 根（/meta 拉取，路径相对化�
 let stickBottom = true;       // 用户是否贴着底部（智能滚动）
 let currentTodos = null;      // 当前 todo 清单（null = 无清单，dock 隐藏）
 let todoOpen = false;         // dock 是否展开（默认折叠）
+let ctxWin = 1000000;         // 上下文窗口（deepseek-v4 1M）
+let fakeMode = false;         // 离线演示模式（脚本模型不能生成摘要 → 禁压缩）
+let ctxCompacting = false;    // 压缩请求进行中（防重复点击）
 
 /* 当前助手消息节点（跨多个 chunk/tool 事件存活，直到回合结束或切换） */
 let cur = null;
@@ -633,6 +762,42 @@ function addUserMessage(text) {
   bubble.textContent = text;
   row.appendChild(bubble);
   messagesEl.appendChild(row);
+  stickIfNeeded();
+}
+
+/* 压缩 checkpoint 卡片：preamble + <compacted-summary> 标签包裹的摘要。
+   从历史里识别、渲染成"上下文已压缩"折叠卡——不是用户发言 */
+function addCheckpoint(text) {
+  const m = text.match(/<compacted-summary>\s*([\s\S]*?)\s*<\/compacted-summary>/);
+  const body = m ? m[1] : text;   // 取标签内摘要本体；无标签则全文兜底
+  const card = el('div', 'checkpoint');
+  const head = el('button', 'checkpoint-head');
+  head.type = 'button';
+  const icon = document.createElement('span');
+  icon.className = 'cp-ico';
+  icon.innerHTML = '📦';
+  const title = el('span', 'cp-title');
+  title.textContent = '上下文已压缩';
+  const sub = el('span', 'cp-sub');
+  sub.textContent = `摘要 ${body.length} 字符`;
+  const chev = el('span', 'cp-chev');
+  chev.textContent = '▸';
+  head.appendChild(icon);
+  head.appendChild(title);
+  head.appendChild(sub);
+  head.appendChild(chev);
+  const detail = el('div', 'cp-body');
+  detail.hidden = true;
+  const md = el('div', 'cp-md');
+  md.innerHTML = renderMarkdown(body);
+  detail.appendChild(md);
+  head.addEventListener('click', () => {
+    const open = card.classList.toggle('open');
+    detail.hidden = !open;
+  });
+  card.appendChild(head);
+  card.appendChild(detail);
+  messagesEl.appendChild(card);
   stickIfNeeded();
 }
 function ensureAssistant() {
@@ -896,6 +1061,48 @@ function setTodos(todos) {
   renderTodoDock();
 }
 
+/* ---------- 上下文圆环 + 明细面板（dsh ContextMeter 同款交互）---------- */
+function formatTokens(v) {
+  if (v < 1000) return String(v);
+  if (v < 1000000) return (v / 1000).toFixed(v >= 100000 ? 0 : 1) + 'K';
+  return (v / 1000000).toFixed(1) + 'M';
+}
+let ctxOpen = false;    // 面板是否展开
+function setCtxOpen(open) {
+  ctxOpen = open;
+  ctxPanel.hidden = !open;
+  ctxRingBtn.setAttribute('aria-expanded', String(open));
+}
+/* 更新圆环 + 面板内容。常态行内只有圆环：占用/累计消耗/缓存命中率
+   全部收进点击展开的悬浮面板，输入行几何不因此变化。
+   数据口径：used/percent 是当前上下文快照；session 是全会话累计账
+   （total = Σ输入+Σ输出，缓存命中率 = Σhit/Σprompt，token 加权）。 */
+function updateContext(ctx) {
+  if (!ctx || typeof ctx.percent !== 'number') { ctxMeter.hidden = true; return; }
+  ctxMeter.hidden = false;
+  ctxWin = ctx.window || ctxWin;
+  const pct = Math.max(0, Math.min(100, ctx.percent));
+  ctxFill.style.strokeDasharray = `${CTX_CIRC * pct / 100} ${CTX_CIRC}`;
+  ctxRingBtn.classList.toggle('warn', pct >= 50 && pct < 90);    // 过半：逼近压缩线
+  ctxRingBtn.classList.toggle('danger', pct >= 90);
+  // 面板头部：占用百分比 + used/window
+  ctxPct.textContent = pct + '%';
+  ctxFigures.textContent = `~${formatTokens(ctx.used || 0)} / ${formatTokens(ctxWin)}`;
+  // 会话累计账：有真实 usage 才显示（fake 模式整段隐藏）
+  const sess = ctx.session;
+  const hasSession = !!sess && typeof sess.total_tokens === 'number';
+  ctxSessionRow.hidden = !hasSession;
+  if (hasSession) ctxTotal.textContent = `~${formatTokens(sess.total_tokens)}`;
+  const hit = hasSession ? sess.cache_hit_pct : undefined;
+  ctxCacheRow.hidden = typeof hit !== 'number';
+  if (typeof hit === 'number') ctxCache.textContent = hit + '%';
+  ctxWarn.hidden = pct < 50;
+  ctxRingBtn.title = `上下文占用 ${pct}%`
+    + (hasSession ? ` · 会话累计 ${formatTokens(sess.total_tokens)}` : '')
+    + (typeof hit === 'number' ? ` · 缓存命中 ${hit}%` : '')
+    + (pct >= 50 ? '（过半，将在回合结束后自动压缩旧对话）' : '');
+}
+
 /* ---------- 会话管理 ---------- */
 function clearMessages() {
   messagesEl.innerHTML = '';
@@ -921,6 +1128,9 @@ function renderHistory(history) {
       } else if (m.role === 'tool_result') {
         // 工具结果消息（内部是 user 角色）：并入当前助手块的工具活动
         for (const r of m.tool_results) addToolResult(r);
+      } else if (m.role === 'checkpoint') {
+        closeAssistant();         // checkpoint 独立成卡（不是真人发言，不进回合计数）
+        addCheckpoint(m.text);
       } else if (m.role === 'assistant') {
         closeAssistant();         // 新的一步：收掉上一块，再开新块
         ensureAssistant();
@@ -1011,6 +1221,8 @@ async function switchSession(sid) {
     const data = await res.json();
     currentSid = data.id;
     setTodos(data.todos);
+    setCtxOpen(false);          // 切会话：收起上个会话展开的明细面板
+    updateContext(data.context);
     renderHistory(data.history);
     loadSessions();
   } catch (e) { console.error('switch session failed', e); }
@@ -1035,6 +1247,8 @@ async function newSession() {
     const data = await res.json();
     currentSid = data.id;
     setTodos(data.todos);
+    setCtxOpen(false);          // 新建会话同理：面板默认收起
+    updateContext(data.context);
     renderHistory(data.history);
     loadSessions();
   } catch (e) { console.error('new session failed', e); }
@@ -1076,6 +1290,7 @@ function handle(payload) {
       break;
     case 'turn_end':
       finalizeTurn();
+      updateContext(payload.context);   // 回合结束刷新上下文圆环
       break;
   }
 }
@@ -1177,6 +1392,14 @@ function setBusy(value) {
   input.disabled = value;
   stopBtn.hidden = !value;
   sendBtn.textContent = value ? '生成中…' : '发送';
+  updateCompactDisabled();
+}
+/* 手动压缩按钮可用性：离线演示（fake）或 agent 运行中 → 禁用 */
+function updateCompactDisabled() {
+  ctxCompactBtn.disabled = fakeMode || busy || ctxCompacting;
+  ctxCompactBtn.title = fakeMode
+    ? '离线演示（脚本模型不能生成摘要）'
+    : (busy ? 'agent 正在运行——回合结束后再压缩' : '把旧对话折叠成 checkpoint，释放上下文');
 }
 
 /* ---------- 事件绑定 ---------- */
@@ -1194,6 +1417,54 @@ input.addEventListener('input', () => {
   input.style.height = Math.min(input.scrollHeight, 180) + 'px';
 });
 
+/* 上下文面板开合（dsh ContextMeter 同款）：点击圆环展开，外部点击 / Esc 关闭 */
+ctxRingBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  setCtxOpen(!ctxOpen);
+});
+document.addEventListener('pointerdown', (e) => {
+  if (ctxOpen && e.target instanceof Node && !ctxMeter.contains(e.target)) setCtxOpen(false);
+});
+document.addEventListener('keydown', (e) => {
+  if (ctxOpen && e.key === 'Escape') setCtxOpen(false);
+});
+
+/* 手动压缩：POST /compact → 刷新历史（checkpoint 卡片 + 圆环占用回落）。
+   压缩是 LLM 摘要请求，期间按钮转圈防连点；失败提示原因。 */
+ctxCompactBtn.addEventListener('click', async () => {
+  if (ctxCompacting || fakeMode || busy) return;
+  ctxCompacting = true;
+  ctxCompactBtn.disabled = true;
+  ctxCompactBtn.textContent = '压缩中…';
+  ctxCompactMsg.hidden = false;
+  ctxCompactMsg.textContent = '正在折叠旧对话…';
+  ctxCompactMsg.classList.remove('err');
+  try {
+    const res = await fetch('/compact', { method: 'POST' });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+    if (data.compacted) {
+      ctxCompactMsg.textContent = data.reason || '压缩完成';
+      // 重新拉历史：checkpoint 顶替旧回合 → 卡片重新渲染、占用回落
+      const hist = await (await fetch('/history')).json();
+      setTodos(hist.todos);
+      updateContext(hist.context);
+      renderHistory(hist.history);
+      loadSessions();
+    } else {
+      ctxCompactMsg.textContent = data.reason || '没有可压缩的内容';
+    }
+  } catch (e) {
+    ctxCompactMsg.textContent = e.message || '压缩失败';
+    ctxCompactMsg.classList.add('err');
+  } finally {
+    ctxCompacting = false;
+    ctxCompactBtn.disabled = fakeMode || busy;
+    ctxCompactBtn.textContent = '压缩旧对话';
+    setTimeout(() => { ctxCompactMsg.hidden = true; }, 6000);
+  }
+});
+
 /* ---------- 初始化 ---------- */
 (async function init() {
   // /meta：workspace 根（路径相对化）+ 模型标签
@@ -1201,17 +1472,20 @@ input.addEventListener('input', () => {
     const res = await fetch('/meta');
     const meta = await res.json();
     wsRoot = meta.workspace || '';
+    fakeMode = !!meta.fake;
     modelLabel.textContent = meta.fake ? '离线演示（fake）' : meta.model;
     modelLabel.classList.toggle('fake', !!meta.fake);
     modelLabel.title = meta.fake
       ? '离线脚本模型，不需 API key'
       : `模型 ${meta.model} · workspace: ${wsRoot}`;
+    updateCompactDisabled();
   } catch (e) { console.error('load meta failed', e); }
   await loadSessions();
   try {
     const res = await fetch('/history');
     const data = await res.json();
     setTodos(data.todos);
+    updateContext(data.context);
     renderHistory(data.history);
   } catch (e) { console.error('load history failed', e); }
 })();

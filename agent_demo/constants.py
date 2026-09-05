@@ -26,6 +26,9 @@ BASH_MAX_OUTPUT_CHARS = 8000
 # 旧回合，给后续回合留足空间（摘要请求本身也吃窗口）。显式 0 可关闭。
 DEFAULT_COMPACT_TOKENS = 524288  # 1M 窗口的一半
 
+# 模型上下文窗口（deepseek-v4 系列）：前端圆环的分母与压缩阈值都基于它
+MODEL_CONTEXT_WINDOW = 1_000_000
+
 DEMO_SCRIPT: list[dict] = [
     {
         'reasoning': '用户让我总结 README，先读取文件内容再回答。',

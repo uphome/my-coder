@@ -21,6 +21,14 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+from .compaction import (
+    cache_hit_rate,
+    estimate_context_tokens,
+    run_compaction,
+    select_compact_range,
+    session_token_totals,
+)
+from .constants import MODEL_CONTEXT_WINDOW
 from .factory import build_agent, load_env
 from .hooks import Hooks
 from .llm import LlmRequest
@@ -269,6 +277,7 @@ def _open_session(sid: str, *, allow_missing: bool) -> dict:
         'id': sid,
         'history': [message_to_payload(m) for m in session.derive_messages()],
         'todos': fold_todos(session) or [],  # 当前 todo 投影：切换会话时恢复 dock
+        'context': _context_payload(session),  # 上下文占用：切换会话时恢复圆环
     }
 
 
@@ -361,8 +370,40 @@ def event_to_payload(event) -> dict | None:
         todos = event.data.get('todos') if isinstance(event.data, dict) else None
         return {'type': 'todo_update', 'todos': todos or []}
     if event.type == 'turn/end':
-        return {'type': 'turn_end', 'reason': event.data['reason']}
+        # 回合结束附带上下文占用（圆环数据）：真实 usage 估算 / 1M 窗口
+        return {
+            'type': 'turn_end',
+            'reason': event.data['reason'],
+            'context': _context_payload(),
+        }
     return None
+
+
+def _context_payload(session: Session | None = None) -> dict | None:
+    """当前上下文占用（前端圆环）+ 会话级累计账（消耗 token / 缓存命中率）。
+
+    used/percent/window 是"当前上下文快照"（最后一条真实 usage 或估算）；
+    cache_hit_pct / total_tokens 是"全会话累计"（对齐 dsh StatsLine 的
+    totals 投影语义：Σ 求和、token 加权，不是逐请求平均，也不是单次快照）。
+    """
+    target = session if session is not None else _session
+    if target is None:
+        return None
+    used = estimate_context_tokens(target)
+    percent = min(100, round(used * 100 / MODEL_CONTEXT_WINDOW))
+    payload: dict = {'used': used, 'window': MODEL_CONTEXT_WINDOW, 'percent': percent}
+    totals = session_token_totals(target)
+    if totals is None:
+        return payload  # 无真实 usage（如 fake）：只有占用快照，没有累计账
+    rate = cache_hit_rate(target)
+    payload['session'] = {
+        'total_tokens': totals['input_tokens'] + totals['output_tokens'],
+        'input_tokens': totals['input_tokens'],
+        'output_tokens': totals['output_tokens'],
+    }
+    if rate is not None:  # 有请求报了缓存拆分才带命中率（fake/全缺拆分不显示）
+        payload['session']['cache_hit_pct'] = round(rate * 100)
+    return payload
 
 
 def message_to_payload(message) -> dict:
@@ -382,11 +423,16 @@ def message_to_payload(message) -> dict:
         for b in message.content if getattr(b, 'type', '') == 'tool-result'
     ]
     role = message.role
+    text = '\n'.join(texts)
     if role == 'user' and not texts and tool_results:
         role = 'tool_result'  # 纯工具结果消息：并入当前工具活动块
+    elif role == 'user' and '<compacted-summary>' in text:
+        # 压缩 checkpoint（replace 顶替旧回合的 user/message）：不是真人发言，
+        # 前端渲染成可折叠的"上下文已压缩"卡片而非用户气泡
+        role = 'checkpoint'
     return {
         'role': role,
-        'text': '\n'.join(texts),
+        'text': text,
         'tool_calls': tool_calls,
         'tool_results': tool_results,
     }
@@ -469,6 +515,7 @@ def history() -> dict:
     return {
         'history': [message_to_payload(m) for m in _session.derive_messages()],
         'todos': fold_todos(_session) or [],
+        'context': _context_payload(),
     }
 
 
@@ -533,6 +580,31 @@ async def chat(request: Request) -> StreamingResponse:
                 _active_queue = None
 
     return StreamingResponse(sse_stream(), media_type='text/event-stream')
+
+
+@app.post('/compact')
+async def compact() -> dict:
+    """手动压缩当前会话：把旧回合折叠成 checkpoint（复用 run_compaction）。
+
+    前置校验（对齐 dsh /compact 命令的串行语义）：
+    - fake 模式拒绝：脚本模型不能生成摘要（自动压缩本来也不挂）
+    - agent 运行中拒绝：压缩事务会动 surface，与进行中的回合冲突
+    - 无可压段（旧回合不足）→ compacted=False + reason，由前端提示
+    """
+    _check_init()
+    assert _session is not None and _agent is not None
+    if _args is not None and _args.fake:
+        raise HTTPException(400, 'fake 模式不支持手动压缩（脚本模型不能生成摘要）')
+    if _agent.status != 'idle':
+        raise HTTPException(409, 'agent 正在运行——回合结束后再压缩')
+    if select_compact_range(_agent.session, keep_turns=1) is None:
+        return {'compacted': False, 'reason': '没有可压缩的旧回合'}
+    ok = await run_compaction(
+        _agent.session, _agent.llm, keep_turns=1,
+        model=_agent.options.get('model', ''),
+    )
+    return {'compacted': ok,
+            'reason': '压缩完成' if ok else '压缩未完成（摘要生成失败或摘要未通过校验）'}
 
 
 @app.post('/approval/respond')

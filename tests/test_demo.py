@@ -725,7 +725,8 @@ def test_web_chat_streams_events(tmp_path):
     client = TestClient(web_app.app)
 
     assert client.get('/').status_code == 200          # 页面可访问
-    assert client.get('/history').json() == {'history': [], 'todos': []}  # 空会话
+    h = client.get('/history').json()
+    assert h['history'] == [] and h['todos'] == [] and 'context' in h  # 空会话
 
     resp = client.post('/chat', json={'message': 'hi'})
     assert resp.status_code == 200
@@ -764,7 +765,8 @@ def test_web_session_management(tmp_path):
     # 新建会话并切换（空历史）
     fresh = client.post('/sessions/new').json()
     assert fresh['id'] != 'web' and fresh['history'] == []
-    assert client.get('/history').json() == {'history': [], 'todos': []}
+    h = client.get('/history').json()
+    assert h['history'] == [] and h['todos'] == [] and 'context' in h
 
     # 切回 web 会话：历史还原（恢复 = 重放）
     back = client.post(f"/sessions/{fresh['id']}/switch").json()
@@ -1492,6 +1494,52 @@ def test_build_agent_wires_auto_compaction_by_default(tmp_path):
         comp.wire_overflow_recovery = orig_overflow
 
 
+def test_cache_hit_rate_from_real_usage():
+    """真实 usage 拆分缓存命中率：hit/(hit+miss)；无 usage → None。"""
+    from agent_demo.compaction import cache_hit_rate, estimate_context_tokens, last_prompt_usage
+    from agent_demo.session import Session
+    from agent_demo.values import TextBlock, create_assistant_message
+
+    s = Session(id='t')
+    s.append('turn/start', {'turn': 1})
+    # 模拟真实 provider 的 usage：prompt_tokens = hit + miss（DeepSeek 加性拆分）
+    usage = {
+        'prompt_tokens': 1000,
+        'prompt_cache_hit_tokens': 700,
+        'prompt_cache_miss_tokens': 300,
+    }
+    s.append('assistant/message', {
+        'turn': 1, 'step': 1,
+        'message': create_assistant_message([TextBlock(text='ok')]),
+        'usage': usage,
+    }, surface_op='append')
+    assert last_prompt_usage(s) == usage
+    assert estimate_context_tokens(s) == 1000          # 真实 usage 优先
+    assert cache_hit_rate(s) == 0.7                    # 700 / (700+300)
+    assert cache_hit_rate(s) is not None and 0 <= cache_hit_rate(s) <= 1
+
+    # 无 usage（fake 模式 / 最新 assistant 无 usage）→ 无真实测量
+    s2 = Session(id='t2')
+    s2.append('turn/start', {'turn': 1})
+    s2.append('assistant/message', {
+        'turn': 1, 'step': 1,
+        'message': create_assistant_message([TextBlock(text='x' * 200)]),
+    }, surface_op='append')
+    assert last_prompt_usage(s2) is None
+    assert cache_hit_rate(s2) is None
+    assert estimate_context_tokens(s2) == 100           # 兜底字符估算 200//2
+
+    # usage 缺 cache 拆分字段 → 命中率 None（不是 0——别假装测量过）
+    s3 = Session(id='t3')
+    s3.append('turn/start', {'turn': 1})
+    s3.append('assistant/message', {
+        'turn': 1, 'step': 1,
+        'message': create_assistant_message([TextBlock(text='ok')]),
+        'usage': {'prompt_tokens': 50, 'completion_tokens': 5, 'total_tokens': 55},
+    }, surface_op='append')
+    assert cache_hit_rate(s3) is None
+
+
 def test_context_overflow_detection():
     """溢出错误识别：HTTP_ERROR + 特征串为真，其他为假。"""
     from agent_demo.compaction import _is_context_overflow
@@ -1555,3 +1603,159 @@ async def test_overflow_recovery_compacts_and_retries(tmp_path):
     texts = [m.content[0].text for m in s.derive_messages() if m.content and m.content[0].type == 'text']
     assert any('<compacted-summary>' in t for t in texts)
     assert texts[-1] == '压缩后重试成功'
+
+
+def test_web_checkpoint_role_and_context_payload(tmp_path):
+    """checkpoint 消息标记 role=checkpoint；history/会话响应带 context。"""
+    from fastapi.testclient import TestClient
+
+    from agent_demo import web_app
+    from agent_demo.values import TextBlock, create_user_message
+
+    web_app.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
+    client = TestClient(web_app.app)
+
+    # 直接往当前会话写 checkpoint 形态的 user/message（带 compacted-summary 标签）
+    s = web_app._session
+    s.append('turn/start', {'turn': 1})
+    s.append('user/message', create_user_message([TextBlock(text='Q1')]), surface_op='append')
+    s.append('turn/end', {'turn': 1, 'reason': 'completed'})
+    s.append('turn/start', {'turn': 2})
+    cp_text = ('This is an automatically generated checkpoint…\n\n'
+               '<compacted-summary>\n## 主要请求\n- 重构\n## 下一步\n1. 测试\n</compacted-summary>')
+    s.append('user/message', create_user_message([TextBlock(text=cp_text)]),
+             surface_op='replace', shadowed=(1, 1))
+    s.append('user/message', create_user_message([TextBlock(text='继续')]), surface_op='append')
+
+    hist = client.get('/history').json()
+    roles = [m['role'] for m in hist['history']]
+    assert roles == ['checkpoint', 'user']          # checkpoint 被标记，后续 user 正常
+    assert hist['context'] is not None              # 上下文 payload 存在
+    assert 'window' in hist['context'] and 'percent' in hist['context']
+    # fake 模式无真实 usage → 不带 session 累计账（前端隐藏命中/消耗标签）
+    assert 'session' not in hist['context']
+
+    # 切换也带 context
+    fresh = client.post('/sessions/new').json()
+    assert 'context' in fresh
+
+
+def test_web_context_session_totals_accumulate(tmp_path):
+    """真实 usage 多条 → 会话级累计账（消耗 token 求和、缓存命中率 token 加权）。"""
+    from fastapi.testclient import TestClient
+
+    from agent_demo import web_app
+    from agent_demo.values import TextBlock, create_assistant_message, create_user_message
+
+    web_app.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
+    client = TestClient(web_app.app)
+    s = web_app._session
+    s.append('turn/start', {'turn': 1})
+    s.append('user/message', create_user_message([TextBlock(text='Q1')]), surface_op='append')
+    # 两次真实请求：usage 必须各自落账，命中率是 Σ 比值而非单次、也非简单平均
+    s.append('assistant/message', {
+        'turn': 1, 'step': 1,
+        'message': create_assistant_message([TextBlock(text='A1')]),
+        'usage': {'prompt_tokens': 2000, 'completion_tokens': 300,
+                  'prompt_cache_hit_tokens': 1500, 'prompt_cache_miss_tokens': 500},
+    }, surface_op='append')
+    s.append('assistant/message', {
+        'turn': 1, 'step': 2,
+        'message': create_assistant_message([TextBlock(text='A2')]),
+        'usage': {'prompt_tokens': 1000, 'completion_tokens': 100,
+                  'prompt_cache_hit_tokens': 200, 'prompt_cache_miss_tokens': 800},
+    }, surface_op='append')
+    s.append('turn/end', {'turn': 1, 'reason': 'completed'})
+
+    hist = client.get('/history').json()
+    ctx = hist['context']
+    # 快照仍取最后一条真实 usage（圆环语义不变）
+    assert ctx['used'] == 1000
+    assert ctx['percent'] == round(1000 * 100 / web_app.MODEL_CONTEXT_WINDOW)
+    # 会话级累计账：消耗 = Σ input + Σ output；命中率 = Σhit / Σ(hit+miss)
+    session = ctx['session']
+    assert session['input_tokens'] == 3000            # 2000 + 1000
+    assert session['output_tokens'] == 400            # 300 + 100
+    assert session['total_tokens'] == 3400            # 3000 + 400
+    assert session['cache_hit_pct'] == 57             # (1500+200)/(2000+1000) = 56.67 → 57%
+    # 简单平均会得 (75% + 20%)/2 = 47.5 —— 断言拒绝该口径
+    assert session['cache_hit_pct'] != 48
+
+    # 会话内某些请求没报缓存拆分 → 该请求不计入命中统计（但消耗照记）
+    s2 = client.post('/sessions/new').json()
+    sid = s2['id']
+    client.post(f'/sessions/{sid}/switch')
+    s = web_app._session
+    s.append('turn/start', {'turn': 1})
+    s.append('assistant/message', {
+        'turn': 1, 'step': 1,
+        'message': create_assistant_message([TextBlock(text='no-cache-field')]),
+        'usage': {'prompt_tokens': 500, 'completion_tokens': 50},
+    }, surface_op='append')
+    s.append('assistant/message', {
+        'turn': 1, 'step': 2,
+        'message': create_assistant_message([TextBlock(text='with-cache')]),
+        'usage': {'prompt_tokens': 300, 'completion_tokens': 30,
+                  'prompt_cache_hit_tokens': 90, 'prompt_cache_miss_tokens': 210},
+    }, surface_op='append')
+    s.append('turn/end', {'turn': 1, 'reason': 'completed'})
+    ctx2 = client.get('/history').json()['context']
+    assert ctx2['session']['total_tokens'] == 880      # 消耗照记全部：500+300+50+30
+    assert ctx2['session']['cache_hit_pct'] == 30      # 命中只统计报了拆分的：90/300
+
+
+def test_web_manual_compact_endpoint(tmp_path):
+    """手动压缩 POST /compact：fake 拒绝；真实模式压缩旧回合落 checkpoint。"""
+    import os
+    os.environ['DEEPSEEK_API_KEY'] = 'sk-placeholder'
+    from fastapi.testclient import TestClient
+
+    from agent_demo import web_app
+    from agent_demo.values import TextBlock, create_assistant_message, create_user_message
+
+    # fake 模式：脚本模型不能生成摘要 → 400 拒绝
+    web_app.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
+    client = TestClient(web_app.app)
+    assert client.post('/compact').status_code == 400
+
+    # 真实模式 + stub llm：跑一轮完整旧回合，手动压缩应落 checkpoint
+    web_app.init_web(tmp_path, fake=False, sessions_dir=tmp_path / 'sess2',
+                     model='deepseek-v4-flash')
+    s = web_app._session
+    agent = web_app._agent
+
+    class CompactLlm:
+        async def stream(self, request, signal=None):
+            from agent_demo.llm import StreamChunk
+            if 'compaction engine' in (request.system or ''):
+                yield StreamChunk(text='## 主要请求\n- 压历史\n## 下一步\n1. 继续', finish_reason='stop')
+                return
+            yield StreamChunk(text='回答', finish_reason='stop')
+    agent.llm = CompactLlm()
+
+    def user(t): return create_user_message([TextBlock(text=t)])
+    s.append('turn/start', {'turn': 1})
+    s.append('user/message', user('历史任务' * 50), surface_op='append')
+    s.append('assistant/message', {'turn': 1, 'step': 1,
+             'message': create_assistant_message([TextBlock(text='旧回答' * 50)])},
+             surface_op='append')
+    s.append('turn/end', {'turn': 1, 'reason': 'completed'})
+    s.append('turn/start', {'turn': 2})
+    s.append('user/message', user('新任务'), surface_op='append')
+
+    resp = client.post('/compact')
+    body = resp.json()
+    assert resp.status_code == 200
+    assert body['compacted'] is True
+    assert any(e.type == 'compaction/summary' for e in s.events)
+    assert any(e.type == 'compaction/end' for e in s.events)
+    # checkpoint 进了模型可见历史，且新回合消息保留
+    texts = [m.content[0].text for m in s.derive_messages()
+             if m.content and getattr(m.content[0], 'type', '') == 'text']
+    assert any('<compacted-summary>' in t for t in texts)
+    assert '新任务' in texts[-1]
+
+    # 无可压旧回合 → compacted False + reason（前面已全压完，只剩新回合）
+    body2 = client.post('/compact').json()
+    assert body2['compacted'] is False
+    assert body2['reason']
