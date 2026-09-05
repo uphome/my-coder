@@ -237,6 +237,44 @@ harness "上下文太大就折叠旧对话"的教学复刻，三个递进的子�
   fake 模式无真实 usage → 面板不显示累计账
 - 手动压缩按钮在面板底部（见上节）
 
+## Web 会话并发隔离（已完成）
+
+Web 端原先是**全局单例**：`_session/_agent/_current_sid` 指向"当前会话"、
+`_active_queue` 是唯一活跃 SSE 队列——两个标签页各跑一个会话时会互相覆盖
+（A 的审批推到 B 的流、事件只进焦点会话）。seat 化改造：
+
+- **Seat 注册表** `_seats[sid]`：每个会话一个 `{session, agent, queue, approvals}`，
+  get-or-create（切回会话复用运行中的 agent，不重建销毁）；`init_web` 清空
+  （测试隔离目录不串 state）
+- **approval 钩子 per-seat 闭包**：审批请求推本 seat 的队列、等待表存
+  seat.approvals（旧实现读全局 `_active_queue`）——各会话审批天然隔离
+- `/chat`、`/history?sid=`、`/compact` 按 sid 路由（缺省焦点会话，兼容旧前端）
+- `turn/end` 附带的 context 用事件所属会话而非全局焦点
+- 测试：两会话并行各跑一轮 chat——消息只进各自日志、agent 实例独立、
+  seat 复用、焦点别名正确
+
+## steer 插队（双队列第二队实战，已完成）
+
+`run_turn` 每步 claim 先排空 next-step、再取 next-turn——next-step 队列
+从建起就有完整实现与 claim 测试，但从未有入口真的用过。这次接通：
+
+- **`POST /steer`**：把消息塞进当前回合 next-step（`agent.steer`），同回合
+  下一步即时生效，事件沿已打开的 SSE 流继续推；无活跃流 / agent 已 idle
+  的竞态窗口一律 409（避免入队后事件没人读）
+- **Web 前端**：agent 运行中输入框不再禁用——回车 busy 时走 `/steer`
+  （插队，不画回合分隔线）、idle 时走 `/chat`（新回合）
+- **CLI 侧刻意不做运行中打断**：CLI 下回合运行中读 stdin 会与 approval 的
+  stdin 交互竞争输入（y/n 可能被当消息吃掉）；双队列的实战入口在 Web
+
+## CLI REPL（已完成）
+
+`prompt` 变可选：带任务 = 单次跑完退出（原行为）；不带 = 进入 REPL：
+
+- `agent> ` 提示符循环：每轮输入开新回合、`when_idle` 收敛后回提示，
+  `/exit` 退出、`/compact` 手动压缩——替代"每次跑命令 + --resume"
+- 会话装载抽成 `_prepare()`（单次与 REPL 共用）；测试用 subprocess 喂多行
+  stdin 验证两回合两条 user 消息落日志
+
 ## 架构重构（求职作品级，✅ 已完成 2026-09）
 
 **定位转变**：项目已从"教学 demo"成长为**个人工具 / 求职作品**。
@@ -272,8 +310,9 @@ pyproject.toml            打包 + ruff / mypy / pytest 配置 + console scripts
 - 步骤 1 模块化 ✅（38 测试全绿，git 全程识别 rename 保留历史）
 - 步骤 2 打包 ✅（`pip install -e .`，`agent-demo` / `agent-demo-web` 命令）
 - 步骤 3 工程化 ✅（ruff 清零 / mypy 清零 / CI workflow；质量门三绿才提交）
-- 步骤 4 功能：上下文压缩全套 + Web ContextMeter（已完成，见上两节）；
-  阶段二 REPL（持续对话交互）仍未开始
+- 步骤 4 功能：上下文压缩全套 + Web ContextMeter + Web 会话并发隔离 +
+  steer 插队 + CLI REPL（已完成，见下节）；阶段四工程化打磨（配置/日志
+  查看器）仍未开始
 
 **测试拆分**（蓝图里的 tests/ 按主题拆分）尚未做：58 个测试仍在单文件
 `tests/test_demo.py`——当前质量门（ruff/mypy/pytest）已覆盖，拆分是纯可读性

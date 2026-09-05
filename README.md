@@ -23,6 +23,9 @@ conda run --no-capture-output -n agent-demo python -m agent_demo.cli --fake --wo
 # 恢复上次会话（JSONL 重放：队列、回合号、请求配置全部还原）
 conda run --no-capture-output -n agent-demo python -m agent_demo.cli --fake --workspace . --resume "continue"
 
+# 交互式 REPL：不带任务参数即进入多轮对话（/exit 退出）
+conda run --no-capture-output -n agent-demo python -m agent_demo.cli --fake --workspace .
+
 # 真实模型（DeepSeek 官方 API，OpenAI 兼容格式；敏感工具执行前会弹 [approval] 确认）
 # Windows PowerShell: $env:DEEPSEEK_API_KEY = "sk-..."
 export DEEPSEEK_API_KEY=sk-...

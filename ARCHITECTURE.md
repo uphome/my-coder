@@ -361,10 +361,11 @@ JSON 没有类型信息，用 `$xxx` 前缀 key 做类型标记：`$text`/`$tool
 
 | 任务 | 说明 | 状态 |
 |---|---|---|
-| 多轮输入循环 | 持续对话，`/exit` 退出——替代"每次跑一次命令 + --resume" | ⬜ 待做（CLI 仍是单次命令；Web 已是持续对话） |
+| 多轮输入循环 | 持续对话，`/exit` 退出——替代"每次跑一次命令 + --resume" | ✅ CLI REPL（无任务参数启动）+ Web 持续对话 |
 | Ctrl-C 取消 | 接到 `agent.cancel()`——CancelledError 传播链已就绪 | ✅ Web 停止按钮已接通 |
-| `steer` 接入 | 运行中插入输入走 next-step 队列——双队列第二队首次启用 | ⬜ 待做 |
+| `steer` 接入 | 运行中插入输入走 next-step 队列——双队列第二队首次启用 | ✅ Web `POST /steer`（同回合下一步即时生效；CLI 侧因 stdin/approval 竞争刻意不做，见 NEXT_STEPS） |
 | 会话管理 | `/sessions` 列表、切换会话 | ✅ Web 会话列表/切换已完成 |
+| Web 并发隔离 | 两会话并行跑互不干扰（每会话独立 agent/SSE/审批） | ✅ seat 化 `_seats[sid]`（见 NEXT_STEPS） |
 
 ### 阶段三：长会话保障（能干长任务）
 

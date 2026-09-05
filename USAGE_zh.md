@@ -125,7 +125,7 @@ python -m agent_demo.cli --workspace . --model deepseek-chat "你的任务"
 
 | 参数 | 说明 | 必填 |
 |---|---|---|
-| `… "任务"`（位置） | 让 agent 干什么 | ✅ |
+| `… "任务"`（位置） | 让 agent 干什么；**省略 = 进入交互式 REPL**（多轮对话） | |
 | `--workspace <目录>` | agent 可读写的目录（安全边界） | ✅ |
 | `--session <id>` | 会话 id，默认 `main`（对应 `.sessions/<id>.jsonl`） | |
 | `--sessions <目录>` | 会话日志目录，默认 `.sessions` | |
@@ -135,6 +135,19 @@ python -m agent_demo.cli --workspace . --model deepseek-chat "你的任务"
 | `--hide-reasoning` | 折叠思考链（仍写日志） | |
 | `--compact-at <tokens>` | 自动压缩阈值，默认 0.5M（1M 窗口一半）；`0` 关闭 | |
 | `--verbose` | debug 日志 | |
+
+### 交互式 REPL（多轮对话）
+
+不带"任务"参数启动即进入 REPL：一次启动连续多轮，替代"每次跑一条命令
++ `--resume`"。会话日志持续追加，退出后下次 `--resume` 无缝继续。
+
+```sh
+conda run --no-capture-output -n agent-demo \
+  python -m agent_demo.cli --fake --workspace .          # 离线 REPL
+
+# REPL 内：输入任务回车 → 回合跑完回提示符；/exit 退出；/compact 手动压缩
+# 想运行中打断/插队：用 Web UI（发送按钮旁输入会插队当前回合，见第 7 章）
+```
 
 ## 5. 会话与恢复
 
@@ -195,6 +208,9 @@ conda run --no-capture-output -n agent-demo \
   消耗 token、全会话缓存命中率，底部还有**压缩旧对话**按钮（上下文太长时
   把旧回合折叠成 checkpoint 释放空间——自动阈值压缩之外的手动开关）；
 - 刷新页面对话不丢（历史来自日志投影）。
+- **运行中可插队**：agent 干活时输入框仍可打字，回车 = 打断当前回合
+  （消息作为下一步即时处理）；多开标签页各跑各的会话互不干扰
+  （每会话独立 agent / 事件流 / 审批）。
 
 参数同 CLI 再加 `--host`（默认 127.0.0.1）/`--port`（默认 8000），
 `--compact-at` 同样可用。
