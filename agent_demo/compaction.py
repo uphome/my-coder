@@ -20,18 +20,58 @@ from .llm import LlmRequest
 from .session import Session
 from .values import Message, TextBlock, create_user_message
 
-# 摘要请求的 system 提示：把被压对话折叠成结构化 checkpoint（dsh 风格结构，
-# 但用中文教学口径）。文件清单由代码拼入（extract_file_ops），模型只负责
-# 提炼对话本身，不靠它猜路径（学 PI：路径准确性不能交给模型）。
+# ---- 压缩提示词（融合 dsh 8 段骨架 + PI 的 Progress 三态 / 有序 Next Steps）----
+# 文件清单由代码拼入（extract_file_ops），模型只负责提炼对话本身，
+# 不靠它猜路径（学 PI：路径准确性不能交给模型）。
+SUMMARY_OPEN_TAG = '<compacted-summary>'
+SUMMARY_CLOSE_TAG = '</compacted-summary>'
+
+# 摘要请求的 system 提示：把被压对话折叠成结构化 checkpoint。
+# 结构 = dsh 的会话快照段（Primary Request / Key Technical Concepts /
+# Files and Code / Errors and Fixes / Pending Jobs / Current Work /
+# Next Step / Critical Context），其中 Current Work 吸收 PI 的
+# Done / In Progress / Blocked 三态，Next Step 采 PI 的有序列表。
 COMPACT_SYSTEM = (
-    'You are a compaction engine. Condense the conversation messages below into a '
-    'concise structured checkpoint that lets another model continue the work with no '
-    'loss of essential context. Output EXACTLY this Markdown structure, keep every '
-    'section in order; write "(none)" for empty sections:'
-    '\n\n## Primary Request and Intent\n## Key Technical Concepts\n'
-    '## Errors and Fixes\n## Current Work\n## Next Step\n'
-    '\nRules: preserve exact file paths, commands, error strings, identifiers; '
-    'capture user feedback faithfully; output only the checkpoint text.'
+    'You are now acting as a compaction engine for a coding agent. Condense the '
+    'conversation messages below into a structured checkpoint that lets another '
+    'model resume the work with no loss of essential context.\n'
+    'Output EXACTLY the Markdown structure below; keep every section, in order. '
+    'Write "(none)" for an empty section — never drop a section.\n\n'
+    '## Primary Request and Intent\n'
+    "- [the user's original and evolving goals; quote verbatim where wording matters]\n"
+    '## Key Technical Concepts\n'
+    '- [technologies, frameworks, patterns, conventions in play]\n'
+    '## Files and Code\n'
+    '- [exact path: why it matters, key changes or snippets]\n'
+    '## Errors and Fixes\n'
+    '- [error: how it was resolved, plus related user feedback]\n'
+    '## Pending Jobs\n'
+    '- [explicitly requested work not yet completed]\n'
+    '## Current Work\n'
+    '### Done\n- [x] [completed items]\n'
+    '### In Progress\n- [ ] [currently worked items]\n'
+    '### Blocked\n- [issues preventing progress, or "(none)"]\n'
+    '## Next Steps\n'
+    '1. [ordered actions — first is the immediate next one]\n'
+    '## Critical Context\n'
+    '- [decisions and rationale, constraints, user preferences, open questions]\n'
+    'Rules: write concise engineering prose; preserve exact file paths, commands, '
+    'error strings, identifiers, numeric values, function signatures; capture user '
+    'feedback and corrections faithfully; do NOT mention this summarization request '
+    'or that the context was compacted; output only the checkpoint text.\n'
+    f'If the conversation already contains a {SUMMARY_OPEN_TAG} block, it is a '
+    'PRIOR checkpoint — do not copy it forward verbatim: preserve still-true facts, '
+    'drop stale ones, merge newer information into a single consolidated summary '
+    'under the same structure.'
+)
+
+# checkpoint 的引导语：告诉后续模型"这是被压缩的既定背景，别复述，直接继续"。
+# 正对 replace 语义——checkpoint 顶替旧回合后，后面还跟着保留的新回合消息。
+CHECKPOINT_PREAMBLE = (
+    'This is an automatically generated checkpoint condensing an earlier span of the '
+    'conversation to free up context. Treat the captured context as established '
+    'background and build on it without restating it. Continue the task directly '
+    'from the messages that follow, without acknowledging this checkpoint.'
 )
 
 # 事务事件序列（对齐 dsh：start → summary → replace → end）
@@ -220,18 +260,25 @@ async def run_compaction(session: Session, llm, *, keep_turns: int = 3,
         if not summary:
             session.append(COMPACTION_END, {'compaction_id': cid, 'error': 'empty summary'})
             return False
-        # 摘要必须比被压内容小（宁拒勿滥——压缩要真省）
+        # 摘要必须比被压内容小（宁拒勿滥——压缩要真省）；比较只看模型输出本体，
+        # 不含后面我们自加的 preamble/标签固定开销
         if len(summary) >= len(conversation):
             session.append(COMPACTION_END, {'compaction_id': cid, 'error': 'summary not smaller than content'})
             return False
         # 文件操作清单由代码拼入（学 PI：路径不能靠模型猜）
         file_ops = extract_file_ops(session, start_seq, end_seq)
         ops_text = file_ops.as_text()
-        checkpoint_body = summary + ('\n\n' + ops_text if ops_text else '')
+        body = summary + ('\n\n' + ops_text if ops_text else '')
+        # checkpoint 落盘格式：preamble 引导后续模型 + <compacted-summary> 标签包裹。
+        # 标签让"下一次压缩"能识别旧 checkpoint（迭代合并由 prompt 指令保证）；
+        # preamble 让它把压缩历史当既定背景、不向保留的新回合复述。
+        checkpoint_body = (
+            f'{CHECKPOINT_PREAMBLE}\n\n{SUMMARY_OPEN_TAG}\n{body}\n{SUMMARY_CLOSE_TAG}'
+        )
         session.append(COMPACTION_SUMMARY, {
             'compaction_id': cid,
             'range': [start_seq, end_seq],
-            'summary': checkpoint_body,
+            'summary': body,          # 审计存模型产出本体（不含包装）
             'file_ops': {
                 'read': sorted(file_ops.read),
                 'written': sorted(file_ops.written),

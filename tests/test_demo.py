@@ -1335,8 +1335,14 @@ async def test_compaction_transaction_fake_llm(tmp_path):
 
     # derive 只剩 checkpoint + turn2 的 Q2
     texts = [m.content[0].text for m in s.derive_messages()]
-    assert texts[0].startswith('[checkpoint]')
+    assert 'automatically generated checkpoint' in texts[0]      # preamble
+    assert '<compacted-summary>' in texts[0]                      # 标签包裹
+    assert '[checkpoint] 早期任务的简短摘要' in texts[0]           # 模型摘要本体
     assert texts[-1] == '继续'
+
+    # summary 审计事件存模型产出本体（不含 preamble/标签包装）
+    summary_evt = [e for e in s.events if e.type == 'compaction/summary'][0]
+    assert summary_evt.data['summary'].startswith('[checkpoint]')
 
     # summary 事件含审计字段
     summary_evt = [e for e in s.events if e.type == 'compaction/summary'][0]
