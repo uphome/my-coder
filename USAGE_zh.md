@@ -21,17 +21,21 @@ agent-demo 有两种跑法，其余操作完全一样：
 你只需要记住三条「一键复制」命令，细节后面各章都有：
 
 ```sh
-# ① 环境（跑一次后补 pip install -r requirements.txt，见第 1 章）
+# ① 环境（一次就够，Miniforge）
 conda create -n agent-demo python=3.13 pytest pytest-asyncio httpx -y
+conda activate agent-demo
+pip install -e ".[dev]"    # httpx / fastapi / uvicorn + 可执行命令 agent-demo / agent-demo-web
 
 # ② 离线体验（不联网，30 秒跑通工具循环）
-conda run --no-capture-output -n agent-demo python main.py --fake --workspace . "read README.md and summarize"
+conda run --no-capture-output -n agent-demo \
+  python -m agent_demo.cli --fake --workspace . "read README.md and summarize"
 
 # ③ 真实任务（先 export DEEPSEEK_API_KEY=sk-...，见第 3 章）
-conda run --no-capture-output -n agent-demo python main.py --workspace . "调查这个仓库是干什么的"
+conda run --no-capture-output -n agent-demo \
+  python -m agent_demo.cli --workspace . "调查这个仓库是干什么的"
 ```
 
-- 想用浏览器：把上面 `main.py` 换成 `web_app.py`（第 7 章）。
+- 想用浏览器：把 `agent_demo.cli` 换成 `agent_demo.web_app`（第 7 章）。
 - 感觉 agent 动作危险 → 因为它要你先批 `edit`/`bash`（第 6 章）。
 
 ---
@@ -41,7 +45,7 @@ conda run --no-capture-output -n agent-demo python main.py --workspace . "调查
 1. [准备环境](#1-准备环境)
 2. [最快跑通（离线）](#2-最快跑通离线-30-秒)
 3. [接真实模型（DeepSeek）](#3-接真实模型deepseek)
-4. [参数速查](#4-参数速查-mainpy)
+4. [参数速查](#4-参数速查-python--m-agent_democl)
 5. [会话与恢复](#5-会话与恢复)
 6. [敏感工具与审批](#6-敏感工具与审批approval)
 7. [Web UI](#7-web-ui浏览器里对话)
@@ -56,7 +60,7 @@ conda run --no-capture-output -n agent-demo python main.py --workspace . "调查
 # 建环境并装依赖（一次就够）
 conda create -n agent-demo python=3.13 pytest pytest-asyncio httpx -y
 conda activate agent-demo
-pip install -r requirements.txt      # httpx / fastapi / uvicorn（真实 Web UI 需要）
+pip install -e ".[dev]"      # httpx / fastapi / uvicorn / ruff / mypy + agent-demo 命令
 ```
 
 后续所有命令都在**仓库根目录**执行。
@@ -65,7 +69,7 @@ pip install -r requirements.txt      # httpx / fastapi / uvicorn（真实 Web UI
 
 ```sh
 conda run --no-capture-output -n agent-demo \
-  python main.py --fake --workspace . "read README.md and summarize"
+  python -m agent_demo.cli --fake --workspace . "read README.md and summarize"
 ```
 
 fake 的回答是预置的两句话 —— 重点看**过程**：读取文件 → 返回结果 → 在几步内结束。
@@ -84,7 +88,7 @@ fake 的回答是预置的两句话 —— 重点看**过程**：读取文件 �
 
 ```sh
 conda run --no-capture-output -n agent-demo \
-  python main.py --fake --workspace . "read main.py and list the tools it registers"
+  python -m agent_demo.cli --fake --workspace . "read agent_demo/tools/__init__.py and list the tools it registers"
 ```
 
 ## 3. 接真实模型（DeepSeek）
@@ -105,19 +109,19 @@ export DEEPSEEK_API_KEY=sk-...              # macOS / Linux
 
 ```sh
 conda run --no-capture-output -n agent-demo \
-  python main.py --workspace . "调查这个仓库：它是干什么的？测试怎么跑？"
+  python -m agent_demo.cli --workspace . "调查这个仓库：它是干什么的？测试怎么跑？"
 ```
 
-它会真实地搜索、读文件再总结。默认模型 `deepseek-chat`；换模型：
+它会真实地搜索、读文件再总结。默认模型 `deepseek-v4-flash`；换模型：
 
 ```sh
-python main.py --workspace . --model deepseek-reasoner "你的任务"
+python -m agent_demo.cli --workspace . --model deepseek-chat "你的任务"
 ```
 
 > 思考过程在真实模式下也有（模型支持时），默认以 `[思考]` 显示；
 > 想折叠可用 `--hide-reasoning`（照常写进日志，只是屏幕不显示）。
 
-## 4. 参数速查（main.py）
+## 4. 参数速查（`python -m agent_demo.cli`）
 
 | 参数 | 说明 | 必填 |
 |---|---|---|
@@ -127,8 +131,9 @@ python main.py --workspace . --model deepseek-reasoner "你的任务"
 | `--sessions <目录>` | 会话日志目录，默认 `.sessions` | |
 | `--resume` | 重放日志并从上次进度继续 | |
 | `--fake` | 离线假模型（无需 key） | |
-| `--model <id>` | 默认 `deepseek-chat` | |
+| `--model <id>` | 默认 `deepseek-v4-flash` | |
 | `--hide-reasoning` | 折叠思考链（仍写日志） | |
+| `--compact-at <tokens>` | 自动压缩阈值，默认 0.5M（1M 窗口一半）；`0` 关闭 | |
 | `--verbose` | debug 日志 | |
 
 ## 5. 会话与恢复
@@ -139,11 +144,11 @@ agent 的“记忆”就是一份日志：每次对话都**追加**写进 `.sess
 ```sh
 # 延续刚才的会话（默认 id main）——命令带 --resume：
 conda run --no-capture-output -n agent-demo \
-  python main.py --workspace . --resume "上一步看到哪些文件？"
+  python -m agent_demo.cli --workspace . --resume "上一步看到哪些文件？"
 
 # 另开互不干扰的新会话：
 conda run --no-capture-output -n agent-demo \
-  python main.py --workspace . --session mytask "读 main.py 再总结"
+  python -m agent_demo.cli --workspace . --session mytask "读 README.md 再总结"
 ```
 
 启动时终端会把历史**重放一遍**再接着跑——你打开的就是「日志的可视化」。
@@ -176,20 +181,26 @@ conda run --no-capture-output -n agent-demo \
 
 ```sh
 conda run --no-capture-output -n agent-demo \
-  python web_app.py --workspace . --fake          # 离线演示
-# python web_app.py --workspace . --model deepseek-chat     # 真实模型
+  python -m agent_demo.web_app --workspace . --fake          # 离线演示
+# python -m agent_demo.web_app --workspace .                # 真实模型
 ```
 
 打开 <http://127.0.0.1:8000>：
 
-- 左侧列出 `.sessions/*.jsonl` 全部会话，可新建/切换/删除；
+- 左侧列出 `.sessions/*.jsonl` 全部会话，可新建/切换/删除/**双击改名**；
 - 流式输出、**可折叠的「已深度思考」**、工具调用卡片、Markdown 渲染；
-- 刷新页面对话不丢（默认会话 `web`）。
+- 敏感工具弹**批准/拒绝按钮**（不再是 fail-safe 拒绝，见下）；
+- 模型用 todo_write 维护的**待办清单**常驻显示（有清单才出现，可折叠）；
+- 发送按钮旁一枚**上下文占用圆环**：点开面板可见当前占用 %、全会话累计
+  消耗 token、全会话缓存命中率，底部还有**压缩旧对话**按钮（上下文太长时
+  把旧回合折叠成 checkpoint 释放空间——自动阈值压缩之外的手动开关）；
+- 刷新页面对话不丢（历史来自日志投影）。
 
-参数同 CLI 再加 `--host`（默认 127.0.0.1）/`--port`（默认 8000）。
+参数同 CLI 再加 `--host`（默认 127.0.0.1）/`--port`（默认 8000），
+`--compact-at` 同样可用。
 
-> **注意**：浏览器里没有交互式 stdin，approval 会走默认实现 → **fail-safe 拒绝**
-> （点击批准/拒绝按钮是后续迭代项）。
+> **approval 在浏览器里怎么工作**：工具要批准时页面弹出卡片，点「批准」/
+> 「拒绝」即可（默认在 5 分钟内不点会 fail-safe 拒绝）。
 
 ## 8. 跑测试
 
@@ -200,7 +211,8 @@ conda run -n agent-demo python -m pytest -q
 ```
 
 覆盖：日志投影、inbox 记账/恢复、工具循环、钩子与错误重试、取消语义、持久化重放、
-OpenAI wire 格式、路径沙箱越界、approval 拒绝等。
+OpenAI wire 格式、路径沙箱越界、approval 拒绝、上下文压缩（选区/事务/自动触发/
+溢出恢复/会话 token 账/手动压缩 endpoint）等。
 
 ## 9. 常见问题（FAQ）
 
@@ -222,7 +234,8 @@ OpenAI wire 格式、路径沙箱越界、approval 拒绝等。
 
 **Q：它能跑通吗，为什么任务盯着我的 approval？**
 它是交互式编码助手：能读/搜/改/跑测试，但 `edit`/`write_file`/`bash` 都要你
-点头。适合**目标明确、几步就完**的任务；不适合无人值守的长任务。
+点头。适合**目标明确**的任务；长任务有上下文压缩（自动阈值 + 溢出恢复 +
+Web 手动压缩按钮）兜底，不必担心上下文无限膨胀。
 
 ---
 

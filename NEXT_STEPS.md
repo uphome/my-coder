@@ -16,9 +16,12 @@
 | CLI 显示优化（A+B 档） | ✅ 已完成（颜色分层 + 结果摘要 + 进度指示） |
 | resume 历史重放 | ✅ 已完成（`--resume` 打开会话 = 看到完整历史对话） |
 | Web UI（最小方案） | ✅ 已完成（FastAPI + SSE + 深色单页：流式/思考折叠/工具卡片） |
-| 阶段一收尾（更新 README / ARCHITECTURE 定稿） | 🔶 进行中 |
+| Web UI 增强 | ✅ 已完成（会话新建/切换/删除/改名、approval 批准按钮、停止按钮、常驻 todo dock） |
+| 上下文压缩（compaction 全套） | ✅ 已完成（surface replace 位置语义 → 四步事务 → checkpoint → 自动阈值 → 溢出恢复 → Web 手动压缩按钮） |
+| Web ContextMeter（占用圆环 + 会话账） | ✅ 已完成（占用快照圆环 + 点击面板：会话累计消耗 / 全会话缓存命中率） |
+| 阶段一收尾（更新 README / ARCHITECTURE 定稿） | ✅ 已完成（含 2026-09 架构重构与本文档同步） |
 
-> 当前全量测试：32 passed（AGENTS.md 里的数字保持同步）。
+> 当前全量测试：58 passed（AGENTS.md 里的数字保持同步）。
 
 ## read_file 升级（已完成）
 
@@ -172,7 +175,7 @@ UI 是日志的投影：on_event 只负责"怎么显示"，状态全在事件里
 - [x] 用真实模型端到端验收（读→搜→分页→执行→批准→验证→报告 全链路）
 - [x] 更新 ARCHITECTURE.md 阶段一表格（全部 ✅）与 README 模块清单/安全警告
 
-## Web UI（最小方案，已完成）
+## Web UI（最小方案 → 增强，已完成）
 
 浏览器里的 DeepSeek 风格对话——**UI 是日志的投影的第二个渲染器**：
 同一份事件流，CLI 渲染成终端、Web 渲染成 DOM，框架代码一行不改。
@@ -183,12 +186,56 @@ UI 是日志的投影：on_event 只负责"怎么显示"，状态全在事件里
   `task.cancel()`（取消单向传播）
 - **功能**：流式打字、可折叠"已深度思考"块、工具调用卡片（黄/灰）、
   历史加载（`GET /history` 返回 `derive_messages()` 投影——Web 视角的记忆）
-- **会话**：固定 `id='web'`，启动时重放已有日志（刷新页面不丢对话）
-- **approval**：Web 下走默认实现（无 stdin → EOF → fail-safe 拒绝）——
-  **Web 批准/拒绝按钮是迭代项**（hooks.approval 注入点已就绪）
+- **会话管理**：多会话列表（`GET /sessions` 磁盘行内快扫）/ 新建 / 切换 /
+  删除 / 双击改名；首条消息后模型自动概括起名（逐字复读会被拒绝退回
+  fallback）——标题是日志投影，没有第二份状态
+- **approval**：Web 批准/拒绝按钮（`POST /approval/respond`，钩子经 SSE
+  队列推送请求；超时 fail-safe 拒绝）
+- **常驻 todo dock**：todo/write 事件实时更新面板（有清单才显示、可折叠），
+  回合结束清空——todo 是模型跨回合的记忆锚点
 - **安全**：默认只监听 127.0.0.1；`--workspace` 必填（路径边界不丢）
-- **迭代方向**：会话列表/切换、Web approval 按钮、思考块耗时显示、
-  Ctrl-C 等价取消按钮（已有停止按钮）
+
+## 上下文压缩 compaction 全套（已完成）
+
+harness "上下文太大就折叠旧对话"的教学复刻，三个递进的子能力
+（对应五次提交）：
+
+- **surface replace 改位置语义**：遮蔽区间按 surface 的【位置】切，不是
+  seq 数值——checkpoint 的 seq 大于被它顶替的旧 seq（追加式），replace 后
+  surface 不再 seq 单调；位置语义让嵌套/连续多次压缩不乱（曾有 bug 被
+  测试钉住）
+- **压缩引擎四步事务**：`compaction/start`（加锁）→ `compaction/summary`
+  （审计：摘要全文 + 遮蔽范围 + 文件操作）→ `user/message` surface replace
+  （checkpoint 原位顶替旧回合）→ `compaction/end`（成功/失败都落）——对齐
+  dsh 的 start→summary→replace→end
+- **checkpoint 结构化**：摘要提示词融合 dsh 8 段骨架（Primary Request /
+  Key Technical Concepts / Files and Code / Errors and Fixes / Pending Jobs /
+  Current Work / Next Step / Critical Context）+ PI 三态（Done/In Progress/
+  Blocked）与有序 Next Steps；文件操作清单由代码拼入（路径不交给模型猜）；
+  preamble + `<compacted-summary>` 标签让后续模型当既定背景、迭代合并
+- **自动触发两机制**：
+  1. 溢出恢复：模型报上下文过长（HTTP 400 特征串）→ `request_error` 钩子
+     压缩后重试（恒开，兜底）
+  2. 阈值自动压缩：`turn/end` 后量上下文超阈值（默认 0.5M = 1M 窗口一半，
+     `--compact-at` 可调/关闭）→ 后台压缩
+- **手动压缩**：`POST /compact`（复用四步事务）——fake 模式拒绝（脚本模型
+  不能真摘要）、agent 运行中拒绝（动 surface 必须串行）、无可压段给提示
+
+## Web ContextMeter 占用圆环（已完成）
+
+发送按钮旁的 45px 触发钮（内含 20px+ SVG 环），对齐 dsh ContextMeter：
+**常态不占输入行布局**——百分比/明细全部收进点击展开的悬浮面板（absolute
+定位，不参与流布局），面板内各行独立成段留距。
+
+- 圆环数据：占用快照（`used/window/percent`，来自最后一条真实 usage 或
+  字符估算兜底）；过半（≥50%）黄、临限（≥90%）红——与压缩线呼应
+- **会话累计账**（对齐 dsh token-meter 的 totals 投影语义）：
+  - 全会话累计消耗 `Σ(input+output)` token
+  - 全会话缓存命中率 `Σ hit / Σ prompt`（token 加权"总账"，不是逐请求
+    平均也不是单次快照）；某请求没报缓存拆分就不计入命中统计（宁缺毋滥）
+- 来源：`session_token_totals()` 扫全部带 usage 的 assistant/message 累加；
+  fake 模式无真实 usage → 面板不显示累计账
+- 手动压缩按钮在面板底部（见上节）
 
 ## 架构重构（求职作品级，✅ 已完成 2026-09）
 
@@ -211,6 +258,7 @@ agent_demo/               包结构（取代平铺）
 ├── 框架四层不动           agent / loop / session / inbox / prompt /
 │                          values / persistence / hooks / llm
 ├── registry.py           原 tools.py 改名（ToolSpec/ToolRegistry/ToolOutcome）
+├── compaction.py         上下文压缩引擎（四步事务 + checkpoint + 会话 token 账）
 └── tools/                应用工具包
     ├── __init__.py       build_tools() 注册表组装
     ├── file_io.py        read_file / list_files / write_file / edit
@@ -224,9 +272,10 @@ pyproject.toml            打包 + ruff / mypy / pytest 配置 + console scripts
 - 步骤 1 模块化 ✅（38 测试全绿，git 全程识别 rename 保留历史）
 - 步骤 2 打包 ✅（`pip install -e .`，`agent-demo` / `agent-demo-web` 命令）
 - 步骤 3 工程化 ✅（ruff 清零 / mypy 清零 / CI workflow；质量门三绿才提交）
-- 步骤 4 继续功能：阶段二 REPL 等（仍未开始）
+- 步骤 4 功能：上下文压缩全套 + Web ContextMeter（已完成，见上两节）；
+  阶段二 REPL（持续对话交互）仍未开始
 
-**测试拆分**（蓝图里的 tests/ 按主题拆分）尚未做：38 个测试仍在单文件
+**测试拆分**（蓝图里的 tests/ 按主题拆分）尚未做：58 个测试仍在单文件
 `tests/test_demo.py`——当前质量门（ruff/mypy/pytest）已覆盖，拆分是纯可读性
 优化，留到有需要时再做。
 

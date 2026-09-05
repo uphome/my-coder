@@ -23,22 +23,27 @@ harness 的四个核心设计：
 ## 2. 架构：四层单向依赖
 
 ```
-入口层  agent.py      被动状态机：send → inbox → wake → driver → idle
-                        │
-循环层  loop.py       turn/step 两级循环 + 三个钩子
-                        │
+入口层  cli.py / web_app.py   CLI 与 Web 两个入口（经 factory.build_agent 组装）
+        │
+循环层  agent.py      被动状态机：send → inbox → wake → driver → idle
+        loop.py       turn/step 两级循环 + 三个钩子
+        │
 状态层  session.py    追加式事件日志（唯一事实源）+ derive_messages 投影
         inbox.py      双队列 pending 消息（spliced 事件的持久化投影）
         prompt.py     sections 按 order 拼接 + {{变量}} 严格插值
-        tools.py      工具注册表：schema + executor + 执行模式
+        registry.py   工具类型：ToolSpec（schema + executor + 模式）
+        │
 能力层  llm.py        OpenAI 兼容 SSE 流式客户端 + 可脚本化 FakeLlm
         hooks.py      三个决策钩子的类型（属循环层接口）
-                        │
+        │
 值 层  values.py      不可变 Message/SessionEvent + JSONL 编解码
         persistence.py JSONL 追加写 + 重放读（横切状态层的 I/O 通道）
 ```
 
-依赖方向只有一条：上层依赖下层，下层不感知上层。
+依赖方向只有一条：上层依赖下层，下层不感知上层。工具在 `tools/` 包
+（应用内容，依赖状态层与 registry）、渲染在 `ui.py`、路径边界在
+`sandbox.py`、上下文压缩在 `compaction.py`——都是"应用内容"，框架
+四层不感知它们。
 
 ---
 
@@ -167,7 +172,9 @@ step 循环（内层，_run_step）    完成条件：模型给出纯文本 / ma
 
 钩子签名携带**默认实现**：钩子想放行就调 `default()`，想改写就自己返回，
 想拒绝就返回 None。未挂载时循环走默认路径——**架构完整、插座已装**。
-demo 运行时没挂任何钩子（只有测试验证语义），进化阶段会插上第一个。
+demo 运行时挂的第一个钩子是 `request_error`（上下文压缩的溢出恢复：
+模型报"上下文过长"→ 压缩后重试）；`request` / `pre_step` 仍未挂业务实现
+（只有测试验证语义）——插座已装，随功能演进插上。
 
 钩子的改写也都落日志（pre_step 改过的消息落 user/message，request 结果
 进 request/header）——不变式②"模型可见 ⟺ 可重建"没有破功。
@@ -179,9 +186,9 @@ demo 运行时没挂任何钩子（只有测试验证语义），进化阶段会
 | 失败发生在哪 | 谁在兜底 |
 |---|---|
 | 坏 JSON（模型给了坏参数） | loop.py——连 execute 都不进 |
-| 参数校验失败（缺 required / 多参数） | tools.py 抛 ValueError → loop.py 捕获降级 |
+| 参数校验失败（缺 required / 多参数） | registry.py 抛 ValueError → loop.py 捕获降级 |
 | 工具执行抛异常 | loop.py 捕获降级 |
-| 工具卡死超时 | tools.py wait_for 兜底 |
+| 工具卡死超时 | tools/ 包 wait_for 兜底 |
 
 模型看到 `ValueError: missing required argument` 这类结果，自己知道怎么
 改。**任何异常都不能越过 `_run_group` 炸掉循环**，唯一能打断的只有用户
@@ -259,9 +266,11 @@ JSON 没有类型信息，用 `$xxx` 前缀 key 做类型标记：`$text`/`$tool
 - **提示词每回合快照一次**：`assemble` 在 turn 开头求值，整个 turn 内
   system 恒定，可预期、可调试
 - **prompt sections 用 order 数值排序**：主序按 order 升序、平局按名字；
-  main.py 用 -100/0/110 间隔留插队空间。排序本身是架构性的（插件插队），
+  factory.py 用 -100/0/110 间隔留插队空间。排序本身是架构性的（插件插队），
   长提示词下首因/近因效应才变成真实的调优手段
-- **usage 进日志**：成本统计将来是日志的投影，运行时不需要记账
+- **usage 进日志 → 成本是日志的投影**：`assistant/message` 落 usage 后，
+  会话累计消耗 token / 缓存命中率只需扫日志求和（`compaction.py` 的
+  `session_token_totals`），运行时不需要第二份记账状态——"记忆机制的直接受益"
 - **模型是否每次看到全部工具**：是。每次请求全量携带 tools 清单
 
 ---
@@ -316,9 +325,10 @@ JSON 没有类型信息，用 `$xxx` 前缀 key 做类型标记：`$text`/`$tool
 | `ui.py` | 终端渲染（_render_event / _paint，UI 是日志投影） |
 | `factory.py` | build_agent / load_env（CLI 与 Web 共用组装） |
 | `cli.py` | CLI 入口 |
-| `web_app.py` | Web UI（FastAPI + SSE：会话/标题/approval） |
+| `web_app.py` | Web UI（FastAPI + SSE：会话/标题/approval/手动压缩） |
+| `compaction.py` | 上下文压缩引擎（四步事务 + checkpoint + 会话 token 累计账） |
 | `show_memory.py` | 教学脚本：重放日志展示"记忆 = 投影" |
-| `tests/test_demo.py` | 38 个架构测试 |
+| `tests/test_demo.py` | 58 个架构测试 |
 
 ---
 
@@ -349,30 +359,30 @@ JSON 没有类型信息，用 `$xxx` 前缀 key 做类型标记：`$text`/`$tool
 
 ### 阶段二：交互式 REPL（能持续对话）
 
-| 任务 | 说明 |
-|---|---|
-| 多轮输入循环 | 持续对话，`/exit` 退出——替代"每次跑一次命令 + --resume" |
-| Ctrl-C 取消 | 接到 `agent.cancel()`——CancelledError 传播链已就绪 |
-| `steer` 接入 | 运行中插入输入走 next-step 队列——双队列第二队首次启用 |
-| 会话管理 | `/sessions` 列表、切换会话 |
+| 任务 | 说明 | 状态 |
+|---|---|---|
+| 多轮输入循环 | 持续对话，`/exit` 退出——替代"每次跑一次命令 + --resume" | ⬜ 待做（CLI 仍是单次命令；Web 已是持续对话） |
+| Ctrl-C 取消 | 接到 `agent.cancel()`——CancelledError 传播链已就绪 | ✅ Web 停止按钮已接通 |
+| `steer` 接入 | 运行中插入输入走 next-step 队列——双队列第二队首次启用 | ⬜ 待做 |
+| 会话管理 | `/sessions` 列表、切换会话 | ✅ Web 会话列表/切换已完成 |
 
 ### 阶段三：长会话保障（能干长任务）
 
-| 任务 | 说明 |
-|---|---|
-| max-tokens 粘性续写 | finish_reason=length 时自动继续（当前只记 max-tokens 收尾） |
-| token 计数与成本显示 | usage 已落日志，重放日志即可统计——记忆机制的直接受益 |
-| compaction 触发 | 上下文超限时压缩历史（harness 的 surface replace 区间遮蔽是方向） |
-| request_error 钩子启用 | RATE_LIMIT 退避重试——钩子插座插上第一个电器 |
+| 任务 | 说明 | 状态 |
+|---|---|---|
+| max-tokens 粘性续写 | finish_reason=length 时自动继续（当前只记 max-tokens 收尾） | ⬜ 待做 |
+| token 计数与成本显示 | usage 已落日志，重放日志即可统计——记忆机制的直接受益 | ✅ 会话累计消耗 token + Web 圆环显示（compaction.py 的 `session_token_totals`） |
+| compaction 触发 | 上下文超限时压缩历史（harness 的 surface replace 区间遮蔽是方向） | ✅ 全套已完成：自动阈值 + 溢出恢复 + 手动按钮 |
+| request_error 钩子启用 | RATE_LIMIT 退避重试——钩子插座插上第一个电器 | ✅ 溢出恢复（上下文过长 → 压缩重试）已占用该钩子；RATE_LIMIT 退避未做 |
 
 ### 阶段四：工程化打磨
 
-| 任务 | 说明 |
-|---|---|
-| 配置文件 | provider/model/max_tokens/工具白名单，替代纯 CLI 参数 |
-| 错误恢复 | LlmError 分类处理、网络抖动重试 |
-| 日志查看器 | 基于 JSONL 的可视化调试界面（日志本来就是调试器） |
-| 提示词调优 | identity/persona/tool 规则完善，利用首因/近因效应 |
+| 任务 | 说明 | 状态 |
+|---|---|---|
+| 配置文件 | provider/model/max_tokens/工具白名单，替代纯 CLI 参数 | ⬜ 待做 |
+| 错误恢复 | LlmError 分类处理、网络抖动重试 | 🔶 部分（溢出恢复已启用钩子） |
+| 日志查看器 | 基于 JSONL 的可视化调试界面（日志本来就是调试器） | 🔶 Web 已能看历史/checkpoint；独立查看器未做 |
+| 提示词调优 | identity/persona/tool 规则完善，利用首因/近因效应 | 🔶 持续演进 |
 
 ### 每阶段的验收标准
 
@@ -394,12 +404,12 @@ JSON 没有类型信息，用 `$xxx` 前缀 key 做类型标记：`$text`/`$tool
 
 | 学到并实现 | 简化/未实现（进化时的候选增量） |
 |---|---|
-| surface 事件标记 + 纯函数折叠投影 | surface replace 区间遮蔽 + 溯源校验（compaction 用） |
+| surface 事件标记 + 纯函数折叠投影；**replace 区间遮蔽（位置语义，compaction 用）** | 遮蔽区间溯源校验 |
 | Inbox 双队列 + claim 语义 + 持久化重放 | 多宿主并发仲裁、steer 中断当前步 |
 | sections + 严格 `{{var}}` 插值 | 作用域链 shadow、complete 段 |
-| 工具分组执行 + 坏 JSON 兜底 | approval/权限桥、跨调用准则 |
-| request/header 落日志 + resume 恢复路由 | checkpoint 策略、持久化后端抽象 |
+| 工具分组执行 + 坏 JSON 兜底；**approval/权限桥 + `[exit code: N]` 跨调用准则** | OS 级沙箱、事件瀑布审批 |
+| request/header 落日志 + resume 恢复路由；**checkpoint 策略（四步事务 + 结构化摘要）** | 持久化后端抽象、token 预算选段 |
 | 三个钩子（回调版） | 事件总线（emit/serial/waterfall + 作用域过滤） |
 | CancelledError 贯穿 + when_idle 收敛 | 三源 abort 熔合 |
 | JSONL 追加 + adopt 重放 | 未知事件类型拒绝策略、ignorable 标记 |
-| OpenAI function-call wire 格式 | max-tokens 粘性、compaction 触发 |
+| OpenAI function-call wire 格式；**compaction 触发（自动阈值 + 溢出恢复 + 手动）** | max-tokens 粘性续写、后台任务编排 |

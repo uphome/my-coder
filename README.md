@@ -1,8 +1,9 @@
 # agent-demo
 
-deepseek-harness 核心架构的 Python 复刻（学习用）。约 1000 行代码，忠实实现
-harness 的四个核心设计：**日志是唯一事实源、模型可见 ⟺ 可重建、被动状态机 +
-Inbox、决策走钩子**。
+deepseek-harness 核心架构的 Python 复刻（学习用 / 个人工具）。约 3000 行
+Python + 原生单页 Web（约 1500 行，零构建），忠实实现 harness 的四个核心
+设计：**日志是唯一事实源、模型可见 ⟺ 可重建、被动状态机 + Inbox、决策走钩子**；
+并在其上做了真实工具集、多会话 Web UI 与上下文压缩（compaction）。
 
 ## 快速开始
 
@@ -50,12 +51,32 @@ conda run -n agent-demo python -m agent_demo.web_app --workspace . --fake    # �
 conda run -n agent-demo python -m agent_demo.web_app --workspace .           # 真实模型
 ```
 
-浏览器打开 http://127.0.0.1:8000：流式输出、可折叠"已深度思考"、工具调用卡片
-（变体图标/状态点/摘要）；会话可新建/切换/删除/**双击改名**（自动标题：首条
-消息后由模型概括起名，逐字复读会被拒绝退回摘要）。
+浏览器打开 http://127.0.0.1:8000：
+- 流式输出、可折叠"已深度思考"、工具调用卡片（变体图标/状态点/摘要）
+- 会话可新建/切换/删除/**双击改名**（自动标题：首条消息后由模型概括起名，
+  逐字复读会被拒绝退回摘要）
+- 敏感工具弹 **Web 批准/拒绝按钮**（不再依赖 CLI stdin）
+- **常驻 todo dock**：模型每次 todo_write 清单实时更新面板，有清单才显示
+- 输入行旁一枚**上下文占用圆环**（dsh ContextMeter 同款）：常态只有 20px+
+  SVG 环不占布局，点击展开悬浮面板——当前占用 %、**全会话累计消耗 token**、
+  **全会话缓存命中率**（真实 usage 才显示）；面板底部有**压缩旧对话**按钮
+  （手动触发 compaction，见下）
 
 运行后所有事件落在 `.sessions/<id>.jsonl`（每行一条事件），日志本身就是
 调试器——模型每一步看到什么、工具干了什么，都按 seq 记录在案。
+
+## 上下文压缩（compaction）
+
+长会话自动/手动折叠旧回合为结构化 checkpoint（preamble +
+`<compacted-summary>` 标签），上下文不无限膨胀：
+
+- **四步事务**：`compaction/start` → `compaction/summary` → checkpoint
+  surface replace（原位顶替旧回合，位置语义不切正在进行的工作）→
+  `compaction/end`——对齐 dsh 的 start→summary→replace→end
+- **自动触发两机制**：溢出恢复（模型报"上下文过长"→ 压缩后重试）+ 阈值
+  自动压缩（`turn/end` 后超 0.5M/1M 窗口一半 → 后台压缩，`--compact-at` 可调）
+- **手动**：Web 圆环面板的「压缩旧对话」按钮（`POST /compact`），fake
+  模式/运行中会拒绝并提示
 
 ## 一句话架构
 
@@ -83,7 +104,8 @@ conda run -n agent-demo python -m agent_demo.web_app --workspace .           # �
 值 层  values.py      不可变 Message/SessionEvent + JSONL 编解码
 应用内容：tools/（read_file/list_files/grep/glob/edit/write_file/bash/
 todo_write + build_tools 组装）、sandbox.py（workspace 路径边界）、
-ui.py（终端渲染）、constants.py（预算/颜色/demo 脚本）
+ui.py（终端渲染）、constants.py（预算/颜色/demo 脚本）、
+compaction.py（上下文压缩引擎）
 ```
 
 依赖方向只有一条：上层依赖下层，下层不感知上层。
@@ -159,22 +181,23 @@ ui.py（终端渲染）、constants.py（预算/颜色/demo 脚本）
 | `ui.py` | 终端渲染（_render_event / _paint，UI 是日志投影） |
 | `factory.py` | build_agent / load_env（CLI 与 Web 共用组装） |
 | `cli.py` | CLI 入口（argparse + run） |
-| `web_app.py` | Web UI（FastAPI + SSE：会话/标题/approval） |
-| `tests/test_demo.py` | 38 个架构测试 |
+| `web_app.py` | Web UI（FastAPI + SSE：会话/标题/approval/手动压缩） |
+| `compaction.py` | 上下文压缩引擎（四步事务 + checkpoint + 会话 token 累计账） |
+| `tests/test_demo.py` | 58 个架构测试 |
 
 ## 与 harness 的保真度对照
 
 | 学到并实现 | 简化/未实现（harness 的生产级增量） |
 |---|---|
-| surface 事件标记 + 纯函数折叠投影 | surface replace 区间遮蔽 + 溯源校验（compaction 用） |
+| surface 事件标记 + 纯函数折叠投影；**replace 区间遮蔽（位置语义，compaction 用）** | 遮蔽区间溯源校验 |
 | Inbox 双队列 + claim 语义 + 持久化重放 | 多宿主并发仲裁、steer 中断当前步 |
 | sections + 严格 `{{var}}` 插值 | 作用域链 shadow（子 agent 换 persona）、complete 段 |
-| 工具分组执行（parallel/sequential）+ 坏 JSON 兜底 | approval/权限桥、`[exit code: N]` 式跨调用准则 |
-| request/header 落日志 + resume 恢复路由 | checkpoint 策略、持久化后端抽象 |
+| 工具分组执行（parallel/sequential）+ 坏 JSON 兜底；**approval/权限桥 + `[exit code: N]` 跨调用准则** | OS 级沙箱（landlock/bwrap/seatbelt）、事件瀑布审批 |
+| request/header 落日志 + resume 恢复路由；**checkpoint 策略（四步事务 + 结构化摘要）** | 持久化后端抽象、token 预算选段 |
 | 三个钩子（回调版） | 事件总线（emit/serial/waterfall + 作用域过滤） |
 | CancelledError 贯穿 + when_idle 收敛 | 三源 abort 熔合（调用方/owner fiber/工厂销毁） |
 | JSONL 追加 + adopt 重放 | 未知事件类型拒绝策略、ignorable 标记 |
-| OpenAI function-call wire 格式（真模型可调工具） | max-tokens 粘性、compaction 触发 |
+| OpenAI function-call wire 格式（真模型可调工具）；**compaction 触发（自动阈值 + 溢出恢复 + 手动）** | max-tokens 粘性续写、后台任务编排 |
 
 ## 测试覆盖的架构行为
 
@@ -190,6 +213,7 @@ ui.py（终端渲染）、constants.py（预算/颜色/demo 脚本）
 - 沙箱：workspace 边界（绝对路径越界、`..` 逃逸、越界写入不落盘、grep/glob 越界拒绝）
 - 工具：grep/glob 搜索（分组/截断/include）、edit 字面量唯一匹配（零/多匹配拒绝）、bash 退出码/截断/超时 kill
 - approval：敏感工具（bash/write_file/edit）执行前确认（拒绝 → tool/skipped + is_error 结果）
+- compaction：选区/遮蔽位置语义、事务事件序列、摘要失败降级、自动阈值触发、溢出恢复、会话 token 累计账、手动压缩 endpoint
 
 ## 安全警告
 
