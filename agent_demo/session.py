@@ -97,10 +97,13 @@ class Session:
     def _apply_surface(self, event: SessionEvent) -> None:
         """把一条 surface 事件应用到投影（append 尾插 / replace 原位顶替）。
 
-        replace 语义：shadowed=(start_seq, end_seq) 指被顶替的旧区间——
-        把区间内仍在投影里的 seq 移除，再把新 seq 插到原区间头部的位置，
-        保证派生消息顺序正确（checkpoint 出现在它遮蔽的对话位置）。
-        区间内已被更早 replace 移走的 seq 不再重复处理。
+        replace 语义：shadowed=(start_seq, end_seq) 标定被顶替的旧区间——
+        但遮蔽目标是 surface **列表里从 start 位置到 end 位置这一段连续节点**
+        （位置语义，不是 seq 数值范围）。为什么必须是位置：
+        checkpoint 的 seq 大于被它顶替的旧 seq（追加式），replace 后 surface
+        不再是 seq 单调序（如 (4,2,3)）——若按 start<=seq<=end 数值过滤，
+        第二次压缩的区间会把范围里的无关节点误吞（演示见测试）。用两端 seq
+        在 surface 中的索引定位连续段，就能正确处理嵌套/连续多次 replace。
         """
         if event.surface_op == 'append':
             self._surface.append(event.seq)
@@ -108,24 +111,13 @@ class Session:
         if event.surface_op != 'replace':
             return
         assert event.shadowed is not None  # replace 必须带 shadowed（append 校验保证）
-        start, end = event.shadowed
-        # 区间内当前仍在投影中的 seq（保持相对顺序）
-        in_range = [seq for seq in self._surface if start <= seq <= end]
-        # 找插入点：原区间头部元素在投影里的位置；找不到（全被遮蔽）则放最前
-        insert_at = 0
-        if in_range:
-            insert_at = self._surface.index(in_range[0])
-        else:
-            # 退化为"按 start 排序插入"：找第一个比 start 大的 seq 前
-            for idx, seq in enumerate(self._surface):
-                if seq > start:
-                    insert_at = idx
-                    break
-            else:
-                insert_at = len(self._surface)
-        for seq in in_range:
-            self._surface.remove(seq)
-        self._surface.insert(insert_at, event.seq)
+        start_seq, end_seq = event.shadowed
+        # 两端 seq 必须在投影里（compaction 引擎基于当前 surface 选区，保证合法）
+        start_idx = self._surface.index(start_seq)
+        end_idx = self._surface.index(end_seq)
+        # 遮蔽的是 [start_idx, end_idx] 这段连续节点（含两端），原位插入 checkpoint
+        del self._surface[start_idx:end_idx + 1]
+        self._surface.insert(start_idx, event.seq)
 
     def derive_messages(self) -> list[Message]:
         """模型可见的消息历史：按 surface 顺序折叠，每个节点投影一次。
