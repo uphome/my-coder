@@ -183,7 +183,7 @@ def estimate_context_tokens(session: Session) -> int:
 
 
 def wire_auto_compaction(agent, *, max_tokens: int, keep_turns: int = 3) -> object:
-    """给 agent 挂自动压缩监听；返回退订函数。
+    """给 agent 挂阈值自动压缩监听；返回退订函数。
 
     接线方式（决策走注册声明，不动 loop）：session.on_event 监听
     turn/end——回合收尾后量上下文，超 max_tokens 就在后台压缩。
@@ -191,6 +191,51 @@ def wire_auto_compaction(agent, *, max_tokens: int, keep_turns: int = 3) -> obje
     """
     return agent.session.on_event(
         lambda event: _on_turn_event(agent, event, max_tokens, keep_turns))
+
+
+# 溢出恢复：模型报上下文过长错误 → 压缩后重试（对齐 dsh 的
+# agent/request-error → context-overflow → retry）。
+# 识别：HTTP_ERROR 的 message 里含上下文/长度特征串。
+CONTEXT_OVERFLOW_MARKERS = (
+    'context length', 'maximum context', 'context window',
+    'too many tokens', 'input is too long', 'context is too long',
+    '上下文', 'token 超过', '长度超过',
+)
+
+
+def _is_context_overflow(code: str, message: str) -> bool:
+    """HTTP 错误是否上下文溢出（DeepSeek 返回 HTTP 400 + body 特征串）。"""
+    if code != 'HTTP_ERROR':
+        return False
+    low = message.lower()
+    return any(marker.lower() in low for marker in CONTEXT_OVERFLOW_MARKERS)
+
+
+def wire_overflow_recovery(agent, *, keep_turns: int = 1) -> None:
+    """给 agent.hooks.request_error 包一层：上下文溢出错误先压缩再 retry。
+
+    独立于阈值自动压缩的兜底：即便 usage 估算失准、模型窗口语义变化，
+    只要 provider 真报溢出错误，就压旧回合腾空间后重试。保留用户已有
+    的 request_error 钩子（非溢出交给它；溢出时压缩优先）。
+    溢出场景 keep_turns 默认 1：压缩要激进——只保最近 1 回合，确保真腾出空间。
+    """
+    hooks = agent.hooks
+    outer = hooks.request_error
+
+    async def on_request_error(ctx) -> str:
+        if not _is_context_overflow(ctx.code, ctx.message):
+            if outer is not None:
+                return await outer(ctx)
+            return 'throw'
+        # 溢出：压缩旧回合腾空间，然后重试（摘要失败也重试一次，给模型机会）
+        await run_compaction(agent.session, agent.llm, keep_turns=keep_turns,
+                             model=agent.options.get('model', ''))
+        return 'retry'
+
+    hooks.request_error = on_request_error
+
+
+_background_compactions: set = set()
 
 
 def _on_turn_event(agent, event, max_tokens: int, keep_turns: int) -> None:
@@ -208,9 +253,6 @@ def _on_turn_event(agent, event, max_tokens: int, keep_turns: int) -> None:
     # 持引用防事件循环 GC 丢弃未完成的后台压缩
     _background_compactions.add(task)
     task.add_done_callback(_background_compactions.discard)
-
-
-_background_compactions: set = set()
 
 
 def extract_file_ops(session: Session, start_seq: int, end_seq: int) -> FileOps:

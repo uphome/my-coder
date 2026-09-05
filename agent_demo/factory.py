@@ -11,7 +11,6 @@ import os
 from pathlib import Path
 
 from .agent import Agent
-from .compaction import wire_auto_compaction
 from .constants import DEFAULT_COMPACT_TOKENS, DEMO_SCRIPT
 from .llm import FakeLlm, OpenAiCompatibleLlm
 from .prompt import PromptRegistry
@@ -84,12 +83,16 @@ def build_agent(session: Session, args, ui_state: dict, hooks=None) -> Agent:
 
     session.on_event(on_event)
 
-    # 自动压缩（默认开，阈值 = 1M 窗口的一半；--compact-at 0 显式关闭）：
-    # 上下文超阈值就压旧回合。fake 模式不开（脚本 llm 不能真摘要）。
-    # compact_at：None → 默认 0.5M；0 → 关闭；>0 → 自定义阈值。
-    compact_at = getattr(args, 'compact_at', None)
-    if compact_at is None:
-        compact_at = DEFAULT_COMPACT_TOKENS
-    if compact_at and not args.fake:
-        wire_auto_compaction(agent, max_tokens=int(compact_at))
+    # 真实模式下的上下文压缩双机制（fake 模式都不开——脚本 llm 不能真摘要）：
+    # 1. 溢出恢复：模型报上下文过长错误 → 压缩后重试（恒开，错误兜底）
+    # 2. 阈值自动压缩：回合结束量上下文超阈值就压（默认 0.5M，
+    #    --compact-at 0 显式关闭 / >0 自定义）
+    if not args.fake:
+        from .compaction import wire_auto_compaction, wire_overflow_recovery
+        wire_overflow_recovery(agent)
+        compact_at = getattr(args, 'compact_at', None)
+        if compact_at is None:
+            compact_at = DEFAULT_COMPACT_TOKENS
+        if compact_at:
+            wire_auto_compaction(agent, max_tokens=int(compact_at))
     return agent

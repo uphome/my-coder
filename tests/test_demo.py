@@ -1448,8 +1448,7 @@ async def test_auto_compaction_fires_on_threshold(tmp_path):
 
 
 def test_build_agent_wires_auto_compaction_by_default(tmp_path):
-    """真实模式默认挂自动压缩（0.5M 阈值）；fake 模式不挂；0 关闭。"""
-    # 真实模式：compact_at 缺省 → 默认接线（阈值 = DEFAULT_COMPACT_TOKENS）
+    """真实模式默认挂阈值压缩（0.5M）+ 溢出恢复；fake 模式不挂；0 关闭阈值压缩。"""
     import os
     from argparse import Namespace
 
@@ -1457,31 +1456,102 @@ def test_build_agent_wires_auto_compaction_by_default(tmp_path):
     from agent_demo.factory import build_agent
     from agent_demo.session import Session
     os.environ['DEEPSEEK_API_KEY'] = 'sk-placeholder'  # build_agent 只构造 llm 不连接
-    import agent_demo.factory as factory
+    import agent_demo.compaction as comp  # factory 函数体内 import 会实时取这里，mock 生效
     wired = []
-    orig = factory.wire_auto_compaction
-    factory.wire_auto_compaction = lambda agent, **kw: wired.append(kw) or object()
+    orig_wire = comp.wire_auto_compaction
+    orig_overflow = comp.wire_overflow_recovery
+    # 观察接线调用（不真正挂，避免副作用）
+    comp.wire_auto_compaction = lambda agent, **kw: wired.append(('auto', kw)) or object()
+    comp.wire_overflow_recovery = lambda agent, **kw: wired.append(('overflow', kw))
     try:
         args = Namespace(fake=False, model='m', workspace=tmp_path, hide_reasoning=False,
                          session='x', sessions=str(tmp_path), prompt='', resume=False, verbose=False)
         session = Session(id='x')
         build_agent(session, args, {'reasoning_started': False, 'request_no': 0, 'tool_no': 0})
-        assert len(wired) == 1
-        assert wired[0]['max_tokens'] == DEFAULT_COMPACT_TOKENS
+        kinds = [k for k, _ in wired]
+        assert kinds == ['overflow', 'auto']  # 溢出恢复恒挂 + 阈值默认挂
+        auto_kw = dict(wired[1][1])
+        assert auto_kw['max_tokens'] == DEFAULT_COMPACT_TOKENS
 
-        # 显式 0 → 关闭
+        # 显式 0 → 阈值压缩关，但溢出恢复仍在（错误兜底不依赖阈值开关）
         wired.clear()
         args2 = Namespace(fake=False, model='m', workspace=tmp_path, hide_reasoning=False,
                           session='x', sessions=str(tmp_path), prompt='', resume=False, verbose=False,
                           compact_at=0)
         build_agent(Session(id='x2'), args2, {'reasoning_started': False, 'request_no': 0, 'tool_no': 0})
-        assert wired == []
+        assert [k for k, _ in wired] == ['overflow']
 
-        # fake 模式 → 不挂（脚本 llm 不能真摘要）
+        # fake 模式 → 都不挂（脚本 llm 不能真摘要）
         wired.clear()
         args3 = Namespace(fake=True, model='m', workspace=tmp_path, hide_reasoning=False,
                           session='x', sessions=str(tmp_path), prompt='', resume=False, verbose=False)
         build_agent(Session(id='x3'), args3, {'reasoning_started': False, 'request_no': 0, 'tool_no': 0})
         assert wired == []
     finally:
-        factory.wire_auto_compaction = orig
+        comp.wire_auto_compaction = orig_wire
+        comp.wire_overflow_recovery = orig_overflow
+
+
+def test_context_overflow_detection():
+    """溢出错误识别：HTTP_ERROR + 特征串为真，其他为假。"""
+    from agent_demo.compaction import _is_context_overflow
+    assert _is_context_overflow('HTTP_ERROR', '400: maximum context length exceeded') is True
+    assert _is_context_overflow('HTTP_ERROR', 'input is too long for the model') is True
+    assert _is_context_overflow('HTTP_ERROR', '上下文长度超过限制') is True
+    assert _is_context_overflow('HTTP_ERROR', 'rate limit reached') is False
+    assert _is_context_overflow('RATE_LIMIT', 'context length') is False  # 非 HTTP_ERROR code
+    assert _is_context_overflow('HTTP_ERROR', '') is False
+
+
+@pytest.mark.asyncio
+async def test_overflow_recovery_compacts_and_retries(tmp_path):
+    """溢出恢复：模型报上下文过长 → 压缩旧回合 → retry 成功。"""
+    import os
+    os.environ['DEEPSEEK_API_KEY'] = 'sk-placeholder'
+    from argparse import Namespace
+
+    from agent_demo.factory import build_agent
+    from agent_demo.session import Session
+    from agent_demo.values import TextBlock, create_assistant_message, create_user_message
+
+    class OverflowLlm:
+        def __init__(self):
+            self.main_steps = [
+                {'error': {'code': 'HTTP_ERROR', 'message': 'maximum context length exceeded (1M)'}},
+                {'text': '压缩后重试成功', 'finish_reason': 'stop'},
+            ]
+
+        async def stream(self, request, signal=None):
+            from agent_demo.llm import LlmError, StreamChunk
+            if 'compaction engine' in (request.system or ''):
+                yield StreamChunk(text='## 主要请求\n- 压缩历史\n## 下一步\n1. 继续', finish_reason='stop')
+                return
+            step = self.main_steps.pop(0)
+            if 'error' in step:
+                raise LlmError(step['error']['code'], step['error']['message'])
+            yield StreamChunk(text=step['text'], finish_reason='stop')
+
+    s = Session(id='ov')
+    def user(t): return create_user_message([TextBlock(text=t)])
+    def asst(t): return {'message': create_assistant_message([TextBlock(text=t)])}
+    s.append('turn/start', {'turn': 1})
+    s.append('user/message', user('历史任务内容' * 30), surface_op='append')
+    s.append('assistant/message', asst('历史回答' * 30), surface_op='append')
+    s.append('turn/end', {'turn': 1, 'reason': 'completed'})
+    s.append('turn/start', {'turn': 2})
+    s.append('user/message', user('继续'), surface_op='append')
+
+    args = Namespace(fake=False, model='m', workspace=tmp_path, hide_reasoning=False,
+                     session='ov', sessions=str(tmp_path), prompt='', resume=False, verbose=False)
+    agent = build_agent(s, args, {'reasoning_started': False, 'request_no': 0, 'tool_no': 0})
+    agent.llm = OverflowLlm()
+    agent.followup('继续')
+    await agent.when_idle()
+
+    # 溢出触发压缩（四事件）+ retry 成功
+    assert any(e.type == 'compaction/summary' for e in s.events)
+    assert any(e.type == 'compaction/end' for e in s.events)
+    assert s.events[-1].data['reason'] == 'completed'
+    texts = [m.content[0].text for m in s.derive_messages() if m.content and m.content[0].type == 'text']
+    assert any('<compacted-summary>' in t for t in texts)
+    assert texts[-1] == '压缩后重试成功'
