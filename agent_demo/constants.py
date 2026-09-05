@@ -22,6 +22,10 @@ GLOB_MAX_RESULTS = 100   # glob 内联保留的最大路径数
 # 截断提示教模型把大输出重定向到文件，再用 read_file 分页读。
 BASH_MAX_OUTPUT_CHARS = 8000
 
+# 上下文压缩默认阈值：deepseek-v4 窗口 1M token，过半（0.5M）就自动压
+# 旧回合，给后续回合留足空间（摘要请求本身也吃窗口）。显式 0 可关闭。
+DEFAULT_COMPACT_TOKENS = 524288  # 1M 窗口的一半
+
 DEMO_SCRIPT: list[dict] = [
     {
         'reasoning': '用户让我总结 README，先读取文件内容再回答。',

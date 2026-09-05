@@ -55,6 +55,9 @@ def main() -> None:
     parser.add_argument('--hide-reasoning', action='store_true',
                         help='折叠（隐藏）思维链，只记录到日志，不打印到终端')
     parser.add_argument('--verbose', action='store_true', help='debug logging')
+    parser.add_argument('--compact-at', type=int, default=None, metavar='TOKENS',
+                        help='auto-compact threshold (default 524288 = half of the 1M '
+                             'deepseek-v4 window); pass 0 to disable')
     args = parser.parse_args()
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO)
     asyncio.run(run(args))

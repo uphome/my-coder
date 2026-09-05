@@ -325,13 +325,15 @@ def _scan_sessions() -> list[dict]:
 
 
 def init_web(workspace: Path, fake: bool = False, model: str = 'deepseek-v4-flash',
-             sessions_dir: Path | None = None, sid: str = 'web') -> None:
-    """初始化全局状态（测试可注入 workspace / fake / sessions_dir）。"""
+             sessions_dir: Path | None = None, sid: str = 'web',
+             compact_at: int | None = None) -> None:
+    """初始化全局状态（测试可注入 workspace / fake / sessions_dir / compact_at）。"""
     global _sessions_dir, _args
     _sessions_dir = Path(sessions_dir or '.sessions')
     _args = argparse.Namespace(
         fake=fake, model=model, workspace=workspace, hide_reasoning=False,
         session=sid, sessions=str(_sessions_dir), prompt='', resume=False, verbose=False,
+        compact_at=compact_at,
     )
     _open_session(sid, allow_missing=True)
 
@@ -554,9 +556,12 @@ def main() -> None:
     parser.add_argument('--model', default='deepseek-v4-flash', help='model id for the OpenAI-compatible API')
     parser.add_argument('--host', default='127.0.0.1', help='bind host (default 127.0.0.1)')
     parser.add_argument('--port', default=8000, type=int, help='bind port (default 8000)')
+    parser.add_argument('--compact-at', type=int, default=None, metavar='TOKENS',
+                        help='auto-compact when the routed context exceeds TOKENS '
+                             '(deepseek-v4 window is 1M; default off)')
     args = parser.parse_args()
     load_env(_ROOT / '.env')  # 与 CLI 一致：注入 .env 的 API key
-    init_web(args.workspace, fake=args.fake, model=args.model)
+    init_web(args.workspace, fake=args.fake, model=args.model, compact_at=args.compact_at)
     import uvicorn
     uvicorn.run(app, host=args.host, port=args.port)
 

@@ -157,19 +157,28 @@ def _extract_path(arguments: dict) -> str | None:
 
 
 def estimate_context_tokens(session: Session) -> int:
-    """估算当前模型可见上下文的 token 数（粗估：字符 / 2，中文约 1.5~2 字/token）。
+    """估算当前模型可见上下文 token（真实 usage 优先，字符估算兜底）。
 
-    教学实现：真实 token 计费需 provider usage，demo 用字符近似对齐
-    "压缩要真省"的直觉——估算偏保守没关系，阈值可调。仅统计
-    derive_messages() 折叠出的文本（模型真正看到的）。
+    真实来源：最后一条 assistant/message 事件的 usage.prompt_tokens——
+    provider 实测的"这次请求输入多少 token"（含 cache hit），最接近
+    当前上下文规模（学 PI：真实测量优先）。
+    兜底：无 usage 时按文本字符 /2 粗估（英文约 4 字符/token、中文约
+    1.5，取折中让触发偏早不偏晚——宁压缩勿溢出）。
     """
+    # 真实 usage：扫最后一条带 usage 的 assistant/message
+    for event in reversed(session.events):
+        if event.type != 'assistant/message':
+            continue
+        data = event.data if isinstance(event.data, dict) else {}
+        usage = data.get('usage')
+        if isinstance(usage, dict) and usage.get('prompt_tokens'):
+            return int(usage['prompt_tokens'])
+        break  # 最新的 assistant/message 没 usage → 用估算兜底
     total_chars = 0
     for message in session.derive_messages():
         for block in getattr(message, 'content', ()):
             if getattr(block, 'type', '') == 'text':
                 total_chars += len(block.text)
-    # 粗略：英文约 4 字符/token、中文约 1.5 字符/token；教学用 /2 折中，
-    # 让触发偏早不偏晚（宁压缩勿溢出）
     return max(1, total_chars // 2)
 
 

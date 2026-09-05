@@ -1445,3 +1445,43 @@ async def test_auto_compaction_fires_on_threshold(tmp_path):
     await asyncio.sleep(0.2)
     unsub2()
     assert not any(e.type == 'compaction/start' for e in s2.events)
+
+
+def test_build_agent_wires_auto_compaction_by_default(tmp_path):
+    """真实模式默认挂自动压缩（0.5M 阈值）；fake 模式不挂；0 关闭。"""
+    # 真实模式：compact_at 缺省 → 默认接线（阈值 = DEFAULT_COMPACT_TOKENS）
+    import os
+    from argparse import Namespace
+
+    from agent_demo.constants import DEFAULT_COMPACT_TOKENS
+    from agent_demo.factory import build_agent
+    from agent_demo.session import Session
+    os.environ['DEEPSEEK_API_KEY'] = 'sk-placeholder'  # build_agent 只构造 llm 不连接
+    import agent_demo.factory as factory
+    wired = []
+    orig = factory.wire_auto_compaction
+    factory.wire_auto_compaction = lambda agent, **kw: wired.append(kw) or object()
+    try:
+        args = Namespace(fake=False, model='m', workspace=tmp_path, hide_reasoning=False,
+                         session='x', sessions=str(tmp_path), prompt='', resume=False, verbose=False)
+        session = Session(id='x')
+        build_agent(session, args, {'reasoning_started': False, 'request_no': 0, 'tool_no': 0})
+        assert len(wired) == 1
+        assert wired[0]['max_tokens'] == DEFAULT_COMPACT_TOKENS
+
+        # 显式 0 → 关闭
+        wired.clear()
+        args2 = Namespace(fake=False, model='m', workspace=tmp_path, hide_reasoning=False,
+                          session='x', sessions=str(tmp_path), prompt='', resume=False, verbose=False,
+                          compact_at=0)
+        build_agent(Session(id='x2'), args2, {'reasoning_started': False, 'request_no': 0, 'tool_no': 0})
+        assert wired == []
+
+        # fake 模式 → 不挂（脚本 llm 不能真摘要）
+        wired.clear()
+        args3 = Namespace(fake=True, model='m', workspace=tmp_path, hide_reasoning=False,
+                          session='x', sessions=str(tmp_path), prompt='', resume=False, verbose=False)
+        build_agent(Session(id='x3'), args3, {'reasoning_started': False, 'request_no': 0, 'tool_no': 0})
+        assert wired == []
+    finally:
+        factory.wire_auto_compaction = orig

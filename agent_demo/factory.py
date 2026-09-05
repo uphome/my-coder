@@ -11,7 +11,8 @@ import os
 from pathlib import Path
 
 from .agent import Agent
-from .constants import DEMO_SCRIPT
+from .compaction import wire_auto_compaction
+from .constants import DEFAULT_COMPACT_TOKENS, DEMO_SCRIPT
 from .llm import FakeLlm, OpenAiCompatibleLlm
 from .prompt import PromptRegistry
 from .session import Session
@@ -82,4 +83,13 @@ def build_agent(session: Session, args, ui_state: dict, hooks=None) -> Agent:
         render_event(event, args.hide_reasoning, ui_state)
 
     session.on_event(on_event)
+
+    # 自动压缩（默认开，阈值 = 1M 窗口的一半；--compact-at 0 显式关闭）：
+    # 上下文超阈值就压旧回合。fake 模式不开（脚本 llm 不能真摘要）。
+    # compact_at：None → 默认 0.5M；0 → 关闭；>0 → 自定义阈值。
+    compact_at = getattr(args, 'compact_at', None)
+    if compact_at is None:
+        compact_at = DEFAULT_COMPACT_TOKENS
+    if compact_at and not args.fake:
+        wire_auto_compaction(agent, max_tokens=int(compact_at))
     return agent
