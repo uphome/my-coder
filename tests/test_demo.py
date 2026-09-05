@@ -1822,3 +1822,106 @@ def _id_of(client) -> str:
     """当前焦点会话 id（init 后默认 'web'）。"""
     from agent_demo import web_app
     return web_app._current_sid
+
+
+@pytest.mark.asyncio
+async def test_steer_inserts_and_runs_as_next_turn():
+    """steer 插队：消息进 next-step，回合结束后立即作为下一轮首条被消费。
+
+    不苛求抓到 running 窗口（fake llm 太快）；重点是 next-step 里的消息
+    绝不会丢——when_idle 收敛后 inbox.has_pending 为假、两条用户消息都
+    进了模型记忆。
+    """
+    from agent_demo.agent import Agent
+    from agent_demo.prompt import PromptRegistry
+    from agent_demo.registry import ToolRegistry
+    from agent_demo.session import Session
+
+    session = Session(id='s')
+    agent = Agent(
+        session=session, llm=FakeLlm([{}]), prompt=PromptRegistry(), tools=ToolRegistry(),
+        options={'provider': 'fake', 'model': 'fake-model'},
+    )
+    agent.followup('第一问')
+    agent.steer('插队指令')      # 可能回合已完 → 进 next-step，下轮消费
+    await agent.when_idle()
+
+    # 两条用户消息都进了模型记忆，插队的那条也在
+    users = [m.content[0].text for m in session.derive_messages()
+             if m.content and getattr(m.content[0], 'type', '') == 'text' and m.role == 'user']
+    assert '第一问' in users and '插队指令' in users
+    assert agent.inbox.has_pending is False
+    assert agent.status == 'idle'
+
+
+@pytest.mark.asyncio
+async def test_steer_while_running_becomes_next_step_of_same_turn():
+    """steer 在回合进行中入队 → next-step：同回合内被消费（不新开回合）。
+
+    验证方式不靠 sleep 抓窗口（脆弱），用事件日志的事实：
+    - 全程只有一次 turn/start（steer 没触发新回合）
+    - 出现 ≥2 次 step/start（steer 消息作为本回合的下一步被处理）
+    - 插队文本在模型可见记忆里
+    """
+    from agent_demo.agent import Agent
+    from agent_demo.llm import StreamChunk
+    from agent_demo.prompt import PromptRegistry
+    from agent_demo.registry import ToolRegistry
+    from agent_demo.session import Session
+
+    class HoldingLlm:
+        """第一步：stream 挂起（等 steer 入队窗口）再 yield 文本。
+
+        用 asyncio.Event 精确控制：stream 一进来就置 started 并等 release，
+        测试在 release 前完成 steer——保证消息入队时回合仍在进行。
+        """
+        def __init__(self):
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def stream(self, request, signal=None):
+            self.started.set()
+            await self.release.wait()
+            yield StreamChunk(text='done', finish_reason='stop')
+
+    session = Session(id='s')
+    llm = HoldingLlm()
+    agent = Agent(
+        session=session, llm=llm, prompt=PromptRegistry(), tools=ToolRegistry(),
+        options={'provider': 'fake', 'model': 'fake-model'},
+    )
+    agent.followup('做任务')
+    await llm.started.wait()            # 回合确实在跑（driver 挂起在 stream 里）
+    assert agent.status == 'running'
+    agent.steer('改个方向')             # 进行中插队 → next-step
+    llm.release.set()                   # 放行：第一步完成，下一步轮到 steer 消息
+    await agent.when_idle()
+
+    turns = [e.data['turn'] for e in session.events if e.type == 'turn/start']
+    steps = [e for e in session.events if e.type == 'step/start']
+    assert len(turns) == 1                      # 没开新回合
+    assert len(steps) >= 2                      # steer 是同一回合的下一步
+    users = [m.content[0].text for m in session.derive_messages()
+             if m.content and getattr(m.content[0], 'type', '') == 'text' and m.role == 'user']
+    assert users == ['做任务', '改个方向']       # 两条都消费，顺序正确
+    assert agent.status == 'idle'
+
+
+def test_web_steer_requires_active_stream(tmp_path):
+    """POST /steer：无活跃对话流（idle）时 409 拒绝；提示用 /chat 开回合。"""
+    from fastapi.testclient import TestClient
+
+    from agent_demo import web_app
+
+    web_app.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
+    client = TestClient(web_app.app)
+
+    # 会话刚初始化，无活跃 SSE 流 → 409
+    resp = client.post('/steer', json={'message': 'hi'})
+    assert resp.status_code == 409
+    assert '活跃对话流' in resp.json()['detail']
+
+    # fake llm 回合很快结束，chat 结束后流已关 → 再 steer 仍 409
+    client.post('/chat', json={'message': 'hi'})
+    resp2 = client.post('/steer', json={'message': 'again'})
+    assert resp2.status_code == 409

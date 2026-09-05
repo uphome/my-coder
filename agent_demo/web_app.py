@@ -662,6 +662,36 @@ async def chat(request: Request) -> StreamingResponse:
     return StreamingResponse(sse_stream(), media_type='text/event-stream')
 
 
+@app.post('/steer')
+async def steer(request: Request) -> dict:
+    """运行中插队：把消息塞进当前回合的 next-step 队列（steer，即时生效）。
+
+    与 /chat 的分工：idle 时新开回合走 /chat（followup）；回合进行中
+    改方向/加指令走 /steer——消息作为当前回合的下一步处理，事件继续
+    沿已打开的 SSE 流推送（回合不结束）。
+    前置：该会话的 agent 必须在跑（有活跃对话流）；idle 时用 /chat。
+    """
+    _check_init()
+    assert _session is not None and _agent is not None
+    body = await request.json()
+    message = (body.get('message') or '').strip()
+    if not message:
+        raise HTTPException(400, 'message must not be empty')
+    sid = body.get('sid') or _current_sid
+    seat = _seats.get(sid)
+    if seat is None:
+        raise HTTPException(404, f'session {sid!r} not open — switch to it first')
+    if seat.queue is None:
+        raise HTTPException(409, '会话没有活跃对话流——用 /chat 开新回合')
+    if seat.agent.status != 'running':
+        # 竞态窗口：回合刚 turn_end、SSE 尚未收尾（DONE 未发）时 queue 还在，
+        # 但 agent 已 idle——插队入队后事件会没人读（流即将关闭）。拒绝，
+        # 前端会把输入放回，等回合真正结束后走 /chat。
+        raise HTTPException(409, 'agent 已空闲——回合即将结束，请稍后用普通消息')
+    seat.agent.steer(message)
+    return {'ok': True, 'sid': sid, 'queued': 'next-step'}
+
+
 @app.post('/compact')
 async def compact(request: Request) -> dict:
     """手动压缩会话：把旧回合折叠成 checkpoint（复用 run_compaction）。

@@ -750,13 +750,15 @@ function finalizeSegments(textEl) {
 }
 
 /* ---------- 回合与消息骨架 ---------- */
-function addUserMessage(text) {
-  turnNo += 1;
-  const sep = el('div', 'turn-sep');
-  const n = el('span', 'sep-n');
-  n.textContent = `回合 ${turnNo}`;
-  sep.appendChild(n);
-  messagesEl.appendChild(sep);
+function addUserMessage(text, newTurn = true) {
+  if (newTurn) {
+    turnNo += 1;
+    const sep = el('div', 'turn-sep');
+    const n = el('span', 'sep-n');
+    n.textContent = `回合 ${turnNo}`;
+    sep.appendChild(n);
+    messagesEl.appendChild(sep);
+  }
   const row = el('div', 'msg user');
   const bubble = el('div', 'bubble');
   bubble.textContent = text;
@@ -1341,7 +1343,9 @@ function showApprovalCard(approvalId, name, argsRaw) {
 /* ---------- 发送 / 停止 ---------- */
 async function send() {
   const text = input.value.trim();
-  if (!text || busy) return;
+  if (!text) return;
+  // agent 运行中：回车 = 插队（/steer，当前回合下一步即时生效）
+  if (busy) { steer(text); return; }
   // 新回合开始：todo = 当前回合的计划，dock 清空（对齐后端 turn/start 投影）。
   // 若本回合模型重新规划 todo_write，todo_update 帧会重新唤起 dock。
   setTodos(null);
@@ -1356,7 +1360,7 @@ async function send() {
     const res = await fetch('/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: text }),
+      body: JSON.stringify({ message: text, sid: currentSid }),
       signal: controller.signal,
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -1386,10 +1390,34 @@ async function send() {
     setTimeout(loadSessions, 2500);
   }
 }
+/* 运行中插队（steer）：消息进当前回合 next-step，回合不结束——所以
+   不复用 /chat 的 SSE 读取循环（那个流还开着，模型下一步的事件会
+   继续沿它推过来）。本地只渲染用户气泡 + 清输入框即可。 */
+async function steer(text) {
+  input.value = '';
+  input.style.height = 'auto';
+  addUserMessage(text, false);   // 非新回合：不加回合分隔线
+  try {
+    const res = await fetch('/steer', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: text, sid: currentSid }),
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      // 插队失败（回合恰好结束/无活跃流）：文本放回输入框，稍后走普通消息
+      // （可能已渲染了气泡——下一回合渲染历史时会以日志为准重建，无害）
+      console.warn('steer failed:', data.detail || res.status);
+      input.value = text;
+      input.style.height = 'auto';
+      input.focus();
+    }
+  } catch (e) { console.error('steer failed', e); }
+}
 function setBusy(value) {
   busy = value;
   sendBtn.disabled = value;
-  input.disabled = value;
+  // 输入框运行中不禁用：agent 干活时也能打字，回车走 /steer 插队（打断当前回合）
   stopBtn.hidden = !value;
   sendBtn.textContent = value ? '生成中…' : '发送';
   updateCompactDisabled();
@@ -1440,13 +1468,17 @@ ctxCompactBtn.addEventListener('click', async () => {
   ctxCompactMsg.textContent = '正在折叠旧对话…';
   ctxCompactMsg.classList.remove('err');
   try {
-    const res = await fetch('/compact', { method: 'POST' });
+    const res = await fetch('/compact', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sid: currentSid }),
+    });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
     if (data.compacted) {
       ctxCompactMsg.textContent = data.reason || '压缩完成';
       // 重新拉历史：checkpoint 顶替旧回合 → 卡片重新渲染、占用回落
-      const hist = await (await fetch('/history')).json();
+      const hist = await (await fetch(`/history?sid=${encodeURIComponent(currentSid)}`)).json();
       setTodos(hist.todos);
       updateContext(hist.context);
       renderHistory(hist.history);
@@ -1482,7 +1514,7 @@ ctxCompactBtn.addEventListener('click', async () => {
   } catch (e) { console.error('load meta failed', e); }
   await loadSessions();
   try {
-    const res = await fetch('/history');
+    const res = await fetch(`/history?sid=${encodeURIComponent(currentSid)}`);
     const data = await res.json();
     setTodos(data.todos);
     updateContext(data.context);
