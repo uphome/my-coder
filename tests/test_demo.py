@@ -2044,3 +2044,45 @@ def test_cli_repl_runs_multiple_turns(tmp_path):
             if getattr(block, 'type', '') == 'text':
                 texts.append(block.text)
     assert '第一轮：读 README' in texts and '第二轮：列文件' in texts
+
+
+def test_web_history_marks_same_turn_steer(tmp_path):
+    """历史渲染的回合归属：同回合插队（steer）的 user 消息 turn 相同。
+
+    重开会话时前端靠 user 消息的 turn 决定画不画回合分隔线——若两条
+    user 同 turn（首问 + 插队），不画；若跨回合（followup 开新回合），
+    画。回归：之前 steer 消息在刷新后被渲染成独立"回合 N"（缺 turn 信息）。
+    """
+    from fastapi.testclient import TestClient
+
+    from agent_demo import web_app
+    from agent_demo.values import TextBlock, create_assistant_message, create_user_message
+
+    web_app.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
+    client = TestClient(web_app.app)
+    s = web_app._session
+
+    # turn 1：首问 → 模型答 → 插队（同回合第二条 user）→ 模型答
+    def user(t): return create_user_message([TextBlock(text=t)])
+    s.append('turn/start', {'turn': 1})
+    s.append('user/message', user('首问：读 README'), surface_op='append')
+    s.append('assistant/message', {'turn': 1, 'step': 1,
+             'message': create_assistant_message([TextBlock(text='A1')])},
+             surface_op='append')
+    s.append('user/message', user('插队：先别读，列文件'), surface_op='append')  # steer 同回合
+    s.append('assistant/message', {'turn': 1, 'step': 2,
+             'message': create_assistant_message([TextBlock(text='A2')])},
+             surface_op='append')
+    s.append('turn/end', {'turn': 1, 'reason': 'completed'})
+    # turn 2：新回合
+    s.append('turn/start', {'turn': 2})
+    s.append('user/message', user('第二轮问题'), surface_op='append')
+    s.append('turn/end', {'turn': 2, 'reason': 'completed'})
+
+    hist = client.get('/history').json()['history']
+    users = [(m['text'], m.get('turn')) for m in hist if m['role'] == 'user']
+    assert [t for _, t in users] == [1, 1, 2]
+    assert users[0][0].startswith('首问') and users[1][0].startswith('插队')
+    # 同回合两条 user 的 turn 相同（前端据此不画分隔线）；新回合不同
+    turns = [t for _, t in users]
+    assert turns[0] == turns[1] and turns[1] != turns[2]

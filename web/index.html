@@ -1123,10 +1123,16 @@ function renderHistory(history) {
   if (!history.length) {
     emptyHint('这个会话还是空的——发一条消息开始。');
   } else {
+    // 跟踪上一条"真人发言"的回合号：同回合的后续 user = steer 插队
+    // （不画回合分隔线），回合号变化 = 新回合（画）。checkpoint 是
+    // 压缩标记不算真人发言，不更新 lastUserTurn。
+    let lastUserTurn = null;
     for (const m of history) {
       if (m.role === 'user') {
-        closeAssistant();         // 真用户消息：收掉上一个助手块，画分隔线 + 气泡
-        addUserMessage(m.text);
+        closeAssistant();         // 真用户消息：收掉上一个助手块
+        const sameTurn = lastUserTurn !== null && m.turn === lastUserTurn;
+        addUserMessage(m.text, !sameTurn);   // 同回合插队不画分隔线
+        if (m.turn !== undefined) lastUserTurn = m.turn;
       } else if (m.role === 'tool_result') {
         // 工具结果消息（内部是 user 角色）：并入当前助手块的工具活动
         for (const r of m.tool_results) addToolResult(r);

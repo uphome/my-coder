@@ -16,6 +16,7 @@ import json
 import time
 import uuid
 from pathlib import Path
+from typing import cast
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
@@ -317,6 +318,61 @@ def _open_session_seat(sid: str, *, allow_missing: bool) -> Seat:
     return seat
 
 
+def _surface_with_seq(session) -> list[tuple[int, object]]:
+    """按 surface 序的 (seq, Message)——镜像 derive_messages 但保留 seq。
+
+    历史渲染需要知道每条 user 消息属于第几个回合（turn/start 到 turn/end
+    之间）——同回合后续的 user 消息 = steer 插队，前端不该画新回合分隔线。
+    derive_messages 只返回 Message（无 seq），这里补上 seq 供回合映射用。
+    保持与 derive_messages 相同的折叠规则（assistant 空 content 跳过）。
+    """
+    out: list[tuple[int, object]] = []
+    events = session.events
+    for seq in session.surface:
+        event = events[seq]
+        if event.type == 'user/message':
+            out.append((seq, event.data))
+        elif event.type == 'assistant/message':
+            message = cast(dict, event.data)['message']
+            if message.content:
+                out.append((seq, message))
+        elif event.type == 'tool/result':
+            out.append((seq, event.data))
+    return out
+
+
+def _user_message_turns(session) -> dict[int, int]:
+    """user/message surface 事件的 seq → 回合号（扫描 turn/start 划界）。
+
+    只有真人发言（surface append 的 user/message）需要回合归属；checkpoint
+    （replace 顶替）单独由 role 识别，不进此表。
+    """
+    mapping: dict[int, int] = {}
+    turn = 0
+    for event in session.events:
+        if event.type == 'turn/start':
+            turn = int(event.data['turn'])
+        elif event.type == 'user/message' and event.surface_op == 'append':
+            mapping[event.seq] = turn
+    return mapping
+
+
+def _history_payloads(session) -> list[dict]:
+    """会话历史消息载荷（页面加载/刷新用），user 消息附带其回合归属。
+
+    message_to_payload 是纯消息 → dict，不知道回合；这里在构造处补上
+    'turn' 字段，前端据此区分"新回合首条"与"同回合插队（steer）"。
+    """
+    turns = _user_message_turns(session)
+    payloads = []
+    for seq, message in _surface_with_seq(session):
+        payload = message_to_payload(message)
+        if payload['role'] == 'user' and seq in turns:
+            payload['turn'] = turns[seq]
+        payloads.append(payload)
+    return payloads
+
+
 def _open_session(sid: str, *, allow_missing: bool) -> dict:
     """打开/切换到会话：Seat get-or-create + 设置全局焦点（_session/_agent 别名）。"""
     global _session, _agent, _current_sid
@@ -327,7 +383,7 @@ def _open_session(sid: str, *, allow_missing: bool) -> dict:
     _current_sid = sid
     return {
         'id': sid,
-        'history': [message_to_payload(m) for m in seat.session.derive_messages()],
+        'history': _history_payloads(seat.session),
         'todos': fold_todos(seat.session) or [],  # 当前 todo 投影：切换会话时恢复 dock
         'context': _context_payload(seat.session),  # 上下文占用：切换会话时恢复圆环
     }
@@ -586,7 +642,7 @@ def history(sid: str | None = None) -> dict:
     if seat is None:
         raise HTTPException(404, f'session {target_sid!r} not open — switch to it first')
     return {
-        'history': [message_to_payload(m) for m in seat.session.derive_messages()],
+        'history': _history_payloads(seat.session),
         'todos': fold_todos(seat.session) or [],
         'context': _context_payload(seat.session),
     }
