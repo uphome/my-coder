@@ -1360,11 +1360,12 @@ async def test_compaction_transaction_fake_llm(tmp_path):
     assert 'range' in summary_evt.data
     assert 'file_ops' in summary_evt.data
 
-    # 摘要请求关 thinking（v4 默认开 thinking 会吃光输出预算 → content 空 →
-    # empty summary：真 bug，曾让手动压缩三次失败）；输出上限给足防截断
+    # 摘要请求保留 thinking（默认开，v4）——压缩要提炼取舍，思维链有助质量；
+    # max_tokens 给足（8k），让"思考 + 正文"都放得下（曾设 600 被思维链吃光 →
+    # content 空 → empty summary：真 bug，曾让手动压缩多次失败）
     req = llm.seen_requests[0]
-    assert req.thinking is False
-    assert req.max_tokens >= 2000
+    assert req.thinking is not False
+    assert req.max_tokens is not None and req.max_tokens >= 8192
 
 
 @pytest.mark.asyncio
