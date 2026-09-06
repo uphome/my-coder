@@ -1398,6 +1398,10 @@ function applyFrame(payload) {
     case 'chunk': {
       const node = liveAssistantFor(payload.turn, payload.step);
       node.text += payload.text;
+      // textEl._raw 是 partialRender 的渲染缓存，必须镜像投影 node.text——
+      // flushSegments 从它读原文做段落固化（只更新 node.text 会导致 raw
+      // 为空、什么都不渲染）
+      node.textEl._raw = node.text;
       scheduleFlush(node.textEl);   // partialRender：段落固化，只动尾巴
       break;
     }
