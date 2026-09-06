@@ -179,3 +179,42 @@ agent-demo 现状：Python 四层单向架构、日志唯一事实源、已有 r
 
 参考路线图：先在 NEXT_STEPS.md 记设计 → 落地 skills 扫描 + 注入 + gh-issue 技能
 → Web/CLI 实测“处理 issue #N” → 质量门三绿提交。
+
+## 4. 待讨论：todo 的两个开放问题（2026-09 记录，未决）
+
+> 背景：讨论「模型每步是否知道自己在做什么、进行到哪一步」时发现的两点，
+> 先记录成文，设计确定后再回填结论。
+
+### 问题 1：todo_write 的完整结果到底该放哪？
+
+现状（agent-demo）：`todo_write` 执行时把完整清单写进 `todo/write` **痕迹事件**
+（不进 derive_messages），返回给模型的 tool/result 只有**计数摘要**
+（"Updated todo list: 3 pending, 1 in progress…"）。完整清单靠
+`fold_todos()` 折叠 + system 里 `todo:state` live section 注入模型。
+
+对照三家（详见第 2 节）：
+- opencode：todowrite 的 `toModelOutput` 返回**完整清单 JSON** → 作为 tool/result
+  进消息历史，模型从历史读最新清单；无 system 注入、无独立 section
+- PI：无 todo 机制
+- DSH：动态 context 渲染成 user 角色快照消息进历史（durable snapshot）
+
+**未决点**：完整清单走「痕迹 + system live 注入」（现状）还是「tool/result 完整
+返回、随历史自走」（opencode 式）？牵涉：缓存（system 动态段 vs 全静态）、
+日志语义（痕迹 vs surface）、resume 可重建、历史体积、compaction 对旧 todo 的
+折叠。
+
+### 问题 2：长任务中 LLM 是否知道自己进行到 todo 的哪一步？
+
+现状：模型每步请求只能看到「system 注入的 todo 清单 + 历史 surface 消息」；
+turn/step 序号、step/start、todo 痕迹都是**模型不可见的痕迹事件**。模型既不被
+告知「当前第几步/共几步」，也看不到自己上一步的思维链（reasoning 不回灌，
+只走 assistant/reasoning 痕迹）——只能从「上一步 assistant/message 文本 +
+工具结果 + 清单里哪项标了 in_progress」自行推断进度。
+
+对照三家：opencode / PI / DSH **都没有**把「你正处在第 N 步」显式注入模型
+（三家同样靠模型从历史 + todo 状态自推断）。
+
+**未决点**：是否做「进度指针注入」——把 system 里的 todo 文本从纯清单升级为
+带指针的进度报告（已完成 N/M、当前在做 X、下一步做 Y），让模型每步显式看到
+自己的位置；以及是否要求模型把「这一步怎么做」写进可见文本而非思维链
+（思维链不回灌是刻意设计，回灌深度是独立话题）。
