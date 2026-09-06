@@ -67,20 +67,30 @@ def fold_todos(session) -> list | None:
     这是 todo 的"读回"通道——和 derive_messages 一样是纯函数投影：
     同一段日志永远折叠出同一张表（resume 重放后清单自动恢复）。
 
-    对齐 harness 的 todos projection 折叠规则：
+    语义（2026-09 从"回合内计划"改为"跨回合任务清单"）：todo 一旦由
+    todo_write 建立，就跨回合持续（turn/start 不再清空）——模型可以在
+    后续回合继续更新同一份清单，dock / prompt 持续携带它；"收尾"不是
+    回合结束，而是模型把全部项标 completed（前端据此短暂展示后自动隐藏）。
+    折叠规则：
     - `todo/write` → 整表替换（last-write-wins）
-    - `turn/start` → 清空（null）——todo 是"当前回合的工作计划"：
-      turn/end 保留完成清单可见（收尾展示全勾），但下个回合（用户发
-      新消息）开始就归零，dock / prompt 不再携带上个任务的旧清单
-    - 其他事件 → 保持现状
+    - 其他事件 → 保持现状（不再有 turn/start 清空）
     """
     latest: list | None = None
     for event in session.events:
         if event.type == 'todo/write':
             latest = event.data.get('todos') if isinstance(event.data, dict) else None
-        elif event.type == 'turn/start':
-            latest = None
     return latest
+
+
+def all_completed(todos: list | None) -> bool:
+    """清单是否全部 completed（收尾判定）：空/None 不是"全完成"。
+
+    todo 跨回合持续（fold 不再 turn/start 清空），"结束"由模型把全部项
+    标 completed 表达——前端收到全 completed 快照后短暂展示再自动隐藏。
+    """
+    if not todos:
+        return False
+    return all(t.get('status') == 'completed' for t in todos)
 
 
 def _counts(todos: list) -> dict:

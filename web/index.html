@@ -1118,9 +1118,25 @@ function renderTodoDock() {
 }
 
 /* 会话切换 / 历史加载时恢复 dock */
+/* todo 跨回合持续（后端 fold 不再 turn/start 清空）：清单一旦建立就一直
+   显示，模型可在后续回合继续更新；收到"全部 completed"快照 = 任务收尾 →
+   展示全勾约 2 秒后自动隐藏（用户看到完成反馈，dock 不长期占位）。
+   收尾计时器防重入：期间又来新清单（新一轮任务）就取消隐藏。 */
+let todoDoneTimer = null;
 function setTodos(todos) {
+  const allDone = Array.isArray(todos) && todos.length > 0
+    && todos.every((t) => t.status === 'completed');
   currentTodos = (Array.isArray(todos) && todos.length) ? todos : null;
   renderTodoDock();
+  if (todoDoneTimer) { clearTimeout(todoDoneTimer); todoDoneTimer = null; }
+  if (allDone && currentTodos) {
+    // 全勾收尾：短暂展示后自动隐藏（对齐"任务完成"的确认感）
+    todoDoneTimer = setTimeout(() => {
+      todoDoneTimer = null;
+      currentTodos = null;
+      renderTodoDock();
+    }, 2000);
+  }
 }
 
 /* ---------- 上下文圆环 + 明细面板（dsh ContextMeter 同款交互）---------- */
@@ -1500,9 +1516,8 @@ async function send() {
   if (!text) return;
   // agent 运行中：回车 = 插队（/steer，当前回合下一步即时生效）
   if (busy) { steer(text); return; }
-  // 新回合开始：todo = 当前回合的计划，dock 清空（对齐后端 turn/start 投影）。
-  // 若本回合模型重新规划 todo_write，todo_update 帧会重新唤起 dock。
-  setTodos(null);
+  // 新回合不清 dock：todo 跨回合持续（后端 fold 不再 turn/start 清空）——
+  // 上一任务的清单保留，模型可继续更新；全部 completed 时 dock 自动收尾隐藏。
   input.value = '';
   input.style.height = 'auto';
   controller = new AbortController();

@@ -1199,33 +1199,47 @@ def test_web_todo_dock_payloads(tmp_path):
     assert [t['content'] for t in switched['todos']] == ['读代码', '写修复', '跑测试']
 
 
-def test_todo_fold_clears_on_turn_start(tmp_path):
-    """todo = 当前回合的计划：turn/end 保留完成清单，下个 turn/start 清空。"""
+def test_todo_fold_persists_across_turns(tmp_path):
+    """todo = 跨回合任务清单（2026-09 语义变更）：turn/start 不再清空。
+
+    一旦 todo_write 建立清单就持续（后续回合继续更新同一份），直到模型
+    把全部项标 completed（前端据此短暂展示后自动隐藏 dock）。
+    """
     from agent_demo.session import Session
-    from agent_demo.tools.todo import fold_todos
+    from agent_demo.tools.todo import all_completed, fold_todos
 
     s = Session(id='t')
 
-    # 回合内：写清单 → 一直可见（无 turn/start 打断）
+    # 回合 1：写清单
     s.append('turn/start', {'turn': 1})
+    s.append('todo/write', {'todos': [
+        {'content': 'a', 'status': 'completed'},
+        {'content': 'b', 'status': 'pending'},
+    ]})
+    s.append('turn/end', {'turn': 1, 'reason': 'completed'})
+    folded = fold_todos(s)
+    assert [t['content'] for t in folded] == ['a', 'b']
+    assert all_completed(folded) is False
+
+    # 回合 2 开始：**不再清空**——清单跨回合持续（b 还在 pending）
+    s.append('turn/start', {'turn': 2})
+    assert [t['content'] for t in fold_todos(s)] == ['a', 'b']
+
+    # 回合 2 里继续更新同一份清单
     s.append('todo/write', {'todos': [
         {'content': 'a', 'status': 'completed'},
         {'content': 'b', 'status': 'completed'},
     ]})
-    s.append('turn/end', {'turn': 1, 'reason': 'completed'})
-    folded = fold_todos(s)
-    assert [t['content'] for t in folded] == ['a', 'b']  # 回合结束保留（收尾展示全勾）
+    all_done = fold_todos(s)
+    assert [t['content'] for t in all_done] == ['a', 'b']
+    assert all_completed(all_done) is True      # 全 completed → 前端收尾隐藏
 
-    # 下个回合开始：清空——todo 不带进新任务
-    s.append('turn/start', {'turn': 2})
-    assert fold_todos(s) is None
-
-    # 新回合里再规划 → 恢复
-    s.append('todo/write', {'todos': [{'content': 'c', 'status': 'pending'}]})
-    assert [t['content'] for t in fold_todos(s)] == ['c']
+    # 回合 3：全 completed 清单仍折叠出来（dock 由前端判定全勾后隐藏，
+    # 折叠本身保留最后快照——resume 重放一致）
+    s.append('turn/start', {'turn': 3})
+    assert all_completed(fold_todos(s)) is True
 
     # resume 重放语义一致：adopt 同样的序列得到同样的折叠
-
     from agent_demo.persistence import save_event
     from agent_demo.session import Session as S2
     path = tmp_path / 'turn.jsonl'
@@ -1235,7 +1249,7 @@ def test_todo_fold_clears_on_turn_start(tmp_path):
     from agent_demo.persistence import load_events
     for e in load_events(path):
         restored.adopt(e)
-    assert [t['content'] for t in fold_todos(restored)] == ['c']
+    assert all_completed(fold_todos(restored)) is True
 
 
 def test_surface_replace_shadows_and_derives_in_place():

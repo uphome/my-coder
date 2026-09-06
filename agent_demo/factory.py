@@ -17,7 +17,7 @@ from .prompt import PromptRegistry
 from .session import Session
 from .skills import format_catalog, scan_skills
 from .tools import build_tools
-from .tools.todo import fold_todos
+from .tools.todo import all_completed, fold_todos
 from .ui import render_event
 
 
@@ -39,11 +39,13 @@ def _todo_context(session) -> str:
     """当前 todo 清单 → prompt 文本（无清单返回空，render 自动省略该段）。
 
     fold_todos 折叠日志里最后一次 todo/write 快照——todo 是"模型跨回合的
-    记忆锚点"：turn 1 规划、每步更新，turn 2（下个用户请求）从上下文看到
-    自己进行到哪，不会重复规划。空清单不占 token。
+    记忆锚点"：建了清单就跨回合持续（turn/start 不清空），后续回合从
+    上下文看到自己进行到哪。清单全部 completed（任务收尾）后不再注入
+    ——任务已结束，无需模型继续跟踪；新任务由新一轮 todo_write 重建。
+    空清单不占 token。
     """
     todos = fold_todos(session)
-    if not todos:
+    if not todos or all_completed(todos):
         return ''
     lines = [f'  {i}. [{t.get("status", "pending")}] {t.get("content", "")}'
              for i, t in enumerate(todos, start=1)]
