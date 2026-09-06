@@ -15,6 +15,7 @@ from .constants import DEFAULT_COMPACT_TOKENS, DEMO_SCRIPT
 from .llm import FakeLlm, OpenAiCompatibleLlm
 from .prompt import PromptRegistry
 from .session import Session
+from .skills import format_catalog, scan_skills
 from .tools import build_tools
 from .tools.todo import fold_todos
 from .ui import render_event
@@ -53,6 +54,12 @@ def build_agent(session: Session, args, ui_state: dict, hooks=None) -> Agent:
     prompt = PromptRegistry()
     prompt.section('identity', -100, 'You are {{model}}, a coding agent that helps with programming tasks. Read, search, edit, and run commands in the workspace to help the user — verify your work instead of guessing. Never claim to be a different AI model or company than {{model}}; if asked, state the model name exactly as given here.')
     prompt.section('persona', 0, 'You run on the {{model}} model. Your workspace is {{workspace}}; tool paths resolve relative to it, and nothing outside it is readable or writable.\nVerify work by running code or tests. Keep answers brief.')
+    # skill:catalog：可用技能目录（静态，order 95 < todo:state 的 100——目录必须
+    # 在动态 live 段之前，处于缓存稳定前缀，不被 todo 变化拖累；落地规则见
+    # AGENTS.md 约定节）。build_agent 时扫一次：技能文件会话内不变 → 目录字节
+    # 稳定。只放 name+description+路径，正文绝不进 system（模型按需 read_file）。
+    _skill_catalog = format_catalog(scan_skills(args.workspace / 'skills'), args.workspace)
+    prompt.section('skill:catalog', 95, _skill_catalog)
     prompt.section('todo:state', 100, lambda ctx: _todo_context(ctx['agent'].session))
     prompt.section('tool:todo', 110, 'Use todo_write to plan multi-step work before you start.')
     prompt.section('tool:bash', 105, 'Use bash to verify work (run tests, git status). Output is capped: redirect large outputs to a file and read it with read_file. In this repo run tests with "conda run -n agent-demo python -m pytest -q".')

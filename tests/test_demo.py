@@ -1036,6 +1036,118 @@ async def test_todo_live_injection_across_steps(tmp_path):
     assert 'step two' in systems[1]
 
 
+def test_skill_catalog_scan_and_format(tmp_path):
+    """技能目录扫描/格式化（AGENTS.md 约定：目录只放 name+description+路径）。
+
+    - scan_skills：解析 skills/*.md 的 frontmatter；坏技能（缺 description）
+      静默跳过
+    - format_catalog：纯文本目录行，路径相对 workspace 且正斜杠
+    - 正文绝不进目录（正文由模型 read_file 按需读，见下一测试）
+    """
+    from agent_demo.skills import format_catalog, scan_skills
+
+    skills_dir = tmp_path / 'skills'
+    skills_dir.mkdir()
+    (skills_dir / 'gh-issue.md').write_text(
+        '---\nname: gh-issue\ndescription: 处理 GitHub issue（读全文、独立验证）\n'
+        '---\n# 正文\n这是一段不该出现在目录的技能正文。\n',
+        encoding='utf-8',
+    )
+    # 坏技能（无 description）：应被 scan 跳过，不进目录
+    (skills_dir / 'broken.md').write_text(
+        '---\nname: broken\n---\n没有 description。\n', encoding='utf-8')
+
+    skills = scan_skills(skills_dir)
+    assert [s.name for s in skills] == ['gh-issue']
+
+    catalog = format_catalog(skills, tmp_path)
+    assert 'gh-issue' in catalog
+    assert 'skills/gh-issue.md' in catalog          # 相对 workspace 路径（正斜杠）
+    assert '处理 GitHub issue' in catalog
+    assert '不该出现在目录' not in catalog           # 正文不进目录
+    assert 'broken' not in catalog                    # 坏技能被跳过
+
+    # 无技能目录/空目录 → 空目录文本（render 自动省略，零 token）
+    assert format_catalog([], tmp_path) == ''
+    assert scan_skills(tmp_path / 'no-such-dir') == []
+
+
+@pytest.mark.asyncio
+async def test_skill_catalog_injected_into_system(tmp_path):
+    """技能目录静态注入 system（端到端：build_agent → 一步请求）。
+
+    - request/header 的 system 含目录（name/description/路径），随 system 落
+      日志可重建
+    - 正文不进 system——正文只在模型 read_file 后作为 tool/result 进上下文
+    - 目录在 todo:state 等动态段之前（order 95 < 100，缓存稳定前缀）
+    """
+    from argparse import Namespace
+
+    from agent_demo.factory import build_agent
+    from agent_demo.llm import FakeLlm
+    from agent_demo.session import Session
+
+    skills_dir = tmp_path / 'skills'
+    skills_dir.mkdir()
+    (skills_dir / 'gh-issue.md').write_text(
+        '---\nname: gh-issue\ndescription: 处理 GitHub issue（读全文、独立验证）\n'
+        '---\n# 正文\n秘密技能正文，绝不该进 system。\n',
+        encoding='utf-8',
+    )
+
+    session = Session(id='skill-cat')
+    args = Namespace(fake=True, model='fake-model', workspace=tmp_path,
+                     hide_reasoning=False, session='id', sessions=str(tmp_path),
+                     prompt='x', resume=False, verbose=False)
+    llm = FakeLlm(script=[{'text': 'done', 'finish_reason': 'stop'}])
+    agent = build_agent(session, args, {'reasoning_started': False, 'request_no': 0, 'tool_no': 0})
+    agent.llm = llm
+    agent.followup('hi')
+    await agent.when_idle()
+
+    header = session.request_header()
+    assert header is not None and 'system' in header
+    system = header['system']
+    assert '可用技能' in system
+    assert 'gh-issue' in system
+    assert 'skills/gh-issue.md' in system
+    assert '秘密技能正文' not in system              # 正文始终不进 system
+
+    # 目录段在工具提示段之前（todo 为空时无 todo 段，取 bash 提示为序界）
+    assert system.index('可用技能') < system.index('Use bash to verify')
+
+
+def test_web_skill_catalog_survives_reload(tmp_path):
+    """技能目录可重建：新会话（reload）重新扫描，目录照旧注入。
+
+    目录是磁盘文件的静态投影——会话重建不丢（与 todo 的 fold 同理，
+    都是"从持久状态折叠"，只是来源是文件而非日志）。
+    """
+    from argparse import Namespace
+
+    from agent_demo.factory import build_agent
+    from agent_demo.session import Session
+
+    skills_dir = tmp_path / 'skills'
+    skills_dir.mkdir()
+    (skills_dir / 'gh-issue.md').write_text(
+        '---\nname: gh-issue\ndescription: 处理 GitHub issue\n'
+        '---\n正文\n', encoding='utf-8')
+
+    def system_of():
+        args = Namespace(fake=True, model='fake-model', workspace=tmp_path,
+                         hide_reasoning=False, session='id', sessions=str(tmp_path),
+                         prompt='x', resume=False, verbose=False)
+        s = Session(id='reload')
+        a = build_agent(s, args, {'reasoning_started': False, 'request_no': 0, 'tool_no': 0})
+        return a.prompt.render(a.prompt.assemble(ctx={'agent': a}), ctx={'agent': a})
+
+    first = system_of()
+    assert 'gh-issue' in first
+    # 第二个会话重建 → 目录仍在（来源是磁盘文件，与日志无关）
+    assert system_of() == first
+
+
 def test_web_todo_dock_payloads(tmp_path):
     """todo dock 的数据通道：SSE 帧 todo_update + /history 附带 todos + 会话切换恢复。"""
     from fastapi.testclient import TestClient
