@@ -22,10 +22,12 @@ conda run --no-capture-output -n agent-demo python -m agent_demo.web_app --works
 
 ## 架构（改动任何代码前必读）
 
-> **实现新的机制/新功能前，先看仓库根的 `agent.md`**：它记录了 DSH
-> （deepseek-harness）、PI（pi-mono）、opencode 三家开源项目对同类机制
+> **实现新的机制/新功能前，先看仓库根的 `agent.md` 做调研参考**：它记录了
+> DSH（deepseek-harness）、PI（pi-mono）、opencode 三家开源项目对同类机制
 > （skill 按需加载、issue/PR 工作流、agent 角色、工具组织等）的现成实现与
-> 对照——先对齐成熟做法，再决定本仓库的教学复刻取舍。
+> 对照，以及本仓库历次讨论的候选方案与动机。**注意**：agent.md 是参考手册
+> 不是规范——落地规则以本文件（AGENTS.md）与架构文档为准；方案定稿后把
+> 规则提炼进本文件，agent.md 只留背景。
 
 包结构 `agent_demo/`（取代早期平铺）。依赖方向不变，仍是四层单向：
 入口（`cli.py` / `web_app.py` → `factory.py` 组装）→ 框架循环（`agent.py` 被动状态机 / `loop.py` turn-step）→ 状态（`session.py`/`inbox.py`/`prompt.py`/`registry.py`）→ 能力（`llm.py`/`hooks.py`）→ 值（`values.py` + `persistence.py`）。应用内容独立成包：工具在 `agent_demo/tools/`（file_io/search/shell/todo + build_tools 组装）、渲染在 `ui.py`、路径边界在 `sandbox.py`、常量在 `constants.py`。上层依赖下层，下层不感知上层。
@@ -46,6 +48,17 @@ conda run --no-capture-output -n agent-demo python -m agent_demo.web_app --works
 - 值对象必须 frozen dataclass + tuple，禁止把可变容器放进消息/事件（JSON 往返依赖）
 - 严格校验哲学：未注册 prompt 变量、重复工具名、surface_op 缺失都在写入时刻抛错，宁炸勿静默
 - 每个文件顶部有 `from __future__ import annotations`
+- **按需技能（skill）机制的设计决策**（落地时遵循；三家对照与取舍背景见
+  `agent.md` §3，那里只留动机不作规范）：
+  - 技能 = `skills/<name>.md` 文件 + YAML frontmatter（name/description）
+  - **目录（catalog）静态注入 system**：只放 name + description + 相对
+    workspace 路径（正文绝不进 system）；作为静态 section 注册，order 必须
+    **小于 todo:state 等动态 live 段**——目录处于缓存稳定前缀，不被动态段
+    拖累（todo:state 现状 order=100，故目录 order 取 <100）
+  - **正文 = 工具结果注入**：模型用现有 read_file 按目录路径读技能文件 →
+    正文作为 tool/result（source.kind='tool'）进 derive_messages，与读任何
+    文件机制一致（落日志可重建、可被 compaction 折叠）；**不新增 skill() 专用
+    加载工具**，不搞 DSH 式注入 user 快照
 
 ## 入口与工具
 

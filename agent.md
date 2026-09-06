@@ -160,12 +160,16 @@ mcp__codegraph__codegraph_explore(
 
 ---
 
-## 3. 对 agent-demo 的落点建议（留档 + 实现规格）
+## 3. 对 agent-demo 的落点候选（讨论档案——落地规则以 AGENTS.md 为准）
+
+> 本节是 2026-09 讨论后的**候选方案记录**（为什么这么选、有哪些取舍），
+> **不是本仓库的实现约定**。若方案定稿落地，把该怎么做提炼进 AGENTS.md
+> （约定节），本节保留为背景与动机。
 
 agent-demo 现状：Python 四层单向架构、日志唯一事实源、已有 read/bash/edit 等
 通用工具 + approval 门、gh CLI 已装已登录（uphome）、无 skill 基础设施。
 
-### 3.1 设计定稿（2026-09 已对齐，按此实现）
+### 3.1 候选方案（2026-09 讨论倾向：PI 式 + 工具结果注入）
 
 复刻“按需能力”的最小教学版，参照 **PI 式 + 工具结果注入**：
 
@@ -176,25 +180,26 @@ agent-demo 现状：Python 四层单向架构、日志唯一事实源、已有 r
    字节不变），作为普通静态 section 注入 system（纯文本行，附相对 workspace
    的 location）。落点规则：**固定 order、放在 todo 等动态 live 段之前**——
    保证目录处于缓存稳定前缀，不被动态段拖累（todo:state 现状 order=100）
-3. **正文 = 工具结果注入（已定稿）**：模型用现有 **read_file** 读技能文件 →
-   正文作为 **tool/result**（source.kind='tool'）进 derive_messages → 模型下
-   一步请求读到。与读任何文件机制一致：落日志可重建、可被 compaction 折叠、
-   前端画成“读取技能”工具卡片——**不是用户气泡、不是 DSH 注入式 user 快照**
-4. **不新增加载工具**：不建 `skill()` 工具（对比 DSH/opencode 的取舍：PI 证明
-   通用 read + 目录 location 足够）
+3. **正文 = 工具结果注入（讨论中用户已拍板此方向）**：模型用现有 **read_file**
+   读技能文件 → 正文作为 **tool/result**（source.kind='tool'）进 derive_messages
+   → 模型下一步请求读到。与读任何文件机制一致：落日志可重建、可被 compaction
+   折叠、前端画成"读取技能"工具卡片——不是用户气泡、不是 DSH 注入式 user
+   快照（对比：DSH/opencode 用专用 skill() 工具 + 注入式；PI 用 read +
+   location，本仓库倾向 PI，理由见第 1 节）
+4. **不新增加载工具**：倾向不建 skill() 工具
 5. 执行走现有 bash + gh（bash 已有 approval 门；如需 gh 只读免批，再讨论
    白名单——那是 bash 层改动，与 skill 机制正交）
 6. 若未来要“专职 triage agent/子任务/模型路由”，再参考 opencode 的
    agent + command frontmatter——那是更大的角色系统，非本期
 
-### 3.2 缓存纪律（定稿）
+### 3.2 候选方案的缓存考量（讨论记录，非约定）
 
 - 技能目录静态 → system 前缀稳定 → 缓存无损；**技能文件改动只损失当轮**
-- 目录 section 的 order 必须**小于 todo:state 等动态 live 段**——目录保持在
-  每次命中的缓存前缀内
+- 目录 section 的 order 应**小于 todo:state 等动态 live 段**——目录保持在
+  每次命中的缓存前缀内（规范以 AGENTS.md 约定节为准）
 - 目录保持短（description 截断，参考 DSH `catalogDescriptionMaxLength` 思路）
 
-### 3.3 实现清单（下次动手照此走）
+### 3.3 候选实现面（落地时照此评估，具体以 AGENTS.md/实现为准）
 
 - `agent_demo/skills.py`：`Skill` 值对象（frozen dataclass：name/description/
   path/model_invocable）+ `scan_skills(dir)`（dir 参数化，为多 agent 留缝）+
@@ -205,7 +210,7 @@ agent-demo 现状：Python 四层单向架构、日志唯一事实源、已有 r
 - 测试：scan 解析 / 目录注入进 system / 正文不进常驻 system（只 read 时进来）
 - 质量门三绿后提交
 
-### 3.4 语义要点（为什么这是对的）
+### 3.4 候选方案的语义要点（为什么倾向它）
 
 - “模型看过技能正文” = 一次 read_file 的 tool/call + tool/result 事件 → 完整
   可重建、可审计（它读了哪个技能、什么时刻、按什么干的活）
@@ -213,8 +218,8 @@ agent-demo 现状：Python 四层单向架构、日志唯一事实源、已有 r
 - 技能正文在日志里与普通文件读取**无机制差异**——这正是“技能 = 指令文件”的
   教学点：不需要特权通道
 
-实施顺序：先在 NEXT_STEPS.md 记设计 → 落地 skills 扫描 + 注入 + gh-issue 技能
-→ Web/CLI 实测“处理 issue #N” → 质量门三绿提交。
+实施顺序（待落地时走）：先在 NEXT_STEPS.md 记设计 → 落地 skills 扫描 + 注入 +
+gh-issue 技能 → Web/CLI 实测“处理 issue #N” → 质量门三绿提交。
 
 ## 4. 待讨论：todo 的两个开放问题（2026-09 记录，未决）
 
