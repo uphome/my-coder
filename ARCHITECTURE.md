@@ -324,11 +324,11 @@ JSON 没有类型信息，用 `$xxx` 前缀 key 做类型标记：`$text`/`$tool
 | `sandbox.py` | workspace 路径边界（轻量沙箱：归一化 + 前缀匹配） |
 | `ui.py` | 终端渲染（_render_event / _paint，UI 是日志投影） |
 | `factory.py` | build_agent / load_env（CLI 与 Web 共用组装） |
-| `cli.py` | CLI 入口 |
-| `web_app.py` | Web UI（FastAPI + SSE：会话/标题/approval/手动压缩） |
+| `cli.py` | CLI 入口（单次任务 / 无任务参数进 REPL） |
+| `web_app.py` | Web UI（FastAPI + SSE：会话/标题/approval/手动压缩/steer 插队；seat 化并发隔离） |
 | `compaction.py` | 上下文压缩引擎（四步事务 + checkpoint + 会话 token 累计账） |
 | `show_memory.py` | 教学脚本：重放日志展示"记忆 = 投影" |
-| `tests/test_demo.py` | 58 个架构测试 |
+| `tests/test_demo.py` | 64 个架构测试 |
 
 ---
 
@@ -406,7 +406,7 @@ JSON 没有类型信息，用 `$xxx` 前缀 key 做类型标记：`$text`/`$tool
 | 学到并实现 | 简化/未实现（进化时的候选增量） |
 |---|---|
 | surface 事件标记 + 纯函数折叠投影；**replace 区间遮蔽（位置语义，compaction 用）** | 遮蔽区间溯源校验 |
-| Inbox 双队列 + claim 语义 + 持久化重放 | 多宿主并发仲裁、steer 中断当前步 |
+| Inbox 双队列 + claim 语义 + 持久化重放；**steer 插队（同回合 next-step）** | 多宿主并发仲裁、steer 中断"当前正在跑的 step" |
 | sections + 严格 `{{var}}` 插值 | 作用域链 shadow、complete 段 |
 | 工具分组执行 + 坏 JSON 兜底；**approval/权限桥 + `[exit code: N]` 跨调用准则** | OS 级沙箱、事件瀑布审批 |
 | request/header 落日志 + resume 恢复路由；**checkpoint 策略（四步事务 + 结构化摘要）** | 持久化后端抽象、token 预算选段 |

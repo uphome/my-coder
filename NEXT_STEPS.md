@@ -21,7 +21,7 @@
 | Web ContextMeter（占用圆环 + 会话账） | ✅ 已完成（占用快照圆环 + 点击面板：会话累计消耗 / 全会话缓存命中率） |
 | 阶段一收尾（更新 README / ARCHITECTURE 定稿） | ✅ 已完成（含 2026-09 架构重构与本文档同步） |
 
-> 当前全量测试：58 passed（AGENTS.md 里的数字保持同步）。
+> 当前全量测试：64 passed（AGENTS.md 里的数字保持同步）。
 
 ## read_file 升级（已完成）
 
@@ -266,6 +266,24 @@ Web 端原先是**全局单例**：`_session/_agent/_current_sid` 指向"当前�
 - **CLI 侧刻意不做运行中打断**：CLI 下回合运行中读 stdin 会与 approval 的
   stdin 交互竞争输入（y/n 可能被当消息吃掉）；双队列的实战入口在 Web
 
+**测试覆盖（四层）**：
+1. agent 语义：进行中插队 = 同回合下一步（事件日志断言：单 turn/start +
+   多 step/start + 两条 user 消息顺序）
+2. agent 语义：idle 后插队 = 下轮消费，消息不丢
+3. Web 边界：无活跃流 → 409
+4. **Web 端到端**：`/chat` 的 SSE 流开着时 `POST /steer` → 插队回答沿原流
+   推回。同步 TestClient 测不了（post 阻塞到回合结束），用
+   `httpx.AsyncClient + ASGITransport` 并发两请求：可控挂起 LLM
+   （`asyncio.Event` 卡住回合进行中窗口）→ `/steer` 入队 → 放行 → 断言
+   同流出现两条回答、全程一个 turn/start
+
+**真实模型验收实录（2026-09，deepseek-v4-flash）**：
+任务"逐步完成三件事（读 README 总结 / 读 AGENTS.md 找质量门 / 给计划）"，
+回合进行中连续插队两条——`插队1：跳过第③件事`、`插队2：②只总结质量门
+命令`。模型行为：先完成正在进行的①②，随后在同一回合内重写收敛答复
+（`③ 跳过`、`② 收敛`），全程无第二个回合，`reason=completed`——插队是
+"下一步批量吸收并重新规划"，不是生硬打断。
+
 ## CLI REPL（已完成）
 
 `prompt` 变可选：带任务 = 单次跑完退出（原行为）；不带 = 进入 REPL：
@@ -314,7 +332,7 @@ pyproject.toml            打包 + ruff / mypy / pytest 配置 + console scripts
   steer 插队 + CLI REPL（已完成，见下节）；阶段四工程化打磨（配置/日志
   查看器）仍未开始
 
-**测试拆分**（蓝图里的 tests/ 按主题拆分）尚未做：58 个测试仍在单文件
+**测试拆分**（蓝图里的 tests/ 按主题拆分）尚未做：64 个测试仍在单文件
 `tests/test_demo.py`——当前质量门（ruff/mypy/pytest）已覆盖，拆分是纯可读性
 优化，留到有需要时再做。
 

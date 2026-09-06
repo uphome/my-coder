@@ -60,6 +60,9 @@ conda run -n agent-demo python -m agent_demo.web_app --workspace .           # �
   逐字复读会被拒绝退回摘要）
 - 敏感工具弹 **Web 批准/拒绝按钮**（不再依赖 CLI stdin）
 - **常驻 todo dock**：模型每次 todo_write 清单实时更新面板，有清单才显示
+- **运行中可插队（steer）**：agent 干活时输入框仍可打字，回车 = 插队当前
+  回合（下一步即时处理，事件沿原 SSE 流推回）；idle 时回车 = 开新回合。
+  两会话并行跑互不干扰（每会话独立 agent/事件流/审批，seat 化隔离）
 - 输入行旁一枚**上下文占用圆环**（dsh ContextMeter 同款）：常态只有 20px+
   SVG 环不占布局，点击展开悬浮面板——当前占用 %、**全会话累计消耗 token**、
   **全会话缓存命中率**（真实 usage 才显示）；面板底部有**压缩旧对话**按钮
@@ -183,17 +186,17 @@ compaction.py（上下文压缩引擎）
 | `sandbox.py` | workspace 路径边界（归一化 + 前缀匹配的轻量沙箱） |
 | `ui.py` | 终端渲染（_render_event / _paint，UI 是日志投影） |
 | `factory.py` | build_agent / load_env（CLI 与 Web 共用组装） |
-| `cli.py` | CLI 入口（argparse + run） |
-| `web_app.py` | Web UI（FastAPI + SSE：会话/标题/approval/手动压缩） |
+| `cli.py` | CLI 入口（单次任务 / 无任务参数进 REPL） |
+| `web_app.py` | Web UI（FastAPI + SSE：会话/标题/approval/手动压缩/steer 插队） |
 | `compaction.py` | 上下文压缩引擎（四步事务 + checkpoint + 会话 token 累计账） |
-| `tests/test_demo.py` | 58 个架构测试 |
+| `tests/test_demo.py` | 64 个架构测试 |
 
 ## 与 harness 的保真度对照
 
 | 学到并实现 | 简化/未实现（harness 的生产级增量） |
 |---|---|
 | surface 事件标记 + 纯函数折叠投影；**replace 区间遮蔽（位置语义，compaction 用）** | 遮蔽区间溯源校验 |
-| Inbox 双队列 + claim 语义 + 持久化重放 | 多宿主并发仲裁、steer 中断当前步 |
+| Inbox 双队列 + claim 语义 + 持久化重放；**steer 插队（同回合 next-step）** | 多宿主并发仲裁、steer 中断"当前正在跑的 step" |
 | sections + 严格 `{{var}}` 插值 | 作用域链 shadow（子 agent 换 persona）、complete 段 |
 | 工具分组执行（parallel/sequential）+ 坏 JSON 兜底；**approval/权限桥 + `[exit code: N]` 跨调用准则** | OS 级沙箱（landlock/bwrap/seatbelt）、事件瀑布审批 |
 | request/header 落日志 + resume 恢复路由；**checkpoint 策略（四步事务 + 结构化摘要）** | 持久化后端抽象、token 预算选段 |
