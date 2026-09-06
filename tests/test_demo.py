@@ -1927,6 +1927,80 @@ def test_web_steer_requires_active_stream(tmp_path):
     assert resp2.status_code == 409
 
 
+@pytest.mark.asyncio
+async def test_web_steer_interrupts_open_sse_stream(tmp_path):
+    """Web 端到端打断：/chat 的 SSE 流还开着时 POST /steer → 插队回答沿原流推回。
+
+    这是"运行中可打断对话"的关键链路，同步 TestClient 测不了（post 阻塞到
+    回合结束，无法中途发 /steer），故用 httpx.AsyncClient + ASGITransport
+    并发两个请求：一个开着 SSE（agent 卡在可控挂起 LLM 上），一个 /steer。
+    断言：插队消息在同一回合内被消费（无第二个 turn/start），回答沿原流推送。
+    """
+    import httpx
+
+    from agent_demo import web_app
+    from agent_demo.llm import StreamChunk
+
+    class HoldLlm:
+        """第一次 stream 挂起（started 置位等 release）；放行后给第一轮回答。
+
+        steer 在挂起期间入队 → 第一轮 step 结束后，第二步立即轮到插队消息，
+        第二次 stream 返回插队后的回答。
+        """
+        def __init__(self):
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+            self.calls = 0
+
+        async def stream(self, request, signal=None):
+            self.calls += 1
+            if self.calls == 1:
+                self.started.set()
+                await self.release.wait()
+                yield StreamChunk(text='首轮回答', finish_reason='stop')
+            else:
+                yield StreamChunk(text='插队后回答', finish_reason='stop')
+
+    web_app.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
+    seat = web_app._seats['web']
+    llm = HoldLlm()
+    seat.agent.llm = llm
+
+    transport = httpx.ASGITransport(app=web_app.app)
+    async with httpx.AsyncClient(transport=transport, base_url='http://test') as client:
+        async def read_sse() -> str:
+            parts = []
+            async with client.stream('POST', '/chat',
+                                     json={'message': '首问', 'sid': 'web'}) as resp:
+                assert resp.status_code == 200
+                async for chunk in resp.aiter_text():
+                    parts.append(chunk)
+            return '\n'.join(parts)
+
+        reader = asyncio.create_task(read_sse())
+        await llm.started.wait()                      # 回合真的挂起在 LLM 里
+        steer_resp = await client.post('/steer', json={'message': '停一下改方向', 'sid': 'web'})
+        assert steer_resp.status_code == 200
+        assert steer_resp.json()['queued'] == 'next-step'
+        llm.release.set()                             # 放行：第一步完成，下一步轮到插队
+        sse = await asyncio.wait_for(reader, timeout=10)
+
+    # 插队回答沿原 SSE 流推回来（同回合，无第二个回合）
+    assert '首轮回答' in sse
+    assert '插队后回答' in sse
+    assert sse.count('"type": "turn_end"') == 1       # 一个回合结束 = 插队没开新回合
+    # 事件日志：全程只有一次 turn/start，两条 user 消息都在
+    turns = [e for e in seat.session.events if e.type == 'turn/start']
+    assert len(turns) == 1
+    users = [e.data for e in seat.session.events if e.type == 'user/message']
+    texts = []
+    for u in users:
+        for block in getattr(u, 'content', ()):
+            if getattr(block, 'type', '') == 'text':
+                texts.append(block.text)
+    assert texts == ['首问', '停一下改方向']
+
+
 def test_cli_repl_runs_multiple_turns(tmp_path):
     """CLI REPL：无 prompt 启动 → 多轮输入各自开回合，/exit 退出。
 
