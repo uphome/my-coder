@@ -19,9 +19,12 @@
 | Web UI 增强 | ✅ 已完成（会话新建/切换/删除/改名、approval 批准按钮、停止按钮、常驻 todo dock） |
 | 上下文压缩（compaction 全套） | ✅ 已完成（surface replace 位置语义 → 四步事务 → checkpoint → 自动阈值 → 溢出恢复 → Web 手动压缩按钮） |
 | Web ContextMeter（占用圆环 + 会话账） | ✅ 已完成（占用快照圆环 + 点击面板：会话累计消耗 / 全会话缓存命中率） |
+| Web 会话并发隔离（seat 化） | ✅ 已完成（两会话并行互不干扰，见下节） |
+| steer 插队 + CLI REPL | ✅ 已完成（双队列第二队实战入口；CLI 无任务参数进 REPL） |
+| **Web 前端统一消息投影** | ✅ 已完成（前端 nodes 投影；实时 SSE 与 /history 收敛同一渲染，见下节） |
 | 阶段一收尾（更新 README / ARCHITECTURE 定稿） | ✅ 已完成（含 2026-09 架构重构与本文档同步） |
 
-> 当前全量测试：64 passed（AGENTS.md 里的数字保持同步）。
+> 当前全量测试：65 passed（AGENTS.md 里的数字保持同步）。
 
 ## read_file 升级（已完成）
 
@@ -284,6 +287,46 @@ Web 端原先是**全局单例**：`_session/_agent/_current_sid` 指向"当前�
 （`③ 跳过`、`② 收敛`），全程无第二个回合，`reason=completed`——插队是
 "下一步批量吸收并重新规划"，不是生硬打断。
 
+## Web 前端统一消息投影（已完成）
+
+> 目标：前端只保留**一份从日志重建的投影状态**，实时 SSE 与 /history 全量
+> 加载收敛到同一投影 → 同一渲染入口；**DOM 不再当状态**。设计注记与 schema
+> 见 `web/PROJECTION_DESIGN.md`。
+
+**为什么做**：此前前端把 DOM 当状态——实时路径用 `cur` 指针（当前助手
+DOM + 挂在其上的 `_raw/_toolById/_thinking`）逐块生长，刷新/切会话则走
+另一套"历史渲染"直接铺 DOM。两套路径产出不一致（曾出现重开会话时插队
+消息被渲染成独立回合、助手消息渲染不出来等 bug），根源都是渲染逻辑散在
+两处、没有统一的中间表示。
+
+**改造（分两步提交）**：
+
+1. **SSE 帧协议增强（输入契约）**：`chunk/reasoning/tool_call` 帧补带
+   `turn`/`step`（loop.py 落事件时带、web_app 的 `event_to_payload` 透传）；
+   新增 `turn_start` / `user_message`（带 turn）帧——真人发言不再由前端
+   本地渲染猜测回合号，改由后端帧驱动。历史载荷补 `user.turn`。
+2. **前端 nodes 投影（核心）**：`nodes` 有序数组 = 唯一事实源；节点是不可
+   变快照（`user`/`assistant`/`checkpoint`，assistant 带 `tools` 子项）。
+   - `renderProjection()`：清空后从 nodes 全量重建（刷新/切会话/压缩后）；
+     空会话走 emptyHint——**renderHistory 开头先清空 messagesEl**，两条分支
+     都从干净画布出发（曾修：新建/切空会话残留上个会话 DOM，只因清空藏在
+     renderProjection 首行、空分支进不去）
+   - `applyFrame()`：SSE 增量驱动同一投影——按 (turn,step) 找/建 assistant
+     节点（`liveAssistantFor`），chunk 追加 text；与历史构建**同构**
+   - **partialRender 降级为渲染优化**：`.pseg` 段落固化只服务"最后一个
+     assistant 文本块平滑更新"，`_raw/_seg` 只活在 DOM 上；任何时刻全量
+     重画一致
+   - 回合分隔线从 user.turn 推导（同 turn 后续 user = steer 插队不画线）
+
+**踩过的渲染 bug（各有修复提交）**：chunk 只拼 node.text 但 flush 读
+`textEl._raw` → 镜像 `_raw`；turn_end 与末尾 chunk 同批次时 rAF flush 排在
+finalize（清 `_raw`）之后 → closeAssistantNode 先同步 flush 再 finalize；
+closeAssistantNode 清零 `_errCount` 把错误工具红标抹掉 → 删除清零。
+
+**验证**：jsdom 无头驱动真实页面脚本断言 DOM（12 项：历史双回合线、同回合
+插队不画第三条、checkpoint 卡、流式段落固化等）+ 后端 pytest 补 SSE 帧
+断言；后端 65 测试三绿（ruff/mypy/pytest）。
+
 ## CLI REPL（已完成）
 
 `prompt` 变可选：带任务 = 单次跑完退出（原行为）；不带 = 进入 REPL：
@@ -332,7 +375,7 @@ pyproject.toml            打包 + ruff / mypy / pytest 配置 + console scripts
   steer 插队 + CLI REPL（已完成，见下节）；阶段四工程化打磨（配置/日志
   查看器）仍未开始
 
-**测试拆分**（蓝图里的 tests/ 按主题拆分）尚未做：64 个测试仍在单文件
+**测试拆分**（蓝图里的 tests/ 按主题拆分）尚未做：65 个测试仍在单文件
 `tests/test_demo.py`——当前质量门（ruff/mypy/pytest）已覆盖，拆分是纯可读性
 优化，留到有需要时再做。
 

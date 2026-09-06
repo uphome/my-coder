@@ -273,6 +273,28 @@ JSON 没有类型信息，用 `$xxx` 前缀 key 做类型标记：`$text`/`$tool
   `session_token_totals`），运行时不需要第二份记账状态——"记忆机制的直接受益"
 - **模型是否每次看到全部工具**：是。每次请求全量携带 tools 清单
 
+### 3.14 Web 前端也是投影：nodes 数组是浏览器里的"唯一事实源"
+
+后端"日志是唯一事实源、UI 是投影"的哲学一直延伸到浏览器 DOM。Web 前端
+**不再把 DOM 当状态**，只维护一份从日志重建的投影状态：
+
+- **投影** = `nodes` 有序数组（`web/index.html`），每类节点是不可变快照
+  数据：`user`（真人发言）/ `assistant`（一个应答 + 工具活动）/ `checkpoint`
+  （压缩摘要卡）。渲染器只读它画 DOM。
+- **两条路径同构**：实时 SSE 帧（chunk/reasoning/tool_call 带 `turn`/`step`
+  结构标记，`tool_result` 按 call_id 配对）与 `/history` 全量载荷喂进同一
+  构建逻辑，产出同一形状的节点——刷新/切会话 = 从 /history 重建投影，
+  实时流 = 同一投影尾部增量生长，**不存在两条独立的渲染路径**。
+- **回合分隔线从数据推导**：user 节点带 `turn`，出现新 turn 才画线；同
+  turn 的后续 user = steer 插队，不画新线（前端不自数 turnNo）。
+- **partialRender 降级为渲染优化**：段落固化（`.pseg`）只服务"最后一个
+  assistant 文本块如何平滑更新"，`_raw/_seg` 状态只活在 DOM 上，不再是
+  会话事实的一部分——任何时刻全量重画都一致。
+- 后端配合：`event_to_payload` 透传 turn/step、SSE 补 `turn_start` /
+  `user_message`（带 turn）帧；设计注记见 `web/PROJECTION_DESIGN.md`。
+- todo dock / context 面板 / approval 卡片**不进**本投影（独立订阅、即时
+  UI），保持现状。
+
 ---
 
 ## 4. 一条消息的完整生命周期
@@ -325,10 +347,10 @@ JSON 没有类型信息，用 `$xxx` 前缀 key 做类型标记：`$text`/`$tool
 | `ui.py` | 终端渲染（_render_event / _paint，UI 是日志投影） |
 | `factory.py` | build_agent / load_env（CLI 与 Web 共用组装） |
 | `cli.py` | CLI 入口（单次任务 / 无任务参数进 REPL） |
-| `web_app.py` | Web UI（FastAPI + SSE：会话/标题/approval/手动压缩/steer 插队；seat 化并发隔离） |
+| `web_app.py` | Web UI（FastAPI + SSE：会话/标题/approval/手动压缩/steer 插队；seat 化并发隔离；事件透传 turn/step + turn_start/user_message 帧供前端投影） |
 | `compaction.py` | 上下文压缩引擎（四步事务 + checkpoint + 会话 token 累计账） |
 | `show_memory.py` | 教学脚本：重放日志展示"记忆 = 投影" |
-| `tests/test_demo.py` | 64 个架构测试 |
+| `tests/test_demo.py` | 65 个架构测试 |
 
 ---
 

@@ -48,6 +48,12 @@ python -m agent_demo.cli --fake --workspace . --hide-reasoning "read README.md a
 
 UI 是日志的投影的第二个渲染器：同一份事件流，CLI 渲染成终端、Web 渲染成 DOM。
 
+Web 前端也是"投影架构"：页面只持有一份从日志重建的投影状态（`nodes`
+数组），**实时 SSE 与 /history 全量加载收敛到同一份投影、走同一个渲染
+入口**——DOM 只是投影的画布，不再当状态。刷新/切会话 = 从 /history 重建
+投影；实时流 = 同一投影在尾部增量生长（chunk 带 turn/step 结构标记，与
+历史载荷同构，见 `web/PROJECTION_DESIGN.md`）。
+
 ```sh
 # 启动 Web 服务（默认 http://127.0.0.1:8000）
 conda run -n agent-demo python -m agent_demo.web_app --workspace . --fake    # 离线（不需要 key）
@@ -189,7 +195,7 @@ compaction.py（上下文压缩引擎）
 | `cli.py` | CLI 入口（单次任务 / 无任务参数进 REPL） |
 | `web_app.py` | Web UI（FastAPI + SSE：会话/标题/approval/手动压缩/steer 插队） |
 | `compaction.py` | 上下文压缩引擎（四步事务 + checkpoint + 会话 token 累计账） |
-| `tests/test_demo.py` | 64 个架构测试 |
+| `tests/test_demo.py` | 65 个架构测试 |
 
 ## 与 harness 的保真度对照
 
