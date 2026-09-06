@@ -160,24 +160,60 @@ mcp__codegraph__codegraph_explore(
 
 ---
 
-## 3. 对 agent-demo 的落点建议（留档）
+## 3. 对 agent-demo 的落点建议（留档 + 实现规格）
 
 agent-demo 现状：Python 四层单向架构、日志唯一事实源、已有 read/bash/edit 等
 通用工具 + approval 门、gh CLI 已装已登录（uphome）、无 skill 基础设施。
 
-若复刻“按需能力”的最小教学版，参照 PI 而非 DSH/opencode：
+### 3.1 设计定稿（2026-09 已对齐，按此实现）
 
-1. 仓库内建 `skills/`（或 `.pi/`）目录，技能 = 中文 markdown + frontmatter
+复刻“按需能力”的最小教学版，参照 **PI 式 + 工具结果注入**：
+
+1. **技能存储**：仓库内建 `skills/` 目录，技能 = 中文 markdown + frontmatter
    （name/description），第一个技能写 `gh-issue`（照 `.pi/prompts/is.md` 缩水：
    只分析、不实现、不信任 issue 内根因）
-2. 系统提示注入“可用技能”摘要几行（XML 或纯文本皆可，教学用纯文本直观）
-3. **不新增加载工具**：模型用现有 read_file 读技能文件（对齐 PI 的最小面）
-4. 执行走现有 bash + gh（bash 已有 approval 门；如需 gh 只读免批，再讨论
+2. **目录（catalog）常驻 system**：技能目录是**静态**的（技能文件不变 → 目录
+   字节不变），作为普通静态 section 注入 system（纯文本行，附相对 workspace
+   的 location）。落点规则：**固定 order、放在 todo 等动态 live 段之前**——
+   保证目录处于缓存稳定前缀，不被动态段拖累（todo:state 现状 order=100）
+3. **正文 = 工具结果注入（已定稿）**：模型用现有 **read_file** 读技能文件 →
+   正文作为 **tool/result**（source.kind='tool'）进 derive_messages → 模型下
+   一步请求读到。与读任何文件机制一致：落日志可重建、可被 compaction 折叠、
+   前端画成“读取技能”工具卡片——**不是用户气泡、不是 DSH 注入式 user 快照**
+4. **不新增加载工具**：不建 `skill()` 工具（对比 DSH/opencode 的取舍：PI 证明
+   通用 read + 目录 location 足够）
+5. 执行走现有 bash + gh（bash 已有 approval 门；如需 gh 只读免批，再讨论
    白名单——那是 bash 层改动，与 skill 机制正交）
-5. 若未来要“专职 triage agent/子任务/模型路由”，再参考 opencode 的
+6. 若未来要“专职 triage agent/子任务/模型路由”，再参考 opencode 的
    agent + command frontmatter——那是更大的角色系统，非本期
 
-参考路线图：先在 NEXT_STEPS.md 记设计 → 落地 skills 扫描 + 注入 + gh-issue 技能
+### 3.2 缓存纪律（定稿）
+
+- 技能目录静态 → system 前缀稳定 → 缓存无损；**技能文件改动只损失当轮**
+- 目录 section 的 order 必须**小于 todo:state 等动态 live 段**——目录保持在
+  每次命中的缓存前缀内
+- 目录保持短（description 截断，参考 DSH `catalogDescriptionMaxLength` 思路）
+
+### 3.3 实现清单（下次动手照此走）
+
+- `agent_demo/skills.py`：`Skill` 值对象（frozen dataclass：name/description/
+  path/model_invocable）+ `scan_skills(dir)`（dir 参数化，为多 agent 留缝）+
+  `format_catalog()`（纯文本目录行）
+- `factory.py build_agent`：注册 `prompt.section('skill:catalog', order<100,
+  …)`——目录随 system 进 request/header 落日志，可重建
+- `skills/gh-issue.md`：第一个技能（frontmatter + 中文工作流正文）
+- 测试：scan 解析 / 目录注入进 system / 正文不进常驻 system（只 read 时进来）
+- 质量门三绿后提交
+
+### 3.4 语义要点（为什么这是对的）
+
+- “模型看过技能正文” = 一次 read_file 的 tool/call + tool/result 事件 → 完整
+  可重建、可审计（它读了哪个技能、什么时刻、按什么干的活）
+- 正文用后能被 compaction 折叠，需要时再 read——不占常驻 token
+- 技能正文在日志里与普通文件读取**无机制差异**——这正是“技能 = 指令文件”的
+  教学点：不需要特权通道
+
+实施顺序：先在 NEXT_STEPS.md 记设计 → 落地 skills 扫描 + 注入 + gh-issue 技能
 → Web/CLI 实测“处理 issue #N” → 质量门三绿提交。
 
 ## 4. 待讨论：todo 的两个开放问题（2026-09 记录，未决）
