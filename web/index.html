@@ -577,7 +577,6 @@ const CTX_CIRC = 2 * Math.PI * 5.5;   // 圆环周长 ≈ 34.56
 let currentSid = 'web';       // 当前会话 id（服务端 init 默认 'web'）
 let busy = false;             // 请求进行中（禁发、显示停止）
 let streaming = false;        // SSE 流进行中（工具活动块自动展开）
-let turnNo = 0;               // 回合计数（每条用户消息 = 新回合）
 let controller = null;
 let wsRoot = '';              // workspace 根（/meta 拉取，路径相对化显示用）
 let stickBottom = true;       // 用户是否贴着底部（智能滚动）
@@ -587,9 +586,29 @@ let ctxWin = 1000000;         // 上下文窗口（deepseek-v4 1M）
 let fakeMode = false;         // 离线演示模式（脚本模型不能生成摘要 → 禁压缩）
 let ctxCompacting = false;    // 压缩请求进行中（防重复点击）
 
-/* 当前助手消息节点（跨多个 chunk/tool 事件存活，直到回合结束或切换） */
-let cur = null;
-function resetCur() { cur = null; }
+/* ============================================================
+ * 统一消息投影模型（会话对话区的唯一事实源）
+ *
+ * 设计（对齐 dsh 的 snapshot model）：前端不直接 patch DOM、不自数回合。
+ * 一切 user/assistant/checkpoint 节点都从服务端来——要么 /history 全量
+ * 构建（buildFromHistory），要么 SSE 增量应用（applyFrame）。渲染器只
+ * 读这份 nodes 数组画 DOM；DOM 从不是状态（任何时刻全量重画都一致）。
+ *
+ * 节点：
+ *   {kind:'user',       turn, text}
+ *   {kind:'checkpoint', body}
+ *   {kind:'assistant',  turn, step, text, reasoning, tools:[]}
+ *        tools[i]: {callId, name, args, state:'running'|'ok'|'error',
+ *                   error?, result?, resultChars?, resultLines?}
+ *   {kind:'turn',       no}            —— 回合分隔线（新回合 user 前插入）
+ *
+ * 节点上的 _textEl/_toolById/_thinking/_activity 只是**渲染缓存**（DOM
+ * 句柄），不属于投影数据——清空重画时从节点重建，永不读回作状态。
+ * ============================================================ */
+let nodes = [];               // 有序节点数组（投影）
+let activeTurn = 0;           // 最近 user_message 的回合（服务端推）
+let lastUserTurn = null;      // 渲染辅助：上一条真人发言的回合（画分隔线）
+let lastAssistant = null;     // 渲染辅助：最近一个 assistant 节点（tool 配对/流式续写）
 
 /* ---------- 小工具 ---------- */
 function el(tag, className) {
@@ -690,7 +709,6 @@ function renderMarkdown(text) {
  *   flush 从 committed 起找安全段落边界，把闭合段切出固化成 .pseg；
  *   剩余"未闭合尾巴"只渲染进唯一的 .active 段。
  * ============================================================ */
-function textElOf() { return cur && cur._textEl; }
 function scheduleFlush(textEl) {
   // 合并多个 chunk 到一次 flush（rAF 节流），避免每帧多次整段解析
   if (textEl._flushScheduled) return;
@@ -749,29 +767,43 @@ function finalizeSegments(textEl) {
   if (textEl) { textEl._raw = ''; textEl._seg = { committed: 0 }; }
 }
 
-/* ---------- 回合与消息骨架 ---------- */
-function addUserMessage(text, newTurn = true) {
-  if (newTurn) {
-    turnNo += 1;
-    const sep = el('div', 'turn-sep');
-    const n = el('span', 'sep-n');
-    n.textContent = `回合 ${turnNo}`;
-    sep.appendChild(n);
-    messagesEl.appendChild(sep);
-  }
+/* ============================================================
+ * 投影渲染核心（统一消息投影 → DOM）
+ *
+ * nodes 是唯一事实源；这些函数只负责把 node 画/更新到 messagesEl。
+ * 每个 assistant node 的容器与文本/工具卡引用（box/textEl/thinking/
+ * activity/toolById）是**渲染缓存**，挂 node 上供增量更新；清空后
+ * 从 nodes 全量重画得到一致结果（DOM 永不是状态）。
+ *
+ * 回合分隔线由 user.turn 推导（同 turn 的后续 user = steer 插队，
+ * 不画线）；assistant 以 (turn,step) 为界分块——历史按 assistant
+ * 消息、实时按 chunk 自带的 turn/step，两条路径渲染出同一结构。
+ * ============================================================ */
+let lastTurnShown = null;      // 最近画过分隔线的回合号（首条 user 画）
+
+function addTurnSep(turn) {
+  const sep = el('div', 'turn-sep');
+  const n = el('span', 'sep-n');
+  n.textContent = `回合 ${turn}`;
+  sep.appendChild(n);
+  messagesEl.appendChild(sep);
+}
+
+/* ---------- user / checkpoint 节点（一次性渲染，无流式生长） ---------- */
+function mountUser(node) {
+  if (node.turn !== lastTurnShown) { addTurnSep(node.turn); lastTurnShown = node.turn; }
   const row = el('div', 'msg user');
   const bubble = el('div', 'bubble');
-  bubble.textContent = text;
+  bubble.textContent = node.text;
   row.appendChild(bubble);
   messagesEl.appendChild(row);
   stickIfNeeded();
 }
 
-/* 压缩 checkpoint 卡片：preamble + <compacted-summary> 标签包裹的摘要。
-   从历史里识别、渲染成"上下文已压缩"折叠卡——不是用户发言 */
-function addCheckpoint(text) {
-  const m = text.match(/<compacted-summary>\s*([\s\S]*?)\s*<\/compacted-summary>/);
-  const body = m ? m[1] : text;   // 取标签内摘要本体；无标签则全文兜底
+/* 压缩 checkpoint 卡片（preamble + <compacted-summary> 摘要，非真人发言） */
+function addCheckpointCard(node) {
+  const m = node.text.match(/<compacted-summary>\s*([\s\S]*?)\s*<\/compacted-summary>/);
+  const body = m ? m[1] : node.text;   // 取标签内摘要本体；无标签则全文兜底
   const card = el('div', 'checkpoint');
   const head = el('button', 'checkpoint-head');
   head.type = 'button';
@@ -802,29 +834,56 @@ function addCheckpoint(text) {
   messagesEl.appendChild(card);
   stickIfNeeded();
 }
-function ensureAssistant() {
-  if (cur) return cur;
+
+/* ---------- assistant 节点：容器按 (turn,step) 分块，可流式生长 ---------- */
+/* 找投影里"当前打开的"assistant 节点（最后一个未 closed 的），或 None */
+function openAssistantNode() {
+  for (let i = nodes.length - 1; i >= 0; i--) {
+    if (nodes[i].kind === 'assistant' && !nodes[i].closed) return nodes[i];
+  }
+  return null;
+}
+/* 把投影 push 的 assistant node 挂到 DOM（空容器，文本/工具随事件生长） */
+function mountAssistant(node) {
   const box = el('div', 'msg assistant');
   const text = el('div', 'text');
-  text._raw = '';                       // 累积的原始 markdown
-  text._seg = { committed: 0 };         // 已固化的前缀长度
+  text._raw = '';                       // 累积的原始 markdown（渲染缓存）
+  text._seg = { committed: 0 };         // 已固化前缀长度
   text._flushScheduled = false;
   box.appendChild(text);
   box._textEl = text;
   box._toolById = new Map();            // call_id → tool-item DOM
   messagesEl.appendChild(box);
-  cur = box;
-  return cur;
+  node.box = box;
+  node.textEl = text;
+  node.thinking = null;
+  node.activity = null;
+  return node;
 }
-function closeAssistant() {
-  finalizeSegments(cur && cur._textEl);
-  cur = null;
+/* 历史渲染：一次把节点完整文本静态铺满（等效连续 flush，无流式动画） */
+function paintAssistantStatic(node) {
+  const textEl = node.textEl;
+  if (!textEl || !node.text) return;
+  const seg = el('div', 'pseg');
+  seg.innerHTML = renderMarkdown(node.text);
+  textEl.appendChild(seg);
+}
+/* 关闭当前 assistant：流式活动段转正（内容已完整）+ 清工具配对表 */
+function closeAssistantNode(node) {
+  if (!node) return;
+  if (node.thinking && node.thinking.box) {
+    node.thinking.box.classList.remove('streaming-on');
+    const live = node.thinking.box.querySelector('.th-live');
+    if (live) live.remove();
+  }
+  finalizeSegments(node.textEl);
+  if (node.activity) node.activity._errCount = 0;   // 定稿后重置计数（防重复累加）
+  node.closed = true;
 }
 
-/* ---------- 思考块 ---------- */
-function ensureThinking() {
-  ensureAssistant();
-  if (cur._thinking) return cur._thinking;
+/* ---------- 思考块（挂节点渲染缓存） ---------- */
+function ensureThinkingOn(node) {
+  if (node.thinking) return node.thinking;
   const box = el('div', 'thinking');
   const toggle = el('button', 'thinking-toggle');
   const arrow = el('span', 'arrow');
@@ -841,15 +900,14 @@ function ensureThinking() {
   });
   box.appendChild(toggle);
   box.appendChild(body);
-  cur._thinking = { box, body, label };
-  cur.insertBefore(box, cur.firstChild);   // 思考块永远在消息最前
-  return cur._thinking;
+  node.thinking = { box, body, label };
+  node.box.insertBefore(box, node.box.firstChild);   // 思考块永远在消息最前
+  return node.thinking;
 }
 
-/* ---------- 工具活动块（一个助手节点内所有工具调用的容器） ---------- */
-function ensureActivity() {
-  ensureAssistant();
-  if (cur._activity) return cur._activity;
+/* ---------- 工具活动块（挂节点：一个 assistant 节点内所有工具调用） ---------- */
+function ensureActivityOn(node) {
+  if (node.activity) return node.activity;
   const box = el('div', 'tool-activity');
   const head = el('button', 'tool-activity-head');
   const arrow = el('span', 'arrow');
@@ -872,20 +930,21 @@ function ensureActivity() {
   box._body = body;
   box._countEl = count;
   box._errCount = 0;
-  cur.insertBefore(box, cur.querySelector('.text'));
-  cur._activity = box;
+  node.box.insertBefore(box, node.box.querySelector('.text'));
+  node.activity = box;
   return box;
 }
-function bumpActivityCount(box) {
-  const total = box._body.querySelectorAll('.tool-item').length;
-  box._countEl.textContent = `${total}`;
-  box._countEl.classList.toggle('has-err', box._errCount > 0);
+function bumpActivityCount(node) {
+  const act = node.activity;
+  if (!act) return;
+  const total = act._body.querySelectorAll('.tool-item').length;
+  act._countEl.textContent = `${total}`;
+  act._countEl.classList.toggle('has-err', act._errCount > 0);
 }
 
-/* ---------- 工具卡片（调用 + 状态 + 摘要，结果按 call_id 配对） ---------- */
-function addToolCall(callId, name, argsRaw) {
-  ensureAssistant();
-  const act = ensureActivity();
+/* ---------- 工具卡片（调用 + 状态 + 摘要；结果按 call_id 配对到节点） ---------- */
+function addToolCallTo(node, callId, name, argsRaw) {
+  const act = ensureActivityOn(node);
   if (streaming) {                  // 实时执行中自动展开看进度；历史渲染保持折叠
     act._body.hidden = false;
     act.classList.add('open');
@@ -926,31 +985,30 @@ function addToolCall(callId, name, argsRaw) {
   item._detailInner = inner;
   item._resultShown = false;
   act._body.appendChild(item);
-  if (callId) cur._toolById.set(callId, item);
-  bumpActivityCount(act);
+  if (callId) node.box._toolById.set(callId, item);
+  bumpActivityCount(node);
   stickIfNeeded();
   return item;
 }
 
-/* 工具结果 → 按 call_id 找卡片；找不到则喂给最早未配对者（容错） */
-function findToolItem(callId) {
-  if (!cur) return null;
-  if (callId && cur._toolById.has(callId)) return cur._toolById.get(callId);
-  // call_id 缺失（旧会话/异常）：退回最早一张 running 卡片
-  const act = cur._activity;
+/* 工具结果 → 按 call_id 找 node 的卡片；找不到喂最早 running 卡（容错） */
+function findToolItemOn(node, callId) {
+  if (!node || !node.box) return null;
+  if (callId && node.box._toolById.has(callId)) return node.box._toolById.get(callId);
+  const act = node.activity;
   if (act) return act._body.querySelector('.tool-item[data-state="running"]');
   return null;
 }
-function addToolResult(res) {
-  ensureAssistant();
-  const act = ensureActivity();
-  const item = findToolItem(res.call_id);
+function addToolResultTo(node, res) {
+  if (!node) return;
+  const act = ensureActivityOn(node);
+  const item = findToolItemOn(node, res.call_id);
   const content = res.content || '';
   const lines = res.lines != null ? res.lines : (content ? content.split('\n').length : 0);
   if (item) {
     item.dataset.state = res.is_error ? 'error' : 'ok';
     if (res.is_error) {
-      act._errCount += 1; bumpActivityCount(act);
+      act._errCount += 1; bumpActivityCount(node);
       // 错误首行提升到头部摘要：折叠状态下错误也一眼可见
       const firstLine = (content.split('\n')[0] || '(执行失败)').slice(0, 90);
       item._sumEl.textContent = firstLine;
@@ -1108,7 +1166,10 @@ function updateContext(ctx) {
 /* ---------- 会话管理 ---------- */
 function clearMessages() {
   messagesEl.innerHTML = '';
-  cur = null; turnNo = 0;
+  nodes = [];
+  lastTurnShown = null;
+  lastUserTurn = null;
+  lastAssistant = null;
 }
 function emptyHint(text) {
   const hint = el('div', 'hint');
@@ -1116,42 +1177,96 @@ function emptyHint(text) {
   messagesEl.appendChild(hint);
 }
 
-/* 历史（日志投影）一次性渲染：无动画、直接铺满 */
+/* ---------- 投影的完整渲染（清空后从 nodes 全量重建） ---------- */
+/* 重建所有 DOM（历史/刷新/压缩后）。assistant 节点已定稿 → 静态铺满。
+   实时增量不走这里——那是 applyFrame 逐节点 append/生长的路径。 */
+function renderProjection() {
+  messagesEl.innerHTML = '';
+  lastTurnShown = null;
+  if (!nodes.length) {
+    emptyHint('这个会话还是空的——发一条消息开始。');
+    return;
+  }
+  for (const node of nodes) {
+    if (node.kind === 'user') mountUser(node);
+    else if (node.kind === 'checkpoint') addCheckpointCard(node);
+    else if (node.kind === 'assistant') {
+      mountAssistant(node);
+      // 节点可能带完整内容（历史构建）或空壳等实时生长（applyFrame 里已 mount）
+      if (node.text) {
+        // 历史消息可能多段文本：历史 assistant 消息 text 是整段，一次铺满
+        node.textEl.innerHTML = renderMarkdown(node.text);
+        finalizeSegments(node.textEl);
+      }
+      for (const t of node.tools) {
+        // 工具调用卡（结果可能已在 node.tools[i].result——历史顺序里
+        // tool_result 是独立消息，构建时已回填到 node.tools[i].result）
+        const item = addToolCallTo(node, t.callId, t.name, t.args);
+        if (t.result) addToolResultTo(node, t.result);
+        if (t.is_error && !t.result) { /* 运行态卡：等实时结果 */ }
+      }
+      if (node.closed) closeAssistantNode(node);
+    }
+  }
+}
+
+/* ---------- 历史（日志投影）构建投影 + 全量渲染 ---------- */
+/* 历史载荷的每条消息 → 投影节点（与 SSE 增量产出同一形状）。
+   assistant 消息带 tool_calls（文本+调用同一消息）；随后的 tool_result
+   是独立消息（内部 user 角色），按顺序配对到最近的 assistant 节点。 */
 function renderHistory(history) {
   messagesEl.classList.add('no-anim');
-  clearMessages();
-  if (!history.length) {
+  nodes = [];
+  lastTurnShown = null;
+  lastUserTurn = null;
+  lastAssistant = null;
+  let lastAsst = null;   // 历史构建期"最近的 assistant 节点"（tool_result 配对用）
+  for (const m of history) {
+    if (m.role === 'user') {
+      lastAsst = null;                        // 真人发言：断开工具配对链
+      const node = { kind: 'user', turn: m.turn !== undefined ? m.turn : lastUserTurn, text: m.text };
+      // turn 缺失（历史旧数据）→ 沿用上一回合；仍无 → 视为同一（不画线）
+      nodes.push(node);
+      if (m.turn !== undefined) lastUserTurn = m.turn;
+    } else if (m.role === 'assistant') {
+      const node = {
+        kind: 'assistant', turn: lastUserTurn, step: nodes.filter(n => n.kind === 'assistant').length,
+        text: m.text || '', tools: [], closed: true,
+      };
+      for (const tc of (m.tool_calls || [])) {
+        node.tools.push({ callId: tc.call_id, name: tc.name, args: tc.arguments,
+                          state: 'running', result: null });
+      }
+      nodes.push(node);
+      lastAsst = node;
+    } else if (m.role === 'tool_result') {
+      // 历史里 tool_result 紧随所属 assistant 消息：把结果回填到它 tools
+      if (lastAsst) {
+        for (const r of (m.tool_results || [])) {
+          const tool = lastAsst.tools.find(t => t.callId === r.call_id);
+          if (tool) { tool.state = r.is_error ? 'error' : 'ok'; tool.result = r; }
+        }
+      }
+      // 没有前置 assistant（异常历史）：作为独立 assistant 显示空结果兜底
+      else if (m.tool_results && m.tool_results.length) {
+        const node = { kind: 'assistant', turn: lastUserTurn,
+                       step: nodes.filter(n => n.kind === 'assistant').length,
+                       text: '', tools: [], closed: true };
+        for (const r of m.tool_results) {
+          node.tools.push({ callId: r.call_id || '', name: '(工具)', args: '',
+                            state: r.is_error ? 'error' : 'ok', result: r });
+        }
+        nodes.push(node);
+      }
+    } else if (m.role === 'checkpoint') {
+      lastAsst = null;
+      nodes.push({ kind: 'checkpoint', text: m.text });
+    }
+  }
+  if (!nodes.length) {
     emptyHint('这个会话还是空的——发一条消息开始。');
   } else {
-    // 跟踪上一条"真人发言"的回合号：同回合的后续 user = steer 插队
-    // （不画回合分隔线），回合号变化 = 新回合（画）。checkpoint 是
-    // 压缩标记不算真人发言，不更新 lastUserTurn。
-    let lastUserTurn = null;
-    for (const m of history) {
-      if (m.role === 'user') {
-        closeAssistant();         // 真用户消息：收掉上一个助手块
-        const sameTurn = lastUserTurn !== null && m.turn === lastUserTurn;
-        addUserMessage(m.text, !sameTurn);   // 同回合插队不画分隔线
-        if (m.turn !== undefined) lastUserTurn = m.turn;
-      } else if (m.role === 'tool_result') {
-        // 工具结果消息（内部是 user 角色）：并入当前助手块的工具活动
-        for (const r of m.tool_results) addToolResult(r);
-      } else if (m.role === 'checkpoint') {
-        closeAssistant();         // checkpoint 独立成卡（不是真人发言，不进回合计数）
-        addCheckpoint(m.text);
-      } else if (m.role === 'assistant') {
-        closeAssistant();         // 新的一步：收掉上一块，再开新块
-        ensureAssistant();
-        for (const tc of m.tool_calls) addToolCall(tc.call_id, tc.name, tc.arguments);
-        if (m.text) {
-          const textEl = cur._textEl;
-          textEl.innerHTML = renderMarkdown(m.text);  // 静态全文一次渲染
-        }
-        // 注意：不 closeAssistant——随后的 tool_result 消息要并入本块的工具活动；
-        // 直到下一条 user / assistant 消息才会收掉本块
-      }
-    }
-    closeAssistant();
+    renderProjection();
   }
   messagesEl.classList.remove('no-anim');
   scrollBottom();
@@ -1262,18 +1377,33 @@ async function newSession() {
   } catch (e) { console.error('new session failed', e); }
 }
 
-/* ---------- SSE 事件分发 ---------- */
-function handle(payload) {
+/* ---------- SSE 事件分发（增量驱动投影） ---------- */
+/* 实时帧按 (turn,step) 找/建 assistant 节点：与历史构建产出同一形状。
+   chunk/reasoning/tool_call 自带 turn+step（后端已透传）；tool_result 无
+   key → 挂当前打开的 assistant（它紧跟在发出调用的 step 后）。 */
+let liveAsst = null;      // 实时流当前打开的 assistant 节点（渲染缓存挂 node）
+function closeLiveAssistant() { if (liveAsst) { closeAssistantNode(liveAsst); liveAsst = null; } }
+function liveAssistantFor(turn, step) {
+  if (liveAsst && liveAsst.liveTurn === turn && liveAsst.liveStep === step) return liveAsst;
+  closeLiveAssistant();
+  const node = { kind: 'assistant', turn, step, text: '', tools: [], closed: false,
+                 liveTurn: turn, liveStep: step };
+  nodes.push(node);
+  mountAssistant(node);
+  liveAsst = node;
+  return node;
+}
+function applyFrame(payload) {
   switch (payload.type) {
     case 'chunk': {
-      ensureAssistant();
-      const textEl = cur._textEl;
-      textEl._raw += payload.text;
-      scheduleFlush(textEl);
+      const node = liveAssistantFor(payload.turn, payload.step);
+      node.text += payload.text;
+      scheduleFlush(node.textEl);   // partialRender：段落固化，只动尾巴
       break;
     }
     case 'reasoning': {
-      const th = ensureThinking();
+      const node = liveAssistantFor(payload.turn, payload.step);
+      const th = ensureThinkingOn(node);
       if (!th.box.classList.contains('streaming-on')) {
         const live = el('span', 'th-live');
         live.textContent = '思考中…';
@@ -1283,12 +1413,32 @@ function handle(payload) {
       th.body.textContent += payload.text;
       break;
     }
-    case 'tool_call':
-      addToolCall(payload.call_id, payload.name, payload.arguments);
+    case 'tool_call': {
+      const node = liveAssistantFor(payload.turn, payload.step);
+      node.tools.push({ callId: payload.call_id, name: payload.name,
+                        args: payload.arguments, state: 'running', result: null });
+      addToolCallTo(node, payload.call_id, payload.name, payload.arguments);
       break;
-    case 'tool_result':
-      addToolResult(payload);
+    }
+    case 'tool_result': {
+      // 挂到当前打开的 assistant（发出该调用的节点）。若此刻没有打开的
+      // assistant（异常），退回最后一个未 closed 的节点。
+      const node = liveAsst || openAssistantNode();
+      if (node) addToolResultTo(node, payload);
       break;
+    }
+    case 'user_message': {
+      // 真人发言（首问或 steer 插队）：关掉上一个打开的 assistant。
+      // send/steer 只 POST 不清屏——气泡完全由这帧驱动（单一事实源）。
+      closeLiveAssistant();
+      const node = { kind: 'user',
+                     turn: payload.turn !== undefined ? payload.turn : lastUserTurn,
+                     text: payload.text };
+      nodes.push(node);
+      if (payload.turn !== undefined) lastUserTurn = payload.turn;
+      mountUser(node);
+      break;
+    }
     case 'todo_update':
       // 常驻 dock 实时更新：模型每次重写清单，面板跟着变
       setTodos(payload.todos);
@@ -1297,19 +1447,14 @@ function handle(payload) {
       showApprovalCard(payload.id, payload.name, payload.arguments);
       break;
     case 'turn_end':
-      finalizeTurn();
+      closeLiveAssistant();
       updateContext(payload.context);   // 回合结束刷新上下文圆环
       break;
   }
 }
 /* 回合结束：收尾思考块动画标记 + 分段收尾（活动段转正，不再闪） */
 function finalizeTurn() {
-  if (cur && cur._thinking) {
-    cur._thinking.box.classList.remove('streaming-on');
-    const live = cur._thinking.box.querySelector('.th-live');
-    if (live) live.remove();
-  }
-  closeAssistant();
+  closeLiveAssistant();
 }
 
 /* ---------- Web approval：敏感工具前弹"批准/拒绝" ---------- */
@@ -1347,6 +1492,9 @@ function showApprovalCard(approvalId, name, argsRaw) {
 }
 
 /* ---------- 发送 / 停止 ---------- */
+/* 用户消息不由本地渲染：发送/插队只 POST，后端 user_message 帧（带真实
+   turn）驱动 applyFrame 渲染气泡与回合分隔线——单一事实源，无双画风险。
+   （本地服务器往返毫秒级，无需乐观渲染。） */
 async function send() {
   const text = input.value.trim();
   if (!text) return;
@@ -1355,7 +1503,6 @@ async function send() {
   // 新回合开始：todo = 当前回合的计划，dock 清空（对齐后端 turn/start 投影）。
   // 若本回合模型重新规划 todo_write，todo_update 帧会重新唤起 dock。
   setTodos(null);
-  addUserMessage(text);
   input.value = '';
   input.style.height = 'auto';
   controller = new AbortController();
@@ -1382,7 +1529,7 @@ async function send() {
         const frame = buf.slice(0, idx);
         buf = buf.slice(idx + 2);
         if (!frame.startsWith('data: ')) continue;
-        try { handle(JSON.parse(frame.slice(6))); } catch (e) { console.error('bad frame', e); }
+        try { applyFrame(JSON.parse(frame.slice(6))); } catch (e) { console.error('bad frame', e); }
       }
     }
   } catch (e) {
@@ -1398,11 +1545,10 @@ async function send() {
 }
 /* 运行中插队（steer）：消息进当前回合 next-step，回合不结束——所以
    不复用 /chat 的 SSE 读取循环（那个流还开着，模型下一步的事件会
-   继续沿它推过来）。本地只渲染用户气泡 + 清输入框即可。 */
+   继续沿它推过来）。用户气泡由后端 user_message 帧沿原流推回渲染。 */
 async function steer(text) {
   input.value = '';
   input.style.height = 'auto';
-  addUserMessage(text, false);   // 非新回合：不加回合分隔线
   try {
     const res = await fetch('/steer', {
       method: 'POST',
@@ -1412,7 +1558,6 @@ async function steer(text) {
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
       // 插队失败（回合恰好结束/无活跃流）：文本放回输入框，稍后走普通消息
-      // （可能已渲染了气泡——下一回合渲染历史时会以日志为准重建，无害）
       console.warn('steer failed:', data.detail || res.status);
       input.value = text;
       input.style.height = 'auto';
