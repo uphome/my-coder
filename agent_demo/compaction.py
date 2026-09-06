@@ -416,7 +416,14 @@ async def run_compaction(session: Session, llm, *, keep_turns: int = 3,
             system=COMPACT_SYSTEM,
             model=model or '',
             messages=(create_user_message([TextBlock(text=conversation)]),),
-            max_tokens=600,
+            # 摘要请求关 thinking：v4 默认 thinking 开，思维链会吃光输出预算
+            # 导致 content 空 → empty summary（实测：600 token 全被 reasoning 耗尽、
+            # 正文 0 字符；关掉后正常输出）。摘要要的是压缩结论不是推理过程，
+            # 同 _auto_title「短请求别浪费 thinking」的处理。
+            thinking=False,
+            # 输出上限给足：8 段结构化摘要对大会话可能上千 token，600 会截断成
+            # 残缺 checkpoint（截断非空会通过"比被压内容小"校验但丢信息）。
+            max_tokens=2000,
         )
         # 2) 生成摘要（复用调用方 llm；失败降级为结果，不炸）
         collected = []

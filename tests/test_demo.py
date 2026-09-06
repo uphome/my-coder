@@ -1306,9 +1306,13 @@ async def test_compaction_transaction_fake_llm(tmp_path):
     from agent_demo.values import TextBlock, create_assistant_message, create_user_message
 
     class FakeCompactorLlm:
-        def __init__(self, summary): self._summary = summary
+        def __init__(self, summary):
+            self._summary = summary
+            self.seen_requests: list = []
+
         async def stream(self, request, signal=None):
             from agent_demo.llm import StreamChunk
+            self.seen_requests.append(request)
             yield StreamChunk(text=self._summary, finish_reason='stop')
 
     def user(text):
@@ -1355,6 +1359,12 @@ async def test_compaction_transaction_fake_llm(tmp_path):
     summary_evt = [e for e in s.events if e.type == 'compaction/summary'][0]
     assert 'range' in summary_evt.data
     assert 'file_ops' in summary_evt.data
+
+    # 摘要请求关 thinking（v4 默认开 thinking 会吃光输出预算 → content 空 →
+    # empty summary：真 bug，曾让手动压缩三次失败）；输出上限给足防截断
+    req = llm.seen_requests[0]
+    assert req.thinking is False
+    assert req.max_tokens >= 2000
 
 
 @pytest.mark.asyncio
