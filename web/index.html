@@ -1166,13 +1166,6 @@ function updateContext(ctx) {
 }
 
 /* ---------- 会话管理 ---------- */
-function clearMessages() {
-  messagesEl.innerHTML = '';
-  nodes = [];
-  lastTurnShown = null;
-  lastUserTurn = null;
-  liveAsst = null;   // 清掉可能悬挂的实时 assistant（其 DOM 已被清空）
-}
 function emptyHint(text) {
   const hint = el('div', 'hint');
   hint.textContent = text;
@@ -1218,6 +1211,7 @@ function renderProjection() {
    是独立消息（内部 user 角色），按顺序配对到最近的 assistant 节点。 */
 function renderHistory(history) {
   messagesEl.classList.add('no-anim');
+  messagesEl.innerHTML = '';    // 先清空：空会话走 emptyHint，非空走 renderProjection——两者都不再依赖"恰好在非空时被清空"
   nodes = [];
   lastTurnShown = null;
   lastUserTurn = null;
