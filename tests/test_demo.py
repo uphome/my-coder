@@ -735,6 +735,11 @@ def test_web_chat_streams_events(tmp_path):
     assert '"type": "chunk"' in resp.text
     assert '"type": "tool_call"' in resp.text
     assert '"type": "turn_end"' in resp.text
+    # 统一投影模型的协议：回合开始帧、真人发言帧（带 turn）、内容帧带 turn/step
+    assert '"type": "turn_start"' in resp.text
+    assert '"type": "user_message"' in resp.text
+    assert '"type": "chunk", "turn": 1' in resp.text      # chunk 带 turn（前端按节点分块）
+    assert '"type": "user_message", "text": "hi", "turn": 1' in resp.text
 
     # 对话后历史可查（记忆 = 日志投影，Web 视角同样成立）
     payload = client.get('/history').json()

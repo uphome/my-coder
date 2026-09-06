@@ -469,16 +469,35 @@ def event_to_payload(event, session: Session | None = None) -> dict | None:
 
     session 参数：turn/end 附带的 context 属于"这个事件的会话"（并发下
     多个会话各自跑，不能读全局焦点会话的占用）——SSE 循环按 seat 传入。
+
+    统一投影模型的协议：chunk/reasoning/tool_call 都带 turn/step，前端
+    据此把事件挂到对应 assistant 节点（不再靠"当前块"猜）。turn/start
+    与真人 user 消息各发一帧，前端不再自数回合。
     """
+    if event.type == 'turn/start':
+        return {'type': 'turn_start', 'turn': int(event.data['turn'])}
+    if event.type == 'user/message' and event.surface_op == 'append':
+        # 真人发言帧（surface replace 的 checkpoint 除外——它独立成卡）。
+        # 文本取第一条 text block；纯工具结果的 user 消息没有 text，不发帧
+        # （工具结果显示由 tool/result 事件驱动）。turn 由前端用最近一次
+        # turn_start 推导（user/message 事件本身不带 turn）。
+        text = _first_text_of(event.data)
+        if text:
+            return {'type': 'user_message', 'text': text}
+        return None
     if event.type == 'assistant/chunk':
         text = event.data['chunk']['text']
-        return {'type': 'chunk', 'text': text} if text else None
+        return ({'type': 'chunk', 'turn': event.data['turn'], 'step': event.data['step'],
+                 'text': text} if text else None)
     if event.type == 'assistant/reasoning/chunk':
         reasoning = event.data['reasoning']
-        return {'type': 'reasoning', 'text': reasoning} if reasoning else None
+        return ({'type': 'reasoning', 'turn': event.data['turn'], 'step': event.data['step'],
+                 'text': reasoning} if reasoning else None)
     if event.type == 'tool/call':
         return {
             'type': 'tool_call',
+            'turn': event.data.get('turn', 0),
+            'step': event.data.get('step', 0),
             'call_id': event.data['call_id'],
             'name': event.data['name'],
             'arguments': event.data['arguments'],  # 原始 JSON 字符串
@@ -695,6 +714,7 @@ async def chat(request: Request) -> StreamingResponse:
         # 本会话的活跃队列挂到 seat：per-seat approval 钩子经它推送请求。
         # （旧实现写全局 _active_queue——两会话并行时会被互相覆盖）
         seat.queue = queue
+        cur_turn = 0   # 会话事件流的当前回合（turn_start 推进；user_message 帧附上）
         try:
             while True:
                 item = await queue.get()
@@ -705,8 +725,16 @@ async def chat(request: Request) -> StreamingResponse:
                     yield f'data: {json.dumps(item, ensure_ascii=False)}\n\n'
                     continue
                 payload = event_to_payload(item, session)
-                if payload is not None:
-                    yield f'data: {json.dumps(payload, ensure_ascii=False)}\n\n'
+                if payload is None:
+                    continue
+                if payload['type'] == 'turn_start':
+                    cur_turn = payload['turn']
+                elif payload['type'] == 'user_message':
+                    # user/message 事件本身不带 turn（Message 无此字段），
+                    # 订阅端按事件顺序知道最近一次 turn_start——补上，
+                    # 前端据此画/不画回合分隔线（同回合 steer 不画）
+                    payload['turn'] = cur_turn
+                yield f'data: {json.dumps(payload, ensure_ascii=False)}\n\n'
         finally:
             # 客户端断开（停止按钮 / 关页面）：取消该会话 agent，记账由循环层完成
             task.cancel()

@@ -293,7 +293,12 @@ async def _run_group(agent, turn: int, step: int, group: list[ToolCallBlock]) ->
     """
     session = agent.session
     for call in group:
-        session.append('tool/call', {'call_id': call.id, 'name': call.name, 'arguments': call.arguments})
+        # turn/step 一并落日志：前端 SSE 需按 (turn,step) 把工具调用挂到
+        # 对应 assistant 节点（统一投影模型按节点定位，不再靠"当前块"猜）
+        session.append('tool/call', {
+            'turn': turn, 'step': step,
+            'call_id': call.id, 'name': call.name, 'arguments': call.arguments,
+        })
 
     async def run_one(call: ToolCallBlock) -> None:
         try:
