@@ -22,6 +22,11 @@ conda run --no-capture-output -n agent-demo python -m agent_demo.web_app --works
 
 ## 架构（改动任何代码前必读）
 
+> **实现新的机制/新功能前，先看仓库根的 `agent.md`**：它记录了 DSH
+> （deepseek-harness）、PI（pi-mono）、opencode 三家开源项目对同类机制
+> （skill 按需加载、issue/PR 工作流、agent 角色、工具组织等）的现成实现与
+> 对照——先对齐成熟做法，再决定本仓库的教学复刻取舍。
+
 包结构 `agent_demo/`（取代早期平铺）。依赖方向不变，仍是四层单向：
 入口（`cli.py` / `web_app.py` → `factory.py` 组装）→ 框架循环（`agent.py` 被动状态机 / `loop.py` turn-step）→ 状态（`session.py`/`inbox.py`/`prompt.py`/`registry.py`）→ 能力（`llm.py`/`hooks.py`）→ 值（`values.py` + `persistence.py`）。应用内容独立成包：工具在 `agent_demo/tools/`（file_io/search/shell/todo + build_tools 组装）、渲染在 `ui.py`、路径边界在 `sandbox.py`、常量在 `constants.py`。上层依赖下层，下层不感知上层。
 
