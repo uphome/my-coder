@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -43,44 +44,65 @@ def scan_skills(root: Path) -> list[Skill]:
     """扫描技能目录：每个 .md 文件即一个技能（解析 frontmatter 取 name/description）。
 
     只扫顶层 *.md（扁平形态，教学够用）；SKILL.md 目录形态等有需要再加。
-    解析容错：文件不可读 / frontmatter 缺 name / description 为空 → 跳过
-    （技能坏了不该让整个 system 组装崩掉——宁缺毋滥，静默丢弃并留痕）。
+    解析容错：坏技能（不可读/无 frontmatter/缺 name 或 description/名字非法）
+    **跳过并打诊断**（对齐项目"宁炸勿静默"——技能作者要能发现自己写坏了；
+    但技能坏了不炸 system，只提示，正文由模型按需 read）。
     """
     skills: list[Skill] = []
     if not root.is_dir():
         return skills
     for path in sorted(root.glob('*.md')):
-        skill = _parse_skill(path)
+        skill, error = _parse_skill(path)
         if skill is not None:
             skills.append(skill)
+        elif error:
+            # 诊断走 stderr：不污染 CLI 的 stdout 正常输出流（对齐项目里
+            # print(..., flush=True) 的诊断风格，但分离到错误流）
+            print(f'[skill] skipped {path.name}: {error}', file=sys.stderr, flush=True)
     return skills
 
 
-def _parse_skill(path: Path) -> Skill | None:
-    """解析一个技能文件：YAML frontmatter 的 name/description + 正文文件路径。
+def _parse_skill(path: Path) -> tuple[Skill | None, str]:
+    """解析一个技能文件 → (Skill | None, 跳过原因)。
 
+    返回 (None, '') = 正常跳过（非技能文件，如目录说明文档），不打诊断；
+    返回 (None, reason) = 写坏了要提示（缺 name/description、名字非法）。
     只取 name/description（目录需要），正文不读——正文由模型按需 read，
     目录格式化阶段绝不把正文拖进 system（设计决策，见模块 docstring）。
     """
     try:
         text = path.read_text(encoding='utf-8')
-    except OSError:
-        return None
+    except OSError as error:
+        return None, f'unreadable: {error}'
     if not text.startswith('---'):
-        return None
+        return None, ''  # 非技能文件（如 README）：不算坏，静默
     end = text.find('\n---', 3)
     if end < 0:
-        return None
+        return None, 'frontmatter not closed (missing second ---)'
     meta: dict[str, str] = {}
     for line in text[3:end].splitlines():
-        if ':' in line:
-            key, _, value = line.partition(':')
-            meta[key.strip()] = value.strip().strip('"\'')
+        if ':' not in line:
+            continue
+        key, _, value = line.partition(':')
+        key = key.strip()
+        if not key:
+            continue
+        # 值取第一个冒号后的全部剩余（支持 description 值内含冒号），
+        # 剥掉两端空白与成对引号；多行 YAML（> / | 块）不在契约内
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+            value = value[1:-1]
+        meta[key] = value
     name = meta.get('name', path.stem)
     description = meta.get('description', '').strip()
-    if not _NAME.match(name) or not description:
-        return None
-    return Skill(name=name, description=description, path=path)
+    if not description:
+        return None, 'missing description in frontmatter'
+    if not _NAME.match(name):
+        return None, (
+            f'invalid name {name!r} (must be lowercase letters/digits/hyphens; '
+            'set `name:` in frontmatter or rename the file)'
+        )
+    return Skill(name=name, description=description, path=path), ''
 
 
 def format_catalog(skills: list[Skill], workspace: Path) -> str:
@@ -101,7 +123,7 @@ def format_catalog(skills: list[Skill], workspace: Path) -> str:
         # as_posix：路径统一正斜杠——模型传给 read_file 的跨平台规范写法
         # （Windows 下反斜杠也能读，但正斜杠在 CLI/JSON 里不用转义、不会歧义）
         rel_lines.append(f'- {skill.name}: {skill.description} ({rel.as_posix()})')
-    head = (
-        '可用技能（任务匹配其描述时，用 read_file 读取对应文件全文再按其执行）：'
-    )
+    # 引导句：短 + 给足操作细节。正文不是代码，行号纯浪费——read_file 默认
+    # line_numbers=true，这里明确要 false；limit 默认 200 行足够技能正文。
+    head = '可用技能（任务匹配描述时用 read_file 读对应文件，line_numbers=false）：'
     return head + '\n' + '\n'.join(rel_lines)

@@ -1036,11 +1036,10 @@ async def test_todo_live_injection_across_steps(tmp_path):
     assert 'step two' in systems[1]
 
 
-def test_skill_catalog_scan_and_format(tmp_path):
+def test_skill_catalog_scan_and_format(tmp_path, capsys):
     """技能目录扫描/格式化（AGENTS.md 约定：目录只放 name+description+路径）。
 
-    - scan_skills：解析 skills/*.md 的 frontmatter；坏技能（缺 description）
-      静默跳过
+    - scan_skills：解析 skills/*.md 的 frontmatter；坏技能跳过并打诊断
     - format_catalog：纯文本目录行，路径相对 workspace 且正斜杠
     - 正文绝不进目录（正文由模型 read_file 按需读，见下一测试）
     """
@@ -1049,16 +1048,38 @@ def test_skill_catalog_scan_and_format(tmp_path):
     skills_dir = tmp_path / 'skills'
     skills_dir.mkdir()
     (skills_dir / 'gh-issue.md').write_text(
-        '---\nname: gh-issue\ndescription: 处理 GitHub issue（读全文、独立验证）\n'
+        '---\nname: gh-issue\ndescription: 处理 GitHub issue：读全文、独立验证\n'
         '---\n# 正文\n这是一段不该出现在目录的技能正文。\n',
         encoding='utf-8',
     )
-    # 坏技能（无 description）：应被 scan 跳过，不进目录
+    # 描述含成对引号 → 应剥离引号保留内容
+    (skills_dir / 'quoted.md').write_text(
+        '---\nname: quoted\ndescription: "任务匹配时使用，含:冒号"\n---\n正文\n',
+        encoding='utf-8',
+    )
+    # 坏技能（无 description）：应被 scan 跳过 + stderr 诊断，不进目录
     (skills_dir / 'broken.md').write_text(
         '---\nname: broken\n---\n没有 description。\n', encoding='utf-8')
+    # 非法技能名（文件名中文且无 name）：跳过 + 诊断
+    (skills_dir / '处理问题.md').write_text(
+        '---\ndescription: 中文文件名技能\n---\n正文\n', encoding='utf-8')
+    # 非技能 md（无 frontmatter）：静默跳过（不算坏，不打诊断）
+    (skills_dir / 'README.md').write_text('目录说明，不是技能。\n', encoding='utf-8')
 
     skills = scan_skills(skills_dir)
-    assert [s.name for s in skills] == ['gh-issue']
+    names = [s.name for s in skills]
+    assert names == ['gh-issue', 'quoted'], names
+    # 引号剥离 + 值内冒号保留
+    quoted = next(s for s in skills if s.name == 'quoted')
+    assert quoted.description == '任务匹配时使用，含:冒号'
+    gh = next(s for s in skills if s.name == 'gh-issue')
+    assert gh.description == '处理 GitHub issue：读全文、独立验证'
+
+    # 诊断：broken 与中文名各一条 [skill] skipped（README 静默）
+    err = capsys.readouterr().err
+    assert '[skill] skipped broken.md' in err
+    assert '[skill] skipped 处理问题.md' in err
+    assert 'README' not in err
 
     catalog = format_catalog(skills, tmp_path)
     assert 'gh-issue' in catalog
@@ -1066,6 +1087,7 @@ def test_skill_catalog_scan_and_format(tmp_path):
     assert '处理 GitHub issue' in catalog
     assert '不该出现在目录' not in catalog           # 正文不进目录
     assert 'broken' not in catalog                    # 坏技能被跳过
+    assert 'README' not in catalog
 
     # 无技能目录/空目录 → 空目录文本（render 自动省略，零 token）
     assert format_catalog([], tmp_path) == ''
