@@ -606,9 +606,7 @@ let ctxCompacting = false;    // 压缩请求进行中（防重复点击）
  * 句柄），不属于投影数据——清空重画时从节点重建，永不读回作状态。
  * ============================================================ */
 let nodes = [];               // 有序节点数组（投影）
-let activeTurn = 0;           // 最近 user_message 的回合（服务端推）
 let lastUserTurn = null;      // 渲染辅助：上一条真人发言的回合（画分隔线）
-let lastAssistant = null;     // 渲染辅助：最近一个 assistant 节点（tool 配对/流式续写）
 
 /* ---------- 小工具 ---------- */
 function el(tag, className) {
@@ -868,7 +866,9 @@ function paintAssistantStatic(node) {
   seg.innerHTML = renderMarkdown(node.text);
   textEl.appendChild(seg);
 }
-/* 关闭当前 assistant：流式活动段转正（内容已完整）+ 清工具配对表 */
+/* 关闭当前 assistant：先把未 flush 的流式文本同步固化，再转正活动段。
+   不先 flush 的话，turn_end 与最后几个 chunk 落在同一事件批次时，rAF 的
+   flush 会排在 finalize 之后——_raw 已被清空，最后一段文本漏渲染。 */
 function closeAssistantNode(node) {
   if (!node) return;
   if (node.thinking && node.thinking.box) {
@@ -876,8 +876,10 @@ function closeAssistantNode(node) {
     const live = node.thinking.box.querySelector('.th-live');
     if (live) live.remove();
   }
+  if (node.textEl && node.textEl._raw) {
+    flushSegments(node.textEl);   // 同步固化剩余文本（关流前必跑）
+  }
   finalizeSegments(node.textEl);
-  if (node.activity) node.activity._errCount = 0;   // 定稿后重置计数（防重复累加）
   node.closed = true;
 }
 
@@ -1169,7 +1171,7 @@ function clearMessages() {
   nodes = [];
   lastTurnShown = null;
   lastUserTurn = null;
-  lastAssistant = null;
+  liveAsst = null;   // 清掉可能悬挂的实时 assistant（其 DOM 已被清空）
 }
 function emptyHint(text) {
   const hint = el('div', 'hint');
@@ -1219,7 +1221,7 @@ function renderHistory(history) {
   nodes = [];
   lastTurnShown = null;
   lastUserTurn = null;
-  lastAssistant = null;
+  liveAsst = null;   // 历史全量渲染：不再有实时打开的 assistant
   let lastAsst = null;   // 历史构建期"最近的 assistant 节点"（tool_result 配对用）
   for (const m of history) {
     if (m.role === 'user') {
