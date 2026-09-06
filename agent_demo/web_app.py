@@ -736,7 +736,15 @@ async def chat(request: Request) -> StreamingResponse:
                     payload['turn'] = cur_turn
                 yield f'data: {json.dumps(payload, ensure_ascii=False)}\n\n'
         finally:
-            # 客户端断开（停止按钮 / 关页面）：取消该会话 agent，记账由循环层完成
+            # 客户端断开（停止按钮 / 关页面）：取消该会话 agent。
+            # 不能只 cancel run_agent 任务：when_idle 用 asyncio.shield(driver)
+            # 保护 driver 不被外部取消殃及——run_agent 被 cancel 只会让
+            # when_idle 返回，driver（正在跑的回合）会继续执行、永不收敛，
+            # 前端也就永远开不了新回合（消息全堵在 next-turn 排队）。
+            # 必须 agent.cancel() 直达 driver：inbox.clear + driver.cancel()，
+            # CancelledError 沿 await 链传播，run_turn 记 turn/end aborted。
+            if seat.agent.status == 'running':
+                seat.agent.cancel()
             task.cancel()
             unsubscribe()
             watch()   # 退订首条消息监听（会话切换后不留悬挂监听）

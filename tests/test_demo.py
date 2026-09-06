@@ -2151,6 +2151,66 @@ async def test_web_steer_interrupts_open_sse_stream(tmp_path):
     assert texts == ['首问', '停一下改方向']
 
 
+@pytest.mark.asyncio
+async def test_web_sse_disconnect_cancels_agent(tmp_path):
+    """SSE 客户端断开（停止/关页）必须取消 agent，否则回合永不收敛。
+
+    回归：sse_stream 的 finally 曾只 task.cancel()（run_agent），而
+    when_idle 用 asyncio.shield 保护 driver——run_agent 被取消只是让
+    when_idle 返回，正在跑的 driver（回合）继续执行、永不结束：
+    前端 busy 复位后新消息走 /chat 全堵在 next-turn 排队，新回合永远
+    开不了。修复：断开时 agent.cancel() 直达 driver（记 turn/end aborted）。
+
+    可控挂起 LLM：流开着、agent 卡在等待 → 关流（asyncio 取消读取）→
+    等 agent 收敛 → 断言回合被 abort、agent 回 idle、inbox 被清。
+    """
+    import httpx
+
+    from agent_demo import web_app
+    from agent_demo.llm import StreamChunk
+
+    class HoldLlm:
+        def __init__(self):
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def stream(self, request, signal=None):
+            self.started.set()
+            await self.release.wait()          # 一直挂到测试放行/取消
+            yield StreamChunk(text='never', finish_reason='stop')
+
+    web_app.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
+    seat = web_app._seats['web']
+    seat.agent.llm = HoldLlm()
+
+    transport = httpx.ASGITransport(app=web_app.app)
+    async with httpx.AsyncClient(transport=transport, base_url='http://test') as client:
+        async def read_sse() -> None:
+            async with client.stream('POST', '/chat',
+                                     json={'message': '首问', 'sid': 'web'}) as resp:
+                assert resp.status_code == 200
+                async for _ in resp.aiter_text():
+                    pass
+
+        reader = asyncio.create_task(read_sse())
+        await seat.agent.llm.started.wait()    # 回合确实挂起（agent running）
+        assert seat.agent.status == 'running'
+        reader.cancel()                        # 模拟客户端断开（点停止/关页）
+        try:
+            await reader
+        except asyncio.CancelledError:
+            pass
+        # 断开后允许 run_agent 收尾（cancel 传播 + DONE 落队列）
+        await asyncio.sleep(0.3)
+        # agent 必须回 idle（driver 被 agent.cancel() 打断，不是被 shield 留着）
+        assert seat.agent.status == 'idle', 'SSE 断开后 agent 必须被取消回 idle'
+        # 回合记 aborted（不是 completed——被打断，不是自然结束）
+        ends = [e.data['reason'] for e in seat.session.events
+                if e.type == 'turn/end']
+        assert ends == ['aborted'], f'expected aborted turn, got {ends}'
+        # inbox 被清空（cancel 默认清队列）：无幽灵消息等下次执行
+        assert not seat.agent.inbox.has_pending
+
 def test_cli_repl_runs_multiple_turns(tmp_path):
     """CLI REPL：无 prompt 启动 → 多轮输入各自开回合，/exit 退出。
 
