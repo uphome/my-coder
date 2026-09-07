@@ -221,28 +221,63 @@ agent-demo 现状：Python 四层单向架构、日志唯一事实源、已有 r
 实施顺序（待落地时走）：先在 NEXT_STEPS.md 记设计 → 落地 skills 扫描 + 注入 +
 gh-issue 技能 → Web/CLI 实测“处理 issue #N” → 质量门三绿提交。
 
-## 4. 待讨论：todo 的两个开放问题（2026-09 记录，未决）
+## 4. 待讨论：todo 与"运行时状态栏"（2026-09 记录，未决）
 
-> 背景：讨论「模型每步是否知道自己在做什么、进行到哪一步」时发现的两点，
-> 先记录成文，设计确定后再回填结论。
+> 背景：讨论「模型每步是否知道自己在做什么、进行到哪一步」时，演化成
+> 「todo 是否该成为通用 agent 状态栏的一个贡献者」。本节记录问题与对照。
 
-### 问题 1：todo_write 的完整结果到底该放哪？
+### 4.0 关键调研：DSH / opencode 的"运行时状态注入"机制（2026-09 实测源码）
+
+讨论中发现的直接参照——两家都有**把动态状态注入模型**的成熟机制，且形态
+惊人地相似（user 消息快照 + 变化才更新 + 注册贡献者）：
+
+**DSH：runtime context（`packages/core/agent-loop/src/runtime-context.ts`）**
+- 位置：**不在 system**，作为 **user 角色消息** append 进 messages 尾部
+  （`preStep`：`messages: [...claimed, context]`）
+- 形态：`Current runtime context. This snapshot supersedes earlier…` + 各贡献
+  者内容（policy / todo / time-context / approval 状态等——全是注册制贡献者）
+- 核心：`RuntimeContextProjection.project(current)`——**内容变化才 append 新
+  快照**（`retained.text === snapshot` 则跳过）；compaction 遮蔽旧快照时置
+  retained=null，下轮重新投影
+- 贡献者注册：system prompt 的 contexts 桶（`systemPrompt.context(...)`），
+  persona 可 `includeRuntimeContext: false` 整体关掉
+
+**opencode：SystemContext（`packages/core/src/system-context/`）**
+- 同思路但更"事件化"：每个 context 有 `baseline`（首见）+ `update`（变化时），
+  SystemContextRegistry 注册；builtins 就有 **environment + date**（即那五种
+  里的"系统状态"与"时间戳"的工程版）
+- 注意：**todo 不走 SystemContext**——todowrite 的 `toModelOutput` 直接返回
+  完整清单 JSON 作为 tool/result（模型从历史读最新），这是另一条路
+
+**共同结论**（对 agent-demo 的启示）：
+1. "运行时状态" = user 消息快照放 messages 尾部（不是 system）→ 前缀缓存稳定
+2. **变化才更新**（去重）而非每轮合成——避免"状态没变也重复附加"
+3. 注册制贡献者（每个插件/模块注册自己那块状态）——与 agent-demo 的
+   `prompt.section`/`ToolRegistry` 同哲学
+4. 快照作为 user/plugin 消息**落日志** → 完全可重建（agent-demo 若做需扩展
+   source 类型 + compaction 联动，中型改动）
+
+### 问题 1：todo_write 的完整结果到底该放哪？（已收敛到"状态栏"方向）
 
 现状（agent-demo）：`todo_write` 执行时把完整清单写进 `todo/write` **痕迹事件**
 （不进 derive_messages），返回给模型的 tool/result 只有**计数摘要**
 （"Updated todo list: 3 pending, 1 in progress…"）。完整清单靠
 `fold_todos()` 折叠 + system 里 `todo:state` live section 注入模型。
 
-对照三家（详见第 2 节）：
+对照三家（详见第 2 节与 4.0）：
 - opencode：todowrite 的 `toModelOutput` 返回**完整清单 JSON** → 作为 tool/result
   进消息历史，模型从历史读最新清单；无 system 注入、无独立 section
 - PI：无 todo 机制
-- DSH：动态 context 渲染成 user 角色快照消息进历史（durable snapshot）
+- DSH：todo 作为 **runtime-context 的贡献者**——动态上下文渲染成 user 角色
+  快照消息进历史（durable snapshot + 变化才更新 + compaction 联动）
 
-**未决点**：完整清单走「痕迹 + system live 注入」（现状）还是「tool/result 完整
-返回、随历史自走」（opencode 式）？牵涉：缓存（system 动态段 vs 全静态）、
-日志语义（痕迹 vs surface）、resume 可重建、历史体积、compaction 对旧 todo 的
-折叠。
+**讨论方向（2026-09 已多次往返）**：用户提出"todo 状态栏以 XML 框住、放每轮
+消息末尾（每轮替换、不破坏前缀缓存）"——这与 DSH runtime-context / opencode
+SystemContext 的形态一致，todo 只是通用状态栏的第一个贡献者。DSH 的
+"变化才 append + 落日志 + 注册贡献者"是完整工程参考；简化版可不落日志、
+每轮 fold 现算合成（接受轻微重复）。
+**未决**：实现深度选型（完整 DSH 式 vs 简化合成式）、XML 容器与贡献者机制、
+首批贡献者范围（todo only vs todo + tool_summary）。
 
 ### 问题 2：长任务中 LLM 是否知道自己进行到 todo 的哪一步？
 
