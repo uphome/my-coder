@@ -275,9 +275,46 @@ gh-issue 技能 → Web/CLI 实测“处理 issue #N” → 质量门三绿提�
 消息末尾（每轮替换、不破坏前缀缓存）"——这与 DSH runtime-context / opencode
 SystemContext 的形态一致，todo 只是通用状态栏的第一个贡献者。DSH 的
 "变化才 append + 落日志 + 注册贡献者"是完整工程参考；简化版可不落日志、
-每轮 fold 现算合成（接受轻微重复）。
-**未决**：实现深度选型（完整 DSH 式 vs 简化合成式）、XML 容器与贡献者机制、
-首批贡献者范围（todo only vs todo + tool_summary）。
+每轮 fold 现算合成。
+
+### 问题 1 结论：方案 A（2026-09 已定稿，待实现）
+
+**关键讨论澄清**：状态栏**不进日志**——每轮模型请求的 messages 从日志
+`derive_messages()` 重建，瞬态合成消息不在日志里 → 下一轮重建后不存在。
+因此"模型看之前的"不成立（对比 DSH：快照是日志消息，模型能从历史 derive
+读到，去重才安全）。**结论：不物化路线必须每轮都叠**（状态栏是 todo 唯一
+可见通道），不能做"不变就不加"的跨轮去重。
+
+**方案 A 规格**：
+- 状态栏只存在「模型调用过 todo_write 且清单未全部 completed」时的每轮
+  组请求中；普通对话（无 todo）、清单全 completed（任务收尾）→ 不叠
+- 形态：role=user 合成消息，XML 包裹，叠在 messages 末尾
+  ```xml
+  <todo_status>
+  1. [completed] 加载技能
+  2. [in_progress] 验证根因
+  </todo_status>
+  ```
+- 改动清单：
+  - `agent_demo/tools/todo.py`：新增 `build_todo_status(session)`——fold 出
+    清单 → XML `<todo_status>` 块；无清单或 `all_completed` 返回 None
+  - `agent_demo/loop.py _run_step`：组 messages 时若 `build_todo_status` 非
+    None 则 append 一条 `create_user_message([TextBlock(text=status)])`
+  - `agent_demo/factory.py`：删 `todo:state` live section + `_todo_context`
+    （todo 离开 system；注释同步）
+  - `web/index.html`：不改——前端 dock 由 todo_update 帧驱动，状态栏只影响
+    模型上下文
+  - 测试：system 含 todo 的断言改 messages 含状态栏；补 XML 格式/全
+    completed 不叠/无 todo 不叠测试
+- 不变式对照：状态栏 = fold_todos(日志) 现算 → 同一日志同一状态栏 →
+  resume 可重建 ✓；完整清单已由 todo/write 痕迹记录（审计可重建）✓；
+  不进 derive_messages → 历史零污染 ✓
+- 缓存：状态栏在 messages 尾部 → 前缀（system+历史）稳定命中，只有尾部
+  新内容 ✓（对比 system 动态段一变断全前缀）
+- **未来扩展**（已共识方向、非本期）：状态栏容器可含多块
+  （`<agent_status>` 内 `<todo_status>` + `<goal>` + 未来贡献者）；
+  goal 语义与机制待单独讨论（DSH 参照：`<goal_round>` XML + objective/phase
+  生命周期 + 独立 driver，与 runtime-context 是两套机制）
 
 ### 问题 2：长任务中 LLM 是否知道自己进行到 todo 的哪一步？
 
