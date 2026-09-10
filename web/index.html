@@ -822,9 +822,14 @@ function mountUser(node) {
 
 /* 插队乐观渲染：立即画"待处理"气泡（后端 user_message 帧按 id 认领转正）。
    与帧驱动路径同形：也是 nodes 里的一个 user 节点，只是先于日志出现——
-   帧到达时认领它而不是重复画（nodes 仍是唯一事实源）。 */
+   帧到达时认领它而不是重复画（nodes 仍是唯一事实源）。
+
+   **不关闭当前 assistant**（关键）：插队消息要等当前 step 跑完才 claim，此前
+   当前 step 的剩余 chunk 还会到达——它们属于插队**之前**那次输出，必须继续
+   追加到原节点（排在气泡之上）。若这里 closeLiveAssistant，后续 chunk 会
+   liveAssistantFor 新建节点并 append 到气泡**之后**，气泡就被夹在中间、
+   位置看着"往上跑"（实测 bug）。 */
 function mountPendingUser(text, messageId) {
-  closeLiveAssistant();     // 与 user_message 帧到达时行为一致：插队打断当前 assistant
   const node = { kind: 'user', turn: lastUserTurn, text, pending: true, messageId };
   nodes.push(node);
   mountUser(node);
