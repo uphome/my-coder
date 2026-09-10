@@ -289,6 +289,45 @@ Web 端原先是**全局单例**：`_session/_agent/_current_sid` 指向"当前�
 （`③ 跳过`、`② 收敛`），全程无第二个回合，`reason=completed`——插队是
 "下一步批量吸收并重新规划"，不是生硬打断。
 
+### step 粒度改成"一次模型请求"（2026-09，修"插入信息不起作用"）
+
+现象（用户实测 + 日志定位）：agent 跑长任务时插队，消息进了队列但**模型从没
+见到它**。`.sessions/web.jsonl` 铁证：
+
+```
+seq=13494  23:29:56  agent/inbox/spliced  target=next-step  inserted=['这个 web_search …']
+seq=23233  23:32:36  agent/inbox/spliced  target=next-step  removed=1  outcome=canceled
+seq=23234  23:32:36  turn/end reason=aborted
+```
+
+没有对应的 `user/message`——它在 next-step 里躺了 2 分 40 秒，最后被 cancel
+当"未处理输入"清掉。期间 37 次 `request/header` **step 恒为 1**。
+
+根因：我们的 step 语义是"整段工具循环"（`_run_step` 内部反复模型↔工具），
+只有模型最终给出纯文本才回到 `run_turn` 外层 claim；而 harness 的
+`core/agent-loop/src/agent.ts` 里 `step()` **发完一次请求、执行完这次的工具
+调用就 return**（唯一 `continue` 是 `request_error` 重试），工具循环由 turn
+循环驱动，**每轮回到顶部重新 claim**。于是 harness 的插队在一个模型往返内被
+吸收，我们的要等整段自主运行结束。
+
+修法（`loop.py`，语义变化大、代码很小）：
+- `_run_step` 执行完工具调用后 `return None`（"本步到此为止，工具结果留给下
+  一个 step 回送"），内层 while 只保留 retry 路径
+- `run_turn`：`end_reason` 可空（None = 工具循环还在继续），每轮都 claim；
+  已收尾且无新插队 → 结束；工具循环未完时即使 claim 为空也继续发下一次请求
+- max-tokens 粘性保持；blocked/aborted/error 语义不变
+
+顺带收益：插队延迟从"整段工具循环"降到"一次模型往返"；停止更及时；将来
+guard（重复工具提醒 / 单次调用超时）有了天然的每请求卡点。
+代价：日志事件更细（`step/start` 与 `request/header` 现在 1:1）。
+
+测试：新增 `test_steer_absorbed_at_next_request_inside_tool_loop`——模型连续
+三轮调用工具，中途插队；断言**第 2 次请求的 messages 里就有插队文本**
+（旧实现要等到第 5 次，即工具循环跑完）。已验证该测试在旧代码上失败。
+
+未做（harness 有、我们没有）：`agent/turn-stopping` 钩子、工具结果带
+`concludesTurn` 提前收尾。
+
 ### 待处理消息：分区渲染 + 提交回显 + 队列动作（对齐 DSH，已完成）
 
 插队消息要等 step 边界 claim 才落 `user/message`（实测延迟 890~1698 个
