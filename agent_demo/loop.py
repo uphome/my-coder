@@ -15,12 +15,14 @@ import logging
 from .hooks import PreStepContext, RequestContext, RequestErrorContext
 from .llm import LlmError, LlmRequest, StreamChunk
 from .registry import ToolOutcome
+from .tools.todo import build_todo_status
 from .values import (
     Message,
     TextBlock,
     ToolCallBlock,
     create_assistant_message,
     create_tool_result_message,
+    create_user_message,
 )
 
 log = logging.getLogger('loop')
@@ -160,13 +162,20 @@ async def _run_step(agent, turn: int, step: int, assembly: dict) -> str:
         model = config.get('model') or agent.options.get('model') or (header or {}).get('model', '')
         if not provider or not model:
             raise RuntimeError('agent has no provider/model: set options or supply both via the request hook')
+        # 方案 A（agent.md §4 问题 1）：todo 状态栏——从日志 fold 现算，作为
+        # 一条 user 合成消息叠在 messages 末尾。不进日志、不进 derive_messages
+        # （历史零污染），但可重建（fold 纯函数）；无清单/全 completed 时不叠。
+        # 它不是事件，但 request/header 会把原文记下来供审计。
+        todo_status = build_todo_status(session)
+        messages = list(session.derive_messages())
+        if todo_status:
+            messages.append(create_user_message([TextBlock(text=todo_status)]))
         request = LlmRequest(
             provider=provider,
             model=model,
-            # ctx 给 live 段（todo 清单）每次请求重新折叠——规划 → 执行 → 再请求
-            # 时，system 里的清单是执行过后的最新状态
+            # system 全静态（不再含 todo live 段）：前缀缓存稳定命中
             system=agent.prompt.render(assembly, ctx={'agent': agent}),
-            messages=tuple(session.derive_messages()),
+            messages=tuple(messages),
             tools=tuple(agent.tools.schemas()),
             max_tokens=config.get('max_tokens') or agent.options.get('max_tokens'),
         )
@@ -175,6 +184,9 @@ async def _run_step(agent, turn: int, step: int, assembly: dict) -> str:
             'model': request.model,
             'system': request.system,
             'tools': [tool['name'] for tool in request.tools],
+            # 审计字段：本轮叠给模型的状态栏原文（痕迹数据，不进模型上下文）。
+            # 状态栏本身不落事件，靠这里回答"这轮模型看到了什么 todo 状态"。
+            **({'todo_status': todo_status} if todo_status else {}),
         })
         assembler = _BlockAssembler()
         try:

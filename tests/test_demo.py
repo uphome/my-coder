@@ -995,12 +995,14 @@ def test_todo_write_rejects_bad_inputs(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_todo_live_injection_across_steps(tmp_path):
-    """todo 的 live 注入在真实 loop 生效：第一步规划 → 第二步请求的 system 含清单。
+async def test_todo_status_bar_in_messages(tmp_path):
+    """方案 A：todo 状态栏从 system 迁到 messages 末尾（合成 user 消息）。
 
-    FakeLlm 两步：第一步 todo_write（规划 2 项），第二步纯文本。两步是两次
-    模型请求（loop 的 while：工具执行后回到顶部再请求）——第二步的
-    request/header system 必须含第一步写的 todo（live 段每次 render 重新折叠）。
+    FakeLlm 两步：第一步 todo_write 规划 2 项，第二步纯文本。断言：
+    - 第一步请求（规划前）：无状态栏（fold 无清单）
+    - 第二步请求（规划后）：request/header 记了 todo_status（审计字段），
+      且 system **不含** todo 清单（system 全静态）
+    - 状态栏 XML 含两项与状态
     """
     from argparse import Namespace
 
@@ -1008,7 +1010,7 @@ async def test_todo_live_injection_across_steps(tmp_path):
     from agent_demo.llm import FakeLlm
     from agent_demo.session import Session
 
-    session = Session(id='todo-live')
+    session = Session(id='todo-status')
     args = Namespace(fake=True, model='fake-model', workspace=tmp_path, hide_reasoning=False,
                      session='id', sessions=str(tmp_path), prompt='x', resume=False, verbose=False)
     llm = FakeLlm(script=[
@@ -1023,17 +1025,62 @@ async def test_todo_live_injection_across_steps(tmp_path):
         {'text': 'planned done', 'finish_reason': 'stop'},
     ])
     agent = build_agent(session, args, {'reasoning_started': False, 'request_no': 0, 'tool_no': 0})
-    agent.llm = llm  # 替换成两步脚本
+    agent.llm = llm
     agent.followup('do the multi-step work')
     await agent.when_idle()
 
-    # 两次模型请求，system 各异：第二次必须带第一次规划的 todo 清单
-    systems = [e.data['system'] for e in session.events if e.type == 'request/header']
-    assert len(systems) == 2, f'expected 2 model requests, got {len(systems)}'
-    assert 'step one' not in systems[0]          # 规划前：无清单
-    assert 'Current todo list' in systems[1]      # 规划后：live 段注入
-    assert 'step one=in_progress' in systems[1] or 'step one' in systems[1]
-    assert 'step two' in systems[1]
+    headers = [e.data for e in session.events if e.type == 'request/header']
+    assert len(headers) == 2, f'expected 2 model requests, got {len(headers)}'
+
+    # 规划前：无状态栏
+    assert 'todo_status' not in headers[0]
+    # system 里不再有 todo 清单（方案 A：system 全静态）
+    assert 'step one' not in headers[0]['system']
+    assert 'todo:state' not in headers[0]['system']
+
+    # 规划后：audit 字段带 XML 状态栏；system 仍不含清单
+    status = headers[1].get('todo_status')
+    assert status is not None, 'second request must carry todo_status audit field'
+    assert status.startswith('<todo_status>') and status.endswith('</todo_status>')
+    assert '[in_progress] step one' in status
+    assert '[pending] step two' in status
+    assert 'step one' not in headers[1]['system']      # system 保持静态
+
+    # 每轮都叠（第二轮也带了）；且 derive_messages 里没有状态栏（历史零污染）
+    derived_texts = []
+    for message in session.derive_messages():
+        for block in message.content:
+            if getattr(block, 'type', '') == 'text':
+                derived_texts.append(block.text)
+    assert not any('todo_status' in text for text in derived_texts)
+
+
+def test_todo_status_bar_absent_cases(tmp_path):
+    """build_todo_status 的不叠条件：无清单 / 全 completed → None。"""
+    from agent_demo.session import Session
+    from agent_demo.tools.todo import build_todo_status
+
+    session = Session(id='status-absent')
+    assert build_todo_status(session) is None          # 从未写过
+
+    session.append('todo/write', {'todos': [
+        {'content': 'a', 'status': 'pending'},
+        {'content': 'b', 'status': 'in_progress'},
+    ]})
+    status = build_todo_status(session)
+    assert status is not None
+    assert '<todo_status>' in status and '1. [pending] a' in status
+
+    # 全部 completed → 收尾，状态栏关闭
+    session.append('todo/write', {'todos': [
+        {'content': 'a', 'status': 'completed'},
+        {'content': 'b', 'status': 'completed'},
+    ]})
+    assert build_todo_status(session) is None
+
+    # 空清单 → 也不叠
+    session.append('todo/write', {'todos': []})
+    assert build_todo_status(session) is None
 
 
 def test_skill_catalog_scan_and_format(tmp_path, capsys):

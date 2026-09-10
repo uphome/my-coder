@@ -17,7 +17,6 @@ from .prompt import PromptRegistry
 from .session import Session
 from .skills import format_catalog, scan_skills
 from .tools import build_tools
-from .tools.todo import all_completed, fold_todos
 from .ui import render_event
 
 
@@ -35,34 +34,17 @@ def load_env(path: Path) -> None:
             os.environ[key] = value.strip()
 
 
-def _todo_context(session) -> str:
-    """当前 todo 清单 → prompt 文本（无清单返回空，render 自动省略该段）。
-
-    fold_todos 折叠日志里最后一次 todo/write 快照——todo 是"模型跨回合的
-    记忆锚点"：建了清单就跨回合持续（turn/start 不清空），后续回合从
-    上下文看到自己进行到哪。清单全部 completed（任务收尾）后不再注入
-    ——任务已结束，无需模型继续跟踪；新任务由新一轮 todo_write 重建。
-    空清单不占 token。
-    """
-    todos = fold_todos(session)
-    if not todos or all_completed(todos):
-        return ''
-    lines = [f'  {i}. [{t.get("status", "pending")}] {t.get("content", "")}'
-             for i, t in enumerate(todos, start=1)]
-    return 'Current todo list (rewrite it with todo_write to update):\n' + '\n'.join(lines)
-
-
 def build_agent(session: Session, args, ui_state: dict, hooks=None) -> Agent:
     prompt = PromptRegistry()
     prompt.section('identity', -100, 'You are {{model}}, a coding agent that helps with programming tasks. Read, search, edit, and run commands in the workspace to help the user — verify your work instead of guessing. Never claim to be a different AI model or company than {{model}}; if asked, state the model name exactly as given here.')
     prompt.section('persona', 0, 'You run on the {{model}} model. Your workspace is {{workspace}}; tool paths resolve relative to it, and nothing outside it is readable or writable.\nVerify work by running code or tests. Keep answers brief.')
-    # skill:catalog：可用技能目录（静态，order 95 < todo:state 的 100——目录必须
-    # 在动态 live 段之前，处于缓存稳定前缀，不被 todo 变化拖累；落地规则见
-    # AGENTS.md 约定节）。build_agent 时扫一次：技能文件会话内不变 → 目录字节
-    # 稳定。只放 name+description+路径，正文绝不进 system（模型按需 read_file）。
+    # skill:catalog：可用技能目录（静态）。build_agent 时扫一次：技能文件会话内
+    # 不变 → 目录字节稳定，处于 system 的缓存稳定前缀。只放 name+description+
+    # 路径，正文绝不进 system（模型按需 read_file）。
+    # 注意：todo 不在这里——它是 messages 末尾的合成状态栏（loop 每轮从日志
+    # fold 现算，见 tools/todo.build_todo_status），system 保持全静态。
     _skill_catalog = format_catalog(scan_skills(args.workspace / 'skills'), args.workspace)
     prompt.section('skill:catalog', 95, _skill_catalog)
-    prompt.section('todo:state', 100, lambda ctx: _todo_context(ctx['agent'].session))
     prompt.section('tool:todo', 110, 'Use todo_write to plan multi-step work before you start.')
     prompt.section('tool:bash', 105, 'Use bash to verify work (run tests, git status). Output is capped: redirect large outputs to a file and read it with read_file. In this repo run tests with "conda run -n agent-demo python -m pytest -q".')
     prompt.variable('model', lambda ctx: ctx['agent'].options.get('model', ''))
