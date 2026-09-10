@@ -817,22 +817,34 @@ function mountUser(node) {
   row.appendChild(bubble);
   messagesEl.appendChild(row);
   node.bubbleEl = bubble;   // 供认领转正时去掉 pending 标记
+  node.rowEl = row;         // 供位置锚点用（插队前请求的节点要插到它之前）
   stickIfNeeded();
 }
+
+/* 插队位置锚点：插队那一刻"当前请求"的 (turn, step) + 气泡 DOM。
+   用途见 liveAssistantFor——插队前的请求若尚未建节点（request_start 刚关掉
+   上一个、模型还没输出第一个 chunk），其后新建的节点要插到气泡**之前**。 */
+let pendingAnchor = null;
 
 /* 插队乐观渲染：立即画"待处理"气泡（后端 user_message 帧按 id 认领转正）。
    与帧驱动路径同形：也是 nodes 里的一个 user 节点，只是先于日志出现——
    帧到达时认领它而不是重复画（nodes 仍是唯一事实源）。
 
-   **不关闭当前 assistant**（关键）：插队消息要等当前 step 跑完才 claim，此前
-   当前 step 的剩余 chunk 还会到达——它们属于插队**之前**那次输出，必须继续
-   追加到原节点（排在气泡之上）。若这里 closeLiveAssistant，后续 chunk 会
-   liveAssistantFor 新建节点并 append 到气泡**之后**，气泡就被夹在中间、
-   位置看着"往上跑"（实测 bug）。 */
+   **不关闭当前 assistant**：插队消息要等当前 step 跑完才 claim，此前当前
+   step 的剩余 chunk 还会到达——它们属于插队**之前**那次输出，必须排在气泡
+   之上。若这里 closeLiveAssistant，后续 chunk 会新建节点 append 到气泡之
+   后，气泡被夹在中间（实测 bug）。
+
+   另设位置锚点：若插队时当前请求还没有 assistant 节点（典型：request_start
+   刚关闭上一个、模型尚未输出），后到的 chunk 新建节点时必须插到气泡之前
+   （见 liveAssistantFor），否则插队前的输出会掉到气泡下方。 */
 function mountPendingUser(text, messageId) {
   const node = { kind: 'user', turn: lastUserTurn, text, pending: true, messageId };
   nodes.push(node);
   mountUser(node);
+  pendingAnchor = curRequest
+    ? { turn: curRequest.turn, step: curRequest.step, rowEl: node.rowEl }
+    : null;
 }
 /* 认领：后端帧带 message_id 到达时，把对应的 pending 节点转正（不重画）。
    返回 true = 已认领（调用方不再新建气泡）。 */
@@ -1291,6 +1303,8 @@ function renderHistory(history) {
   lastTurnShown = null;
   lastUserTurn = null;
   liveAsst = null;   // 历史全量渲染：不再有实时打开的 assistant
+  pendingAnchor = null;   // 插队位置锚点引用的是旧 DOM，重建后失效
+  curRequest = null;
   let lastAsst = null;   // 历史构建期"最近的 assistant 节点"（tool_result 配对用）
   for (const m of history) {
     if (m.role === 'user') {
@@ -1454,6 +1468,7 @@ async function newSession() {
    chunk/reasoning/tool_call 自带 turn+step（后端已透传）；tool_result 无
    key → 挂当前打开的 assistant（它紧跟在发出调用的 step 后）。 */
 let liveAsst = null;      // 实时流当前打开的 assistant 节点（渲染缓存挂 node）
+let curRequest = null;    // 最近 request_start 的 {turn, step}（插队锚点用）
 function closeLiveAssistant() { if (liveAsst) { closeAssistantNode(liveAsst); liveAsst = null; } }
 function liveAssistantFor(turn, step) {
   if (liveAsst && liveAsst.liveTurn === turn && liveAsst.liveStep === step) return liveAsst;
@@ -1462,6 +1477,13 @@ function liveAssistantFor(turn, step) {
                  liveTurn: turn, liveStep: step };
   nodes.push(node);
   mountAssistant(node);
+  // 插队位置锚点命中：这个节点属于"插队那一刻正在进行的请求"（插队前的输出），
+  // 要插到待处理气泡**之前**——否则它会 append 到气泡之后，插队前的输出
+  // 看起来排在插队消息下面（实测 bug）。
+  if (pendingAnchor && pendingAnchor.turn === turn && pendingAnchor.step === step
+      && pendingAnchor.rowEl && pendingAnchor.rowEl.parentNode === messagesEl) {
+    messagesEl.insertBefore(node.box, pendingAnchor.rowEl);
+  }
   liveAsst = node;
   return node;
 }
@@ -1473,6 +1495,10 @@ function applyFrame(payload) {
       // liveAssistantFor 新建节点（思维链/文本/工具按"每次请求"分开）。
       // 工具调用与结果留在发起它的节点（工具执行完才发下一个 request_start）。
       closeLiveAssistant();
+      // 新请求开始 = 之前的插队锚点已失效（插队前的那个请求已收尾）：
+      // 它之后的输出属于插队响应，应正常排在气泡之后。
+      curRequest = { turn: payload.turn, step: payload.step };
+      pendingAnchor = null;
       break;
     }
     case 'chunk': {
