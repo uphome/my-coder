@@ -350,7 +350,7 @@ turn/step 序号、step/start、todo 痕迹都是**模型不可见的痕迹事�
 验证留给用户决定"）。DSH/opencode/PI 是否有对应的收敛机制待查（可作下一轮
 讨论的 codegraph 调研目标）。
 
-## 5. 待处理消息怎么显示：队列区（QueueDock）——2026-09 已定稿并落地
+## 5. 待处理消息怎么显示：分区渲染 + 提交回显——2026-09 已定稿并落地
 
 ### 5.1 问题：插队消息没有"位置"
 
@@ -361,26 +361,51 @@ turn/step 序号、step/start、todo 痕迹都是**模型不可见的痕迹事�
 （气泡被后续输出挤到中间/下方），见 `mountPendingUser`/`pendingAnchor` 两次
 修 bug 的记录（提交 `8b17c24`、`00533de`）。
 
-### 5.2 DSH 的做法（codegraph 实测源码）
+### 5.2 DSH 的做法（2026-09 读源码实测）
 
-- `packages/client/ui-conversation/src/client/queue/QueueDock.tsx`：队列条挂在
-  composer 的 `conversation.input.dock` slot（`order: 20`），**待处理消息从不
-  画进消息流**。
-- 数据：`rowCount === 0` 不渲染；单条直接一行（无头部）；多条给可折叠的
-  计数头部（默认收起）。行内 `placement` 区分 `queued`（普通排队）与
-  `steering`（插队 pending-steering）。
-- 操作（`conversation.updateQueue(itemId, action)`）：`edit` / `remove` /
-  `steer`（把排队项提升为插队项）。
-- 本地回显：`PendingSubmission`（`session.beginSubmission`）——提交在途时先
-  显示，`rpcId` 与 admission 后的真实行去重，"observed 退休"后撤掉。
-- 另有 e2e 场景 `apps/web/tests/steering.e2e.ts`（"QueueDock strictly …"）
-  把"两种 steer 入口都只进 QueueDock"当作不变式断言。
+**⚠️ 先纠正一个流传过的错误结论**："DSH 从不把待处理消息画进消息流"——**只对
+`queued` 成立**。真实的三分法（`placement` 决定渲染面）：
 
-### 5.3 本仓库落地方案（已实现）
+| placement | 渲染在哪 | 证据 |
+|---|---|---|
+| `transcript`（idle 发送的回显） | 消息流尾部（普通气泡） | `ChatView.tsx` 的 `visibleSubmissions` |
+| `steering`（next-step 插队） | **消息流尾部** + `data-pending-steering` 标记 | `ChatView.tsx:284,802`（`pendingSteering = inbox.filter(placement==='steering')` → `PendingSteeringBubble`）、`MessageItem.tsx:174,200` |
+| `queued`（next-turn 排队） | QueueDock（composer 上方 `conversation.input.dock` slot，`order: 20`） | `QueueDock.tsx:66,70`（只取 `placement==='queued'`） |
 
-- **不进消息流**：未 claim 的消息一律画在输入框上方的 `#queue-dock`
-  （`web/index.html`），claim 落 `user/message` 后由帧移出、气泡进流。
-  位置问题从"猜锚点"变成"不存在"——这正是 DSH 绕开的坑。
+所以"位置 bug"的正解不是"不画"，而是**恒定贴尾**：插队消息马上要进对话，
+它就该是一条贴尾的 pending 气泡；claim 之后 durable 节点落到自己真正的 seq
+位置，交接时旧的那条消失。
+
+### 5.3 三个配套机制（DSH 源码对照）
+
+1. **`SessionQueuedItem{id, placement, rpcId?, message}`**——队列项是会话层
+   快照（`SessionSnapshot['queue']`）的一部分，不是渲染层算出来的。
+2. **`PendingSubmission`（本地提交回显）**——`session.beginSubmission({mode,
+   text, images})` 在序列化/发请求**之前**同步登记：铸 `requestId =
+   randomUUID()`，placement 当场定（`running` 为假 → `transcript`；为真且
+   `mode==='steer'` → `steering`；否则 `queued`）。`prompt(content, mode,
+   signal, requestId)` 把身份带上；Host 回显进 durable `user source.rpcId`，
+   队列 occurrence 也投影成 `SessionQueuedItem.rpcId`。
+   **退休**走单一出口 `finishSubmission`：`observed`（看到 durable 事件/队列项）
+   → **延后一个动画帧**退休（保证替代内容就绪前回显仍可渲染）；`failed`
+   （被拒/放弃/销毁）→ 立即退休；`onRetire` 恰好触发一次。
+   `observedRpcIds()`（durable 节点 source.rpcId + 队列项 rpcId）让回显在
+   **同一次渲染**里消失——交接原子，不重复也不留空档。回显只活在客户端内存，
+   刷新/重连只从 durable 事件重建。
+3. **`QueueAction`**（`packages/api/session-controller/src/types.ts:148`）：
+   `{kind:'edit', content} | {kind:'remove'} | {kind:'steer'}`，入口
+   `session.updateQueue(itemId, action)`。UI 三件：行内编辑、删除、
+   "提升为插队"。另有 `steerQueue()`（`input/hub.ts:198`，绑 Cmd/Ctrl+Enter
+   "插话发送全部排队消息"）把整队 `queued` 逐条 `{kind:'steer'}`；
+   `session/queue-item-not-found` 静默收敛（行可能已被 host 处理），
+   `session/steer-unavailable` 直接返回。
+
+### 5.4 本仓库落地方案（已实现）
+
+- **分区渲染**：`placement='queued'` → 输入框上方 `#queue-dock`；
+  `placement='steering'` → 消息流尾部 `#messages > .flow-tail` 的 pending
+  气泡（`.msg.user.pending-steering` + "插队 · 待处理"标记）。尾部容器在
+  每次挂载节点后 `renderFlowTail()` 重新 append，永远保持最后一个子节点。
 - **队列是状态层投影**：`Inbox.queued_items()` 折重放结果产出
   `QueuedItem(placement, message)`（next-turn→`queued`、next-step→`steering`），
   和 `Session.derive_messages()` 并列——都是"日志 → 不可变投影"。和 todo 一样
@@ -390,22 +415,34 @@ turn/step 序号、step/start、todo 痕迹都是**模型不可见的痕迹事�
     （`Inbox._apply` 一份、web 一份），语义一变就分叉；② 投影绑死在 Web
     宿主上（CLI、测试都拿不到，测试要绕过 web 模块才测得到）。现在折叠只有
     一份，web 层只把值对象摊平成 JSON。
-  - DSH 的对应物是会话层的 `SessionSnapshot['queue']`（快照的一部分），
-    不是渲染层自己算的。
+  - `QueuedItem.rpc_id` 取自 `message.source`（不另存副本）：同一条消息在
+    "队列项"与"durable 消息"两个形态下带的是**同一个提交身份**。
+- **提交身份 `rpc_id`**：前端 `beginSubmission()` 铸 uuid（`crypto.randomUUID`
+  缺失时退化计数器）→ `/chat`、`/steer` 带 `request_id` → `UserSource.rpc_id`
+  落进 durable 消息（JSONL 里 `{'$user': '<rpc_id>'}`，旧格式 `true` 兼容读）
+  → 队列项与 `user_message` 帧都带出来。前端 `visibleSubmissions()` 用
+  `observedRpcIds()` 过滤，`finishSubmission(id, 'observed')` 延后一帧真删，
+  `'failed'` 立即删。
 - **三条推送通道**（幂等，互为兜底）：
   1. SSE `queue_update` 帧（`agent/inbox/spliced` → 全量快照）
-  2. `POST /steer` 响应带 `queue`（**splice 先于响应**，所以响应快照已含刚入队
-     的那条，前端不需要按 id 去重）
-  3. `/history` 与 `/sessions/*/switch`、`/sessions/new` 带 `queue`（刷新/切会话恢复）
-- **本地在途回显**（对齐 `PendingSubmission`）：POST 未返回时先在队列区放一条
-  `发送中`（`.queue-item.sending`），请求收尾统一撤掉；成功则服务端快照无缝
-  接上，失败则连回显一起消失 + 文本回填输入框 + 输入行上方红字提示。
-- **撤回**（对齐 QueueDock 的 `remove`）：`POST /queue/remove` →
-  `Inbox.remove(id)`（内部仍走 `_splice`，先落 `agent/inbox/spliced`
-  `outcome='canceled'` 再改内存）。未 claim 的消息没有 surface，撤回后日志只
-  剩这条痕迹，模型记忆干净。已 claim 的返回 `ok=False`（那种"撤回"得新开回合
-  纠正）。**未移植**：`edit`（改待处理消息文本）与 `steer`（排队项提升为插队项）。
+  2. `POST /steer` 响应带 `queue`
+  3. `/history` 与 `/sessions/*/switch`、`/sessions/new` 带 `queue`
+- **队列动作**：`POST /queue/update {item_id, action}` → `Agent.update_queue`，
+  返回状态码与 DSH 的错误码同名：`ok` / `queue-item-not-found`（并发收敛，
+  HTTP 仍 200）/ `steer-unavailable`（空闲时不能提升，没有"下一步"）/
+  `unknown-action`。状态层原语是 `Inbox.edit`（同 id 原地换文案，一次原子
+  splice）/ `Inbox.promote`（two-splice 搬家，摘除那步 `discard=False`——
+  搬家不是丢弃）/ `Inbox.remove`（`outcome='canceled'`）。
+  前端行内：✎ 编辑（就地输入框，Enter 保存 / Esc 取消 / 失焦保存）、
+  × 撤回、↥ 提升（仅运行中）；多条时头部有"全部插队"按钮，草稿为空 +
+  运行中 + 有排队项时 `Ctrl/Cmd+Enter` 也能整队插队。
+- **两处有意的差异**（本仓库多给的，记在这里免得当成漏做）：
+  1. DSH 的 `edit` 带 `content: ContentBlock[]`，我们只有文本框，收 `text`；
+  2. DSH 的 pending-steering 气泡只有复制类图标动作，我们额外给了 × 撤回。
 - **兜底对账**：回合收尾（正常结束/停止/断开）后 `refreshQueue()` 拉一次
   `/history` 快照——取消时服务端清空 inbox 的 spliced 事件推给了已关闭的流，
   没人读。
+- **渲染合并**：同一事件批次里可能连推多条 `queue_update`（普通发送是
+  「入队 queued → 第一步立刻 claim 空」），合并到微任务末尾只画最终态，
+  所以"发出即被认领"的消息不会闪一下。
 

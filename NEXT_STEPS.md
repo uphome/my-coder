@@ -287,26 +287,28 @@ Web 端原先是**全局单例**：`_session/_agent/_current_sid` 指向"当前�
 （`③ 跳过`、`② 收敛`），全程无第二个回合，`reason=completed`——插队是
 "下一步批量吸收并重新规划"，不是生硬打断。
 
-### 待处理消息显示：队列区（对齐 DSH QueueDock，已完成）
+### 待处理消息：分区渲染 + 提交回显 + 队列动作（对齐 DSH，已完成）
 
 插队消息要等 step 边界 claim 才落 `user/message`（实测延迟 890~1698 个
-事件），这段半开窗口里把它当乐观气泡插进消息流靠 `(turn,step)` 锚点猜顺序，
-位置反复出错（两次修 bug：`8b17c24`/`00533de`）。改为 DSH 式队列区：
+事件），这段半开窗口里把它当乐观气泡往流中间插，靠 `(turn,step)` 锚点猜顺序，
+位置反复出错（两次修 bug：`8b17c24`/`00533de`）。读 DSH 源码后定案并落地：
 
-- 后端：`Inbox.queued_items()` 在**状态层**折重放结果产出
-  `QueuedItem(placement, message)`（与 `Session.derive_messages()` 并列的
-  投影）；SSE 新增 `queue_update` 帧，`/steer`、`/history`、
-  `/sessions/*/switch|new` 响应都带 `queue`（`web_app._queue_rows(agent)`
-  只做序列化）；新增 `POST /queue/remove` → `Inbox.remove(id)`（未 claim 的
-  消息没有 surface，撤回是干净的）
-- 前端：输入框上方 `#queue-dock`（单条一行无头部 / 多条可折叠计数头 /
-  placement 徽标 / × 撤回 / POST 在途"发送中"回显）；claim 帧到达即移出、
-  气泡进流；回合收尾 `refreshQueue()` 对账（停止/断开时服务端清空 inbox 的
-  事件推给了已关闭的流）
-- 测试：pytest 75（新增 `Inbox.queued_items()` 投影/重放一致性、
-  `_queue_rows` 序列化、`/queue/remove` 语义、`queue_update` 帧序列）
-  \+ jsdom 无头 33 项 DOM 断言（显示/隐藏、徽标、回显转正、claim 移出、
-  折叠、撤回、失败回填、history 恢复、同批次快照只画最终态）
+- **勘误**：DSH 并非"待处理消息一律不进消息流"——只有 `placement='queued'`
+  （next-turn）进 QueueDock；`placement='steering'`（next-step）**画在消息流
+  尾部**（`ChatView.tsx` 的 `pendingSteering` → `PendingSteeringBubble` →
+  `data-pending-steering`）。所以正解是**恒定贴尾**，不是"不画"
+- 后端：`Inbox.queued_items()` 在状态层投影 `QueuedItem(placement, message)`；
+  提交身份 `rpc_id` 落进 `UserSource`（`/chat`、`/steer` 收 `request_id`）；
+  SSE `queue_update` 帧 + `user_message` 帧带 `rpc_id`；`/history`、
+  `/sessions/*/switch|new` 带 `queue`；新增 `POST /queue/update`
+  （`edit` / `remove` / `steer`，状态码与 DSH 错误码同名）
+- 前端：`queued` → `#queue-dock`（计数头 / 折叠 / ✎ 编辑 / × 撤回 / ↥ 提升 /
+  "全部插队" + Ctrl+Enter）；`steering` + 本地回显 → `#messages > .flow-tail`
+  pending 气泡；`pendingSubmissions` 生命周期（登记 → 渲染 → 按 rpc_id 原子
+  交接 → observed 延后一帧退休 / failed 立即退休）
+- 测试：pytest 76（新增队列三动作与重放、`/queue/update` 语义、rpc_id 全链路、
+  `queue_update` 帧序列）+ jsdom 无头 47 项 DOM 断言（两区域分区、折叠、编辑、
+  提升、撤回、整队插队快捷键、回显交接、失败回填、无脚本错误）
 
 ## Web 前端统一消息投影（已完成）
 

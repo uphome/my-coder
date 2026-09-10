@@ -2207,14 +2207,17 @@ async def test_steer_while_running_becomes_next_step_of_same_turn():
     assert agent.status == 'idle'
 
 
-def test_web_queue_remove_endpoint(tmp_path):
-    """POST /queue/remove：撤回还没轮到的消息（队列区 × 按钮）。
+def test_web_queue_actions_endpoint(tmp_path):
+    """POST /queue/update：队列项操作（对齐 DSH 的 updateQueue(itemId, action)）。
 
-    两个语义要守住：
-    - 撤回后队列区快照为空，且日志里没有产生 user/message surface——
+    三种动作与两个语义要守住：
+    - remove：队列区快照为空，且日志里没有产生 user/message surface——
       这条消息从未成为模型可见的输入（"没有状态不进日志"的逆向：撤回
       只留 spliced 痕迹）
-    - 已 claim（已进消息流）的撤回返回 ok=False，前端据此提示"改不了"
+    - edit：就地改写还没 claim 的消息（同 id 换文案），同样不产生 surface
+    - steer：next-turn → next-step 的搬家（空闲时拒绝：没有"下一步"）
+    - 已 claim（已进消息流）的操作返回 ok=False + queue-item-not-found，
+      这是并发下的**正常收敛**而不是错误（HTTP 仍 200）
     """
     from fastapi.testclient import TestClient
 
@@ -2223,6 +2226,12 @@ def test_web_queue_remove_endpoint(tmp_path):
     web_app.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
     client = TestClient(web_app.app)
     seat = web_app._seats['web']
+
+    def update(item_id, action):
+        resp = client.post('/queue/update',
+                           json={'item_id': item_id, 'action': action, 'sid': 'web'})
+        assert resp.status_code == 200, resp.text
+        return resp.json()
 
     # 直接入队一条（wakeup=False：不真跑回合）：模拟"已发出、还没轮到"
     message = create_user_message([TextBlock(text='这条还没轮到')])
@@ -2238,19 +2247,64 @@ def test_web_queue_remove_endpoint(tmp_path):
     switched = client.post('/sessions/web/switch').json()
     assert [r['id'] for r in switched['queue']] == [queued_id]
 
-    resp = client.post('/queue/remove', json={'message_id': queued_id, 'sid': 'web'})
-    assert resp.status_code == 200
-    assert resp.json() == {'ok': True, 'sid': 'web', 'queue': []}
+    resp = client.post('/queue/update',
+                       json={'item_id': queued_id, 'action': {'kind': 'remove'}, 'sid': 'web'})
+    assert resp.json() == {'ok': True, 'code': 'ok', 'sid': 'web', 'queue': []}
     assert not seat.agent.inbox.has_pending
     assert not [e for e in seat.session.events if e.type == 'user/message']
 
-    # 已认领的消息撤不回来
-    assert client.post('/queue/remove',
-                       json={'message_id': queued_id, 'sid': 'web'}).json()['ok'] is False
-    # 校验：缺 id 400 / 会话不存在 404
-    assert client.post('/queue/remove', json={'message_id': '  '}).status_code == 400
-    assert client.post('/queue/remove',
-                       json={'message_id': 'x', 'sid': 'nope'}).status_code == 404
+    # 已认领/已消失的项：ok=False + 并发收敛码（HTTP 仍 200）
+    gone = update(queued_id, {'kind': 'remove'})
+    assert gone['ok'] is False and gone['code'] == 'queue-item-not-found'
+    # 校验：缺 item_id / 动作词表外 / 空编辑 / 会话不存在
+    assert client.post('/queue/update', json={'action': {'kind': 'remove'}}).status_code == 400
+    assert client.post('/queue/update',
+                       json={'item_id': 'x', 'action': {'kind': 'nope'}}).status_code == 400
+    assert client.post('/queue/update',
+                       json={'item_id': 'x', 'action': {'kind': 'edit', 'text': ' '}}).status_code == 400
+    assert client.post('/queue/update',
+                       json={'item_id': 'x', 'action': {'kind': 'remove'},
+                             'sid': 'nope'}).status_code == 404
+
+
+def test_inbox_queue_actions_edit_and_promote():
+    """状态层的三个队列动作：edit（同 id 换文案）/ promote（搬家）/ remove。
+
+    edit 的安全性来自"还没 claim 就没有 surface"：改的只是将要成为模型输入的
+    内容，日志里只有 spliced 痕迹。promote 是 next-turn → next-step 的搬家，
+    两步各自落账、可重放。
+    """
+    session = Session(id='s')
+    inbox = Inbox(session)
+    queued = create_user_message([TextBlock(text='先写个草稿')])
+    inbox.append('next-turn', queued)
+
+    assert inbox.edit(queued.id, '改成：直接给结论') is True
+    items = inbox.queued_items()
+    assert items[0].id == queued.id                      # 身份不变（前端那行不闪）
+    assert items[0].message.content[0].text == '改成：直接给结论'
+    # 一次原子改动（replace 而不是"删+插"两条事件）
+    splices = [e for e in session.events if e.type == 'agent/inbox/spliced']
+    assert len(splices) == 2 and splices[-1].data['removed_count'] == 1
+    assert splices[-1].data['inserted'][0].id == queued.id
+
+    assert inbox.promote(queued.id) is True              # queued → steering
+    assert [i.placement for i in inbox.queued_items()] == ['steering']
+    assert inbox.promote(queued.id) is False             # 已经在 next-step：幂等无变化
+    # 搬家 = 两次 splice（先摘后插）；摘除那步 discard=False：这不是丢弃，
+    # 不该标 outcome='canceled'（那个标记专给撤回）
+    moves = [e for e in session.events if e.type == 'agent/inbox/spliced'][2:]
+    assert len(moves) == 2
+    assert moves[0].data['target'] == 'next-turn' and moves[0].data['removed_count'] == 1
+    assert moves[0].data.get('outcome') is None
+    assert moves[1].data['target'] == 'next-step' and moves[1].data['inserted'][0].id == queued.id
+
+    replayed = Inbox(session).queued_items()             # 重放：编辑与搬家都在
+    assert replayed == inbox.queued_items()
+    assert replayed[0].message.content[0].text == '改成：直接给结论'
+
+    assert inbox.edit('nope', 'x') is False
+    assert inbox.promote('nope') is False
 
 
 def test_inbox_queued_items_is_a_session_projection():
@@ -2381,7 +2435,8 @@ async def test_web_steer_interrupts_open_sse_stream(tmp_path):
         async def read_sse() -> str:
             parts = []
             async with client.stream('POST', '/chat',
-                                     json={'message': '首问', 'sid': 'web'}) as resp:
+                                     json={'message': '首问', 'sid': 'web',
+                                           'request_id': 'rpc-first'}) as resp:
                 assert resp.status_code == 200
                 async for chunk in resp.aiter_text():
                     parts.append(chunk)
@@ -2389,15 +2444,18 @@ async def test_web_steer_interrupts_open_sse_stream(tmp_path):
 
         reader = asyncio.create_task(read_sse())
         await llm.started.wait()                      # 回合真的挂起在 LLM 里
-        steer_resp = await client.post('/steer', json={'message': '停一下改方向', 'sid': 'web'})
+        steer_resp = await client.post(
+            '/steer', json={'message': '停一下改方向', 'sid': 'web',
+                            'request_id': 'rpc-steer'})
         assert steer_resp.status_code == 200
         assert steer_resp.json()['queued'] == 'next-step'
-        # 返回 message_id + 队列快照：前端据此在队列区显示"已发出、还没轮到"
+        # 返回 message_id + 队列快照：前端据此在消息流尾部画"待处理插队"气泡
         steer_id = steer_resp.json().get('message_id')
         assert steer_id, 'steer must return the queued message id'
         queued = steer_resp.json()['queue']
-        assert [(r['id'], r['text'], r['placement']) for r in queued] == [
-            (steer_id, '停一下改方向', 'steering')]
+        # rpc_id 随消息 source 一起投影出来：前端靠它把本地回显原子换成真身
+        assert [(r['id'], r['text'], r['placement'], r['rpc_id']) for r in queued] == [
+            (steer_id, '停一下改方向', 'steering', 'rpc-steer')]
         llm.release.set()                             # 放行：第一步完成，下一步轮到插队
         sse = await asyncio.wait_for(reader, timeout=10)
 
@@ -2406,12 +2464,22 @@ async def test_web_steer_interrupts_open_sse_stream(tmp_path):
     assert '插队后回答' in sse
     assert sse.count('"type": "turn_end"') == 1       # 一个回合结束 = 插队没开新回合
     # 认领链路：插队消息的 user_message 帧带 /steer 返回的同一个 message_id
-    # （前端据此把它从队列区移进消息流，不重复画）
+    # 与提交身份 rpc_id（前端据此在**同一次渲染**里把本地回显换成真身）
     steer_frames = [f for f in sse.split('data: ')
                     if '"user_message"' in f and '停一下改方向' in f]
     assert steer_frames, 'steer message must be pushed as a user_message frame'
     steer_frame = json.loads(steer_frames[0].split('\n\n')[0])
     assert steer_frame['message_id'] == steer_id
+    assert steer_frame['rpc_id'] == 'rpc-steer'
+    # 首问那条也带自己的提交身份（idle 发送的回显同样要能交接）
+    first_frames = [f for f in sse.split('data: ')
+                    if '"user_message"' in f and '首问' in f]
+    assert json.loads(first_frames[0].split('\n\n')[0])['rpc_id'] == 'rpc-first'
+    # durable 消息 source 上落了提交身份（重放/历史都能认出来）
+    sources = {e.data.content[0].text: e.data.source
+               for e in seat.session.events if e.type == 'user/message'}
+    assert sources['首问'].rpc_id == 'rpc-first'
+    assert sources['停一下改方向'].rpc_id == 'rpc-steer'
     # 队列区通道：入队（spliced）推一条含插队消息的快照，claim 后再推一条空快照
     queue_frames = [json.loads(f.split('\n\n')[0]) for f in sse.split('data: ')
                     if '"queue_update"' in f]

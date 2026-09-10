@@ -17,7 +17,7 @@ from .loop import run_turn
 from .prompt import PromptRegistry
 from .registry import ToolRegistry
 from .session import Session
-from .values import Message, TextBlock, create_user_message
+from .values import Message, TextBlock, UserSource, create_user_message
 
 log = logging.getLogger('agent')
 
@@ -89,18 +89,24 @@ class Agent:
         """对外暴露的两态状态：idle / running。"""
         return 'idle' if self.phase == 'idle' else 'running'
 
-    def followup(self, text: str) -> None:
-        """用户新输入：入队 next-turn 并唤醒（开启一个新回合）。"""
-        self.send(create_user_message([TextBlock(text=text)]), 'next-turn', wakeup=True)
+    def followup(self, text: str, rpc_id: str = '') -> str:
+        """用户新输入：入队 next-turn 并唤醒（开启一个新回合）。
 
-    def steer(self, text: str) -> str:
+        rpc_id = 前端提交身份（对齐 dsh 的 prompt requestId）：落到消息 source 上，
+        让"本地回显 → durable 消息"能对上号。返回消息 id。
+        """
+        message = create_user_message([TextBlock(text=text)], UserSource(rpc_id=rpc_id))
+        self.send(message, 'next-turn', wakeup=True)
+        return message.id
+
+    def steer(self, text: str, rpc_id: str = '') -> str:
         """插队本回合：入队 next-step 并唤醒（当前回合内即时生效）。
 
         返回消息 id：Web 端据此在队列区标记这条待处理消息（消息要等
         step 边界 claim 才落 user/message surface，不能干等）；claim 后
         SSE 帧带同一个 id，前端据此把它从队列区移进消息流。
         """
-        message = create_user_message([TextBlock(text=text)])
+        message = create_user_message([TextBlock(text=text)], UserSource(rpc_id=rpc_id))
         self.send(message, 'next-step', wakeup=True)
         return message.id
 
@@ -112,6 +118,37 @@ class Agent:
         （surface 才进），所以撤回是"干净"的。已 claim 的返回 False。
         """
         return self.inbox.remove(message_id)
+
+    def update_queue(self, message_id: str, action: str, text: str = '') -> str:
+        """队列项操作（对齐 dsh 的 `updateQueue(itemId, QueueAction)`）。
+
+        action 三选一，与 dsh 的 QueueAction.kind 同名：
+        - 'edit'   就地改写还没轮到的消息（text 是新文案；同样没进模型记忆，改是安全的）
+        - 'remove' 撤回（未 claim 的消息没有 surface，撤回不留残影）
+        - 'steer'  提升为插队：next-turn → next-step（本轮下一步就做）
+
+        返回状态码（不是 bool）——因为前端要区分三种结局，这与 dsh 的
+        RemoteResult error code 一一对应：
+        - 'ok'                 成功
+        - 'queue-item-not-found'  那条已经不在了（多半刚好被 claim 掉）——
+                                  dsh 里这种"并发已处理"是**静默收敛**，不报错
+        - 'steer-unavailable'  提升插队要求 agent 正在跑（空闲时没有"下一步"，
+                                  提升没有意义，对应 dsh 的 session/steer-unavailable）
+        - 'unknown-action'     动作词表外的值（严格校验：宁炸勿静默）
+        """
+        if action == 'edit':
+            return 'ok' if self.inbox.edit(message_id, text) else 'queue-item-not-found'
+        if action == 'remove':
+            return 'ok' if self.inbox.remove(message_id) else 'queue-item-not-found'
+        if action == 'steer':
+            # 先看那条还在不在：并发下"刚好被 claim 掉"比"agent 空闲"更准确
+            # （DSH 里排队项消失是静默收敛，不该报成不可用）
+            if not any(item.id == message_id for item in self.inbox.queued_items()):
+                return 'queue-item-not-found'
+            if self.status != 'running':
+                return 'steer-unavailable'
+            return 'ok' if self.inbox.promote(message_id) else 'queue-item-not-found'
+        return 'unknown-action'
 
     def send(self, message: Message, target: str = 'next-turn', wakeup: bool = True) -> None:
         """唯一的入队入口：消息进 inbox，然后拍一下状态机。"""

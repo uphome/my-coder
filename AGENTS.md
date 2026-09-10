@@ -9,7 +9,7 @@ Python 复刻 deepseek-harness 架构的教学 demo（agent 框架本身，不�
 # 质量门：ruff + mypy + pytest 三绿才可提交（pyproject.toml 已配好）
 conda run -n agent-demo python -m ruff check agent_demo tests
 conda run -n agent-demo python -m mypy agent_demo
-conda run -n agent-demo python -m pytest        # 75 个测试
+conda run -n agent-demo python -m pytest        # 76 个测试
 
 # CLI（可 pip install -e . 后直接 agent-demo；或模块方式跑）
 conda run --no-capture-output -n agent-demo python -m agent_demo.cli --workspace . --fake "read README.md and summarize"
@@ -59,24 +59,31 @@ conda run --no-capture-output -n agent-demo python -m agent_demo.web_app --works
     正文作为 tool/result（source.kind='tool'）进 derive_messages，与读任何
     文件机制一致（落日志可重建、可被 compaction 折叠）；**不新增 skill() 专用
     加载工具**，不搞 DSH 式注入 user 快照
-- **待处理消息（inbox 队列）的显示规则**（落地时遵循；DSH 对照与两次位置
-  bug 的复盘见 `agent.md` §5）：
-  - **未 claim 的消息绝不画进消息流**——它在日志里还没有 seq 位置，插进去
-    只能靠 `(turn, step)` 锚点猜顺序（上一版就是这么错位的）。一律画在输入框
-    上方的 `#queue-dock`；claim 落 `user/message` 后由帧移出、气泡进流
+- **待处理消息（inbox 队列）的显示与操作规则**（落地时遵循；DSH 源码对照、
+  三个配套机制与两次位置 bug 的复盘见 `agent.md` §5）：
+  - **按 placement 分区渲染，恒定贴尾**——未 claim 的消息在日志里没有 seq
+    位置，往流中间插只能靠 `(turn, step)` 锚点猜顺序（上一版就是这么错位的）：
+    - `queued`（next-turn）→ 输入框上方 `#queue-dock`
+    - `steering`（next-step）→ **消息流尾部** `#messages > .flow-tail` 的
+      pending 气泡（`.pending-steering` + 待处理标记）
+    - claim 落 `user/message` 后 durable 节点落到真实 seq 位置，尾部那条消失。
+      **注意**：DSH 里 steering 也是画在消息流尾部的（不是"不画进流"），
+      别再把这条写成"待处理消息一律不进消息流"
   - **队列是状态层投影**：`Inbox.queued_items()` 折重放结果产出
-    `QueuedItem(placement, message)`（next-turn→`queued` / next-step→
-    `steering`），和 `Session.derive_messages()` 并列；**折叠只有一份**
-    （`_apply`/`_splice` 共用 splice 语义），web/cli 等宿主只做序列化
-    （`web_app._queue_rows(agent)` 摊平成 JSON）。三条推送通道幂等：SSE
-    `queue_update` 帧、`POST /steer` 响应体、`/history` 与
-    `/sessions/*/switch|new` 响应体
-  - **撤回**：`POST /queue/remove` → `Inbox.remove(id)`，内部仍走 `_splice`
-    （先落 spliced `outcome='canceled'` 再改内存）；未 claim 的消息没有 surface，
-    撤回是干净的；已 claim 的返回 `ok=False`
-  - **前端两份队列**：`serverQueue`（服务端快照，整份替换）+
-    `localQueue`（POST 在途的"发送中"回显，请求收尾即撤）；渲染 = 两者拼接。
-    这样 SSE 帧与 HTTP 响应谁先到都不会重复或丢失
+    `QueuedItem(placement, message)`，和 `Session.derive_messages()` 并列；
+    **折叠只有一份**（`_apply`/`_splice` 共用 splice 语义），web/cli 等宿主只
+    做序列化（`web_app._queue_rows(agent)` 摊平成 JSON）
+  - **提交身份 `rpc_id`**（对齐 DSH 的 `beginSubmission`/`rpcId`）：前端提交时
+    铸 uuid 随请求上来，落到 `UserSource.rpc_id`（durable）与 `QueuedItem.rpc_id`
+    （队列项）；前端据此在同一次渲染里把本地回显换成真身（原子交接——不重复、
+    不留空档），`observed` 延后一帧真删、`failed` 立即删。回显只活在客户端内存
+  - **队列动作**：`POST /queue/update {item_id, action}`，action =
+    `edit`（同 id 原地换文案，一次原子 splice）/ `remove`（`outcome='canceled'`）
+    / `steer`（next-turn→next-step 搬家，两步 splice、摘除那步 `discard=False`）。
+    状态码与 DSH 错误码同名：`ok` / `queue-item-not-found`（并发收敛，HTTP 200）/
+    `steer-unavailable`（agent 空闲时没有"下一步"）/ `unknown-action`
+  - 三条推送通道幂等：SSE `queue_update` 帧、`POST /steer` 响应体、
+    `/history` 与 `/sessions/*/switch|new` 响应体
 
 ## 入口与工具
 

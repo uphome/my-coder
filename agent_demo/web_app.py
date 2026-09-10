@@ -387,6 +387,8 @@ def _history_payloads(session) -> list[dict]:
 
     message_to_payload 是纯消息 → dict，不知道回合；这里在构造处补上
     'turn' 字段，前端据此区分"新回合首条"与"同回合插队（steer）"。
+    user 消息再补 'rpc_id'（提交身份）：前端全量重建投影后，仍能认出
+    "这条 durable 消息就是我刚才那条回显的落地"。
     assistant 消息补 'reasoning'（该次请求的思维链，痕迹投影给人看）。
     """
     turns = _user_message_turns(session)
@@ -394,8 +396,11 @@ def _history_payloads(session) -> list[dict]:
     payloads = []
     for seq, message in _surface_with_seq(session):
         payload = message_to_payload(message)
-        if payload['role'] == 'user' and seq in turns:
-            payload['turn'] = turns[seq]
+        if payload['role'] == 'user':
+            if seq in turns:
+                payload['turn'] = turns[seq]
+            source = getattr(message, 'source', None)
+            payload['rpc_id'] = getattr(source, 'rpc_id', '')
         elif payload['role'] == 'assistant' and seq in reasoning:
             payload['reasoning'] = reasoning[seq]
         payloads.append(payload)
@@ -410,14 +415,16 @@ def _queue_rows(agent) -> list[dict]:
     "日志 → 不可变投影"。为什么不在这一层自己重放日志：web 层重放会造成
     **同一事件类型两份折叠**（Inbox._apply 一份、这里一份）必然分叉，而且
     投影被绑死在 Web 宿主上（CLI / 测试都拿不到）。所以这里只把值对象摊平成
-    JSON：id 给前端去重与撤回、text 给队列区显示、placement 给徽标。
+    JSON：id 给前端去重与操作、text 给显示、placement 给分区渲染、
+    rpc_id 给本地回显做原子交接。
 
-    未 claim 的消息**不进消息流**（对齐 DSH QueueDock）：它在日志里还没有
-    seq 位置，插进去只能靠 (turn, step) 锚点猜顺序；claim 落 user/message
-    后才由 user_message 帧移进对话。
+    分区渲染（对齐 DSH）：placement='queued' 进输入框上方的队列区；
+    placement='steering' 画在**消息流尾部**（pending 气泡 + 待处理标记）——
+    未 claim 的消息都没有 seq 位置，所以既不能插进流中间，也不能靠锚点猜。
     """
     return [
-        {'id': item.id, 'text': _first_text_of(item.message), 'placement': item.placement}
+        {'id': item.id, 'text': _first_text_of(item.message),
+         'placement': item.placement, 'rpc_id': item.rpc_id}
         for item in agent.inbox.queued_items()
     ]
 
@@ -541,11 +548,14 @@ def event_to_payload(event, session: Session | None = None, agent=None) -> dict 
         # 文本取第一条 text block；纯工具结果的 user 消息没有 text，不发帧
         # （工具结果显示由 tool/result 事件驱动）。turn 由前端用最近一次
         # turn_start 推导（user/message 事件本身不带 turn）。
-        # 带 message_id：前端据此把这条从"队列区"移进消息流（steer 插队时
-        # 它在队列区里等过 claim，靠同一个 id 对上，不重复画）。
+        # 带 message_id + rpc_id：前端据此把这个提交从"待处理"换成真身
+        # （steering 气泡在流尾就地转正、本地回显在同一次渲染里消失）。
         text = _first_text_of(event.data)
         if text:
-            return {'type': 'user_message', 'text': text, 'message_id': event.data.id}
+            source = getattr(event.data, 'source', None)
+            return {'type': 'user_message', 'text': text,
+                    'message_id': event.data.id,
+                    'rpc_id': getattr(source, 'rpc_id', '')}
         return None
     if event.type == 'assistant/chunk':
         text = event.data['chunk']['text']
@@ -750,6 +760,9 @@ async def chat(request: Request) -> StreamingResponse:
     sid = body.get('sid') or _current_sid
     seat = _seats.get(sid) or _open_session_seat(sid, allow_missing=True)
     session, agent = seat.session, seat.agent
+    # 提交身份（对齐 dsh 的 prompt requestId）：前端铸的 uuid，落到 durable
+    # 消息 source 上；前端据此把"本地回显"原子换成真身。
+    request_id = (body.get('request_id') or '').strip()
 
     queue: asyncio.Queue = asyncio.Queue()
     unsubscribe = session.on_event(lambda event: queue.put_nowait(event))
@@ -770,7 +783,7 @@ async def chat(request: Request) -> StreamingResponse:
 
     async def run_agent() -> None:
         try:
-            agent.followup(message)
+            agent.followup(message, rpc_id=request_id)
             await agent.when_idle()
         finally:
             await queue.put(DONE_MARKER)
@@ -847,10 +860,11 @@ async def steer(request: Request) -> dict:
         # 但 agent 已 idle——插队入队后事件会没人读（流即将关闭）。拒绝，
         # 前端会把输入放回，等回合真正结束后走 /chat。
         raise HTTPException(409, 'agent 已空闲——回合即将结束，请稍后用普通消息')
-    message_id = seat.agent.steer(message)
-    # 返回消息 id + 队列投影：前端把消息渲染进"队列区"（不进消息流——
-    # 未 claim 的消息还没有 seq 位置，硬插进流里会位置错乱，对齐 DSH
-    # QueueDock）；claim 后 user_message 帧带同 id，从队列区移进消息流。
+    message_id = seat.agent.steer(message, rpc_id=(body.get('request_id') or '').strip())
+    # 返回消息 id + 队列投影：前端把消息画在**消息流尾部**（pending 气泡 +
+    # 待处理标记，对齐 DSH 的 pending-steering）——未 claim 的消息还没有 seq
+    # 位置，所以恒定贴尾、绝不往流中间插锚点；claim 后 user_message 帧带同
+    # 一个 id/rpc_id，气泡就地转正、本地回显在同一次渲染里消失。
     return {
         'ok': True,
         'sid': sid,
@@ -860,25 +874,37 @@ async def steer(request: Request) -> dict:
     }
 
 
-@app.post('/queue/remove')
-async def queue_remove(request: Request) -> dict:
-    """撤回一条待处理消息（队列区每行的 × 按钮，对齐 DSH QueueDock 的 remove）。
+@app.post('/queue/update')
+async def queue_update(request: Request) -> dict:
+    """队列项操作（对齐 DSH 的 `session.updateQueue(itemId, QueueAction)`）。
 
-    撤回不是"删除历史"：未 claim 的消息还没有 surface，从 inbox 里 splice
-    掉就等于它从未成为模型可见的输入（日志留 spliced 痕迹可审计/可重放）。
-    已 claim（已进消息流）的返回 ok=False——那种"撤回"要新开回合纠正。
+    body: {sid?, item_id, action: {'kind': 'edit'|'remove'|'steer', 'text'?}}
+    DSH 的 edit 带 `content: ContentBlock[]`；我们只有文本框，所以收 `text`
+    （差异记在 AGENTS.md，语义一致：改的是还没进模型记忆的那条消息）。
+
+    返回 HTTP 200 + `ok`：并发下"那条已经不在了"是**正常收敛**而不是错误
+    （它可能刚好被 claim 掉了），与 dsh 的 `session/queue-item-not-found`
+    静默收敛一致——前端据此不弹错、只按最新快照重画。
     """
     _check_init()
     body = await request.json()
-    message_id = (body.get('message_id') or '').strip()
-    if not message_id:
-        raise HTTPException(400, 'message_id must not be empty')
+    item_id = (body.get('item_id') or '').strip()
+    action = body.get('action') or {}
+    kind = action.get('kind') if isinstance(action, dict) else None
+    if not item_id:
+        raise HTTPException(400, 'item_id must not be empty')
+    if kind not in ('edit', 'remove', 'steer'):
+        raise HTTPException(400, f'unknown queue action: {kind!r}')
+    text = (action.get('text') or '') if kind == 'edit' else ''
+    if kind == 'edit' and not text.strip():
+        raise HTTPException(400, 'edit requires non-empty text')
     sid = body.get('sid') or _current_sid
     seat = _seats.get(sid)
     if seat is None:
         raise HTTPException(404, f'session {sid!r} not open — switch to it first')
-    ok = seat.agent.unqueue(message_id)
-    return {'ok': ok, 'sid': sid, 'queue': _queue_rows(seat.agent)}
+    code = seat.agent.update_queue(item_id, kind, text)
+    return {'ok': code == 'ok', 'code': code, 'sid': sid,
+            'queue': _queue_rows(seat.agent)}
 
 
 @app.post('/compact')

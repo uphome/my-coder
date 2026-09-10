@@ -129,6 +129,19 @@ claim 的批次语义：先取空整个 next-step，再从 next-turn 取一条�
 spliced——同一事件类型两份折叠必然分叉，而且投影绑死在 Web 宿主上
 （CLI/测试拿不到）。
 
+队列项的三个动作也归状态层（`Inbox.edit` / `promote` / `remove`，都走
+`_splice` 先记账后改内存）：`edit` 原地换文案但**保住消息 id**（队列项身份
+不变），`promote` 是 next-turn→next-step 的两步搬家（摘除那步 `discard=False`
+——搬家不是丢弃），`remove` 带 `outcome='canceled'`。`Agent.update_queue`
+把它们包成 DSH 同名的状态码（`ok` / `queue-item-not-found` /
+`steer-unavailable` / `unknown-action`），web 层只做 HTTP 映射。
+
+**提交身份（`rpc_id`）**：前端提交时铸 uuid 随请求上来，落进
+`UserSource.rpc_id`（durable 消息的 source）——于是同一条消息在"队列项"和
+"durable 消息"两个形态下带的是同一个身份，前端靠它把本地回显原子地换成
+真身。它跟着消息走，不需要额外的旁路状态（`QueuedItem.rpc_id` 也只是从
+`message.source` 读出来）。
+
 ### 3.5 被动状态机：wake / 补拉 / when_idle
 
 agent 从不主动干活：谁要跟它说话谁就拍它一下（`_wake`）。
@@ -302,12 +315,21 @@ JSON 没有类型信息，用 `$xxx` 前缀 key 做类型标记：`$text`/`$tool
   assistant 文本块如何平滑更新"，`_raw/_seg` 状态只活在 DOM 上，不再是
   会话事实的一部分——任何时刻全量重画都一致。
 - 后端配合：`event_to_payload` 透传 turn/step、SSE 补 `turn_start` /
-  `user_message`（带 turn，claims 时带 message_id）/ `queue_update` 帧；
+  `user_message`（带 turn + message_id + 提交身份 rpc_id）/ `queue_update` 帧；
   设计注记见 `web/PROJECTION_DESIGN.md`。
-- todo dock / context 面板 / **队列区（`#queue-dock`）** / approval 卡片
-  **不进**本投影（独立订阅、即时 UI）。队列区尤其关键：**未 claim 的待处理
-  消息没有 seq 位置**，画进消息流只能靠锚点猜顺序——一律画在输入框上方，
-  claim 落 `user/message` 后才进投影（对齐 DSH QueueDock，见 `agent.md` §5）。
+- **待处理消息按 placement 分区，恒定贴尾**（都不进 `nodes` 投影）：
+  `queued`（next-turn）画在输入框上方的 `#queue-dock`；`steering`（next-step）
+  画在消息流尾部 `#messages > .flow-tail` 的 pending 气泡。未 claim 的消息没有
+  seq 位置，**往流中间插只能靠 `(turn,step)` 锚点猜顺序（上一版的位置 bug 就
+  是这么来的）**；贴尾 + claim 后 durable 节点落到真实 seq 位置，位置语义天然
+  正确。对齐 DSH（`agent.md` §5 有源码对照与勘误：DSH 的 steering **也是**
+  画在流尾，只有 queued 进 QueueDock）。
+- **本地提交回显**（`pendingSubmissions`，对齐 DSH `PendingSubmission`）：提交
+  当帧就在尾部画出来，durable 内容出现（带同一个提交身份 `rpc_id`）时在同一次
+  渲染里被隐藏、随后退休——所以"发出去没反应"和"重复画两条"都不会发生。
+  回显只活在客户端内存：刷新/重连只从 durable 事件重建。
+- todo dock / context 面板 / 队列区 / **尾部待处理气泡** / approval 卡片
+  **不进**本投影（独立订阅、即时 UI）。
 
 ---
 
@@ -361,10 +383,10 @@ JSON 没有类型信息，用 `$xxx` 前缀 key 做类型标记：`$text`/`$tool
 | `ui.py` | 终端渲染（_render_event / _paint，UI 是日志投影） |
 | `factory.py` | build_agent / load_env（CLI 与 Web 共用组装） |
 | `cli.py` | CLI 入口（单次任务 / 无任务参数进 REPL） |
-| `web_app.py` | Web UI（FastAPI + SSE：会话/标题/approval/手动压缩/steer 插队；seat 化并发隔离；事件透传 turn/step + turn_start/user_message 帧供前端投影） |
+| `web_app.py` | Web UI（FastAPI + SSE：会话/标题/approval/手动压缩/steer 插队；seat 化并发隔离；事件透传 turn/step + turn_start/user_message（带 message_id/rpc_id）/queue_update 帧供前端投影；队列项操作 `POST /queue/update`） |
 | `compaction.py` | 上下文压缩引擎（四步事务 + checkpoint + 会话 token 累计账） |
 | `show_memory.py` | 教学脚本：重放日志展示"记忆 = 投影" |
-| `tests/test_demo.py` | 65 个架构测试 |
+| `tests/test_demo.py` | 76 个架构测试 |
 
 ---
 

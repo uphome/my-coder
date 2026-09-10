@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal
 
 # 三种内容块：一条消息的内容是这些不可变块的 tuple。
@@ -54,8 +54,16 @@ ContentBlock = TextBlock | ToolCallBlock | ToolResultBlock
 
 @dataclass(frozen=True)
 class UserSource:
-    """用户输入的消息。"""
+    """用户输入的消息。
+
+    rpc_id 是**提交身份**（对齐 dsh 的 `user source.rpcId`）：前端提交时铸一个
+    uuid，随请求一起上来，落到 durable 消息的 source 上。它让"本地回显"和
+    "服务端落地"是同一件事的两个阶段——前端看到带同一 rpc_id 的 durable
+    消息，就能在**同一次渲染**里把回显换成真身（原子交接，不重复也不留空档）。
+    空串 = 没有提交身份（CLI 输入、历史数据、直接构造的消息）。
+    """
     kind: Literal['user'] = 'user'
+    rpc_id: str = ''
 
 
 @dataclass(frozen=True)
@@ -128,7 +136,8 @@ class QueuedItem:
 
     - placement='queued'：普通排队（next-turn）——等当前回合干完，开新回合处理
     - placement='steering'：插队（next-step）——当前回合的下一步就处理
-    - message：消息本体；id/text 都从它取，不另存副本（值对象不重复状态）
+    - message：消息本体；id / rpc_id / 文本都从它取，不另存副本
+      （值对象不重复状态——rpc_id 的权威来源是 message.source）
 
     dsh 还有第三种 placement='context'（运行时上下文快照：进队列区但不等处理）。
     本仓库刻意不走那条路——动态上下文靠每轮现叠 <todo_status> 合成消息
@@ -141,6 +150,37 @@ class QueuedItem:
     def id(self) -> str:
         """消息 id（撤回、认领、前端去重都用它）。"""
         return self.message.id
+
+    @property
+    def rpc_id(self) -> str:
+        """提交身份（对齐 dsh 的 SessionQueuedItem.rpcId）。
+
+        取自 message.source：同一条消息在"队列项"和"durable 消息"两个形态下
+        带的是同一个 rpc_id，前端据此把本地回显原子地换成真身。
+        """
+        source = self.message.source
+        return source.rpc_id if isinstance(source, UserSource) else ''
+
+
+def with_text(message: Message, text: str) -> Message:
+    """返回"同 id、同 source、文本被替换"的新消息（队列区 edit 用）。
+
+    为什么必须保住 id：队列项的身份就是消息 id——撤回、认领、前端行的 key、
+    rpc_id 关联全靠它。就地改文案只是换内容，不是换一条消息。
+    没有文本块时补一个在最前（用户输入正常不会走到）。
+    """
+    blocks: list[ContentBlock] = []
+    replaced = False
+    for block in message.content:
+        if isinstance(block, TextBlock):
+            if not replaced:
+                blocks.append(TextBlock(text=text))
+                replaced = True
+            continue          # 多文本块只保留改写后的第一个
+        blocks.append(block)
+    if not replaced:
+        blocks.insert(0, TextBlock(text=text))
+    return replace(message, content=tuple(blocks))
 
 
 @dataclass(frozen=True)
@@ -203,9 +243,13 @@ def block_from_json(data: dict) -> ContentBlock:
 
 
 def source_to_json(source: MessageSource) -> dict:
-    """来源 → tagged dict：$user/$model/$tool/$plugin。"""
+    """来源 → tagged dict：$user/$model/$tool/$plugin。
+
+    $user 的值是 rpc_id（空串 = 没有提交身份）。历史日志里是 `true`
+    （加 rpc_id 之前的格式），由 source_from_json 兼容读回。
+    """
     if source.kind == 'user':
-        return {'$user': True}
+        return {'$user': source.rpc_id}
     if source.kind == 'model':
         return {'$model': [source.provider, source.model]}
     if source.kind == 'tool':
@@ -214,9 +258,10 @@ def source_to_json(source: MessageSource) -> dict:
 
 
 def source_from_json(data: dict) -> MessageSource:
-    """source_to_json 的严格逆操作。"""
+    """source_to_json 的严格逆操作（兼容旧格式 `{'$user': true}`）。"""
     if '$user' in data:
-        return UserSource()
+        raw = data['$user']
+        return UserSource(rpc_id=raw if isinstance(raw, str) else '')
     if '$model' in data:
         provider, model = data['$model']
         return ModelSource(provider=provider, model=model)

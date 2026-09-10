@@ -69,10 +69,11 @@ conda run -n agent-demo python -m agent_demo.web_app --workspace .           # �
 - **运行中可插队（steer）**：agent 干活时输入框仍可打字，回车 = 插队当前
   回合（下一步即时处理，事件沿原 SSE 流推回）；idle 时回车 = 开新回合。
   两会话并行跑互不干扰（每会话独立 agent/事件流/审批，seat 化隔离）
-- **待处理队列区（对齐 DSH QueueDock）**：已发出但还没轮到的消息（插队 /
-  排队）显示在输入框上方一条队列条里——**不插进消息流**（未 claim 的消息在
-  日志里没有 seq 位置）；claim 落 `user/message` 后自动移进对话，行尾 × 可
-  撤回（还没轮到就反悔）
+- **待处理消息分区显示（对齐 DSH）**：已发出但还没轮到的消息，按它"为什么在
+  等"分区——普通排队（next-turn）进输入框上方的**队列区**（可折叠；行内编辑 /
+  撤回 / 提升为插队；Ctrl+Enter 整队插队）；插队（next-step）画在**消息流尾部**
+  的待处理气泡（它马上就要进对话，用户必须立刻看见）。两者都恒定贴尾、不猜
+  位置；claim 之后靠提交身份（rpc_id）原子交接成正式消息——不重复也不留空档
 - 输入行旁一枚**上下文占用圆环**（dsh ContextMeter 同款）：常态只有 20px+
   SVG 环不占布局，点击展开悬浮面板——当前占用 %、**全会话累计消耗 token**、
   **全会话缓存命中率**（真实 usage 才显示）；面板底部有**压缩旧对话**按钮
@@ -199,7 +200,7 @@ compaction.py（上下文压缩引擎）
 | `cli.py` | CLI 入口（单次任务 / 无任务参数进 REPL） |
 | `web_app.py` | Web UI（FastAPI + SSE：会话/标题/approval/手动压缩/steer 插队） |
 | `compaction.py` | 上下文压缩引擎（四步事务 + checkpoint + 会话 token 累计账） |
-| `tests/test_demo.py` | 65 个架构测试 |
+| `tests/test_demo.py` | 76 个架构测试 |
 
 ## 与 harness 的保真度对照
 

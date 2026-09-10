@@ -14,7 +14,7 @@ from __future__ import annotations
 from typing import cast
 
 from .session import Session
-from .values import Message, QueuedItem, QueuedPlacement
+from .values import Message, QueuedItem, QueuedPlacement, with_text
 
 # 两个队列：
 # next-turn=普通输入（等本轮干完再处理），
@@ -110,19 +110,56 @@ class Inbox:
         self._splice('next-turn', 0, len(self._state['next-turn']), [])
 
     def remove(self, message_id: str) -> bool:
-        """按 id 撤回一条尚未认领的消息（Web 队列区的 × 按钮）。
+        """按 id 撤回一条尚未认领的消息（队列区 × 按钮）。
 
         撤回 = 从队列里 splice 掉：走的仍是 _splice 这条唯一通道，
         所以 spliced 事件（带 outcome='canceled'）照样先落日志——
         "入队即记账"对撤回同样成立，重放日志不会复活已撤回的消息。
         返回 False = 没找到（多半已经被 claim 落成 surface 了）。
         """
-        for target in TARGETS:
-            for index, message in enumerate(self._state[target]):
-                if message.id == message_id:
-                    self._splice(target, index, 1, [])
-                    return True
-        return False
+        located = self._locate(message_id)
+        if located is None:
+            return False
+        target, index = located
+        self._splice(target, index, 1, [])
+        return True
+
+    def edit(self, message_id: str, text: str) -> bool:
+        """就地改写一条尚未认领的消息（对齐 dsh QueueAction 的 edit）。
+
+        为什么改是安全的：这条消息还没 claim、没有 surface，改的是"将要
+        成为模型输入的内容"——日志里只有 spliced 痕迹，模型记忆从未见过它。
+        替换保 id（见 values.with_text）：队列项的身份不变，前端那一行不闪。
+
+        实现上是"原地 splice 掉旧的、插入新的"（一次事件，原子），
+        不是两次改动——重放时不会出现"短暂消失"的中间态。
+        """
+        located = self._locate(message_id)
+        if located is None:
+            return False
+        target, index = located
+        message = self._state[target][index]
+        self._splice(target, index, 1, [with_text(message, text)])
+        return True
+
+    def promote(self, message_id: str) -> bool:
+        """把一条排队消息提升为插队（对齐 dsh QueueAction 的 steer）。
+
+        语义：next-turn（等本轮干完）→ next-step（本轮下一步就做）。
+        两次 splice 各自落账（先从 next-turn 摘掉、再追加到 next-step），
+        顺序即因果；摘除那步 discard=False——这不是"丢弃"，是搬家，
+        不该触发 discarded 通知、也不该标 outcome='canceled'。
+        返回 False = 没找到，或它本来就在 next-step（幂等：无变化）。
+        """
+        located = self._locate(message_id)
+        if located is None:
+            return False
+        target, index = located
+        if target != 'next-turn':
+            return False
+        message = self._splice(target, index, 1, [], discard=False)[0]
+        self._splice('next-step', len(self._state['next-step']), 0, [message])
+        return True
 
     def claim(self, target: str, turn: int) -> list[Message]:
         """认领一步的完整批次：先取空整个 next-step，再从 next-turn 取一条。
@@ -136,6 +173,17 @@ class Inbox:
         for message in claimed:
             self._notifications.claimed(message, turn)
         return claimed
+
+    def _locate(self, message_id: str) -> tuple[str, int] | None:
+        """按 id 在两条队列里找位置（撤回/改写/提升共用）。
+
+        返回 (target, index)，找不到返回 None（多半已被 claim 落成 surface）。
+        """
+        for target in TARGETS:
+            for index, message in enumerate(self._state[target]):
+                if message.id == message_id:
+                    return target, index
+        return None
 
     def _splice(
         self,
