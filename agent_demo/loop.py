@@ -180,6 +180,7 @@ async def _run_step(agent, turn: int, step: int, assembly: dict) -> str:
             max_tokens=config.get('max_tokens') or agent.options.get('max_tokens'),
         )
         session.append('request/header', {
+            'turn': turn, 'step': step,   # 请求边界帧需要（前端按请求分块）
             'provider': request.provider,
             'model': request.model,
             'system': request.system,

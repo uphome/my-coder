@@ -357,18 +357,47 @@ def _user_message_turns(session) -> dict[int, int]:
     return mapping
 
 
+def _reasoning_by_assistant_seq(session) -> dict[int, str]:
+    """assistant/message 事件的 seq → 该次模型请求的完整思维链（痕迹投影）。
+
+    UI 是日志的投影——思维链虽是痕迹（不回灌模型），但**要给人看**：
+    历史/刷新后深度思考块必须能重建（issue #4）。
+
+    配对规则（依赖日志顺序）：每次请求的 `assistant/reasoning`（完整思维链，
+    痕迹）紧跟在它的 `assistant/message`（surface）之前落盘 → 按 seq 顺序用
+    buffer 配对即可。同一 (turn, step) 内工具循环的多次请求也天然一次一份
+    ——这正好回答了"同一步多次请求的思维链合并"问题：历史里按请求分开。
+    """
+    out: dict[int, str] = {}
+    buffer: str | None = None
+    for event in session.events:
+        if event.type == 'assistant/reasoning':
+            data = event.data if isinstance(event.data, dict) else {}
+            text = data.get('reasoning')
+            buffer = text if isinstance(text, str) and text else None
+        elif event.type == 'assistant/message':
+            if buffer:
+                out[event.seq] = buffer
+            buffer = None
+    return out
+
+
 def _history_payloads(session) -> list[dict]:
     """会话历史消息载荷（页面加载/刷新用），user 消息附带其回合归属。
 
     message_to_payload 是纯消息 → dict，不知道回合；这里在构造处补上
     'turn' 字段，前端据此区分"新回合首条"与"同回合插队（steer）"。
+    assistant 消息补 'reasoning'（该次请求的思维链，痕迹投影给人看）。
     """
     turns = _user_message_turns(session)
+    reasoning = _reasoning_by_assistant_seq(session)
     payloads = []
     for seq, message in _surface_with_seq(session):
         payload = message_to_payload(message)
         if payload['role'] == 'user' and seq in turns:
             payload['turn'] = turns[seq]
+        elif payload['role'] == 'assistant' and seq in reasoning:
+            payload['reasoning'] = reasoning[seq]
         payloads.append(payload)
     return payloads
 
@@ -476,14 +505,25 @@ def event_to_payload(event, session: Session | None = None) -> dict | None:
     """
     if event.type == 'turn/start':
         return {'type': 'turn_start', 'turn': int(event.data['turn'])}
+    if event.type == 'request/header':
+        # 请求边界帧（issue #4 ③）：同一步内工具循环会有多次模型请求，前端
+        # 据此在节点内开新的"请求块"（关闭上一个 assistant 节点再建新的），
+        # 让思维链/文本/工具按"每次请求"分开——与历史路径（每条
+        # assistant/message = 一次请求）对齐。
+        data = event.data if isinstance(event.data, dict) else {}
+        return {'type': 'request_start',
+                'turn': int(data.get('turn', 0)),
+                'step': int(data.get('step', 0))}
     if event.type == 'user/message' and event.surface_op == 'append':
         # 真人发言帧（surface replace 的 checkpoint 除外——它独立成卡）。
         # 文本取第一条 text block；纯工具结果的 user 消息没有 text，不发帧
         # （工具结果显示由 tool/result 事件驱动）。turn 由前端用最近一次
         # turn_start 推导（user/message 事件本身不带 turn）。
+        # 带 message_id：前端据此认领乐观渲染的"待处理"气泡（steer 插队时
+        # 已本地画过一条，claim 落盘后靠 id 转正，不重复画）。
         text = _first_text_of(event.data)
         if text:
-            return {'type': 'user_message', 'text': text}
+            return {'type': 'user_message', 'text': text, 'message_id': event.data.id}
         return None
     if event.type == 'assistant/chunk':
         text = event.data['chunk']['text']
@@ -780,8 +820,10 @@ async def steer(request: Request) -> dict:
         # 但 agent 已 idle——插队入队后事件会没人读（流即将关闭）。拒绝，
         # 前端会把输入放回，等回合真正结束后走 /chat。
         raise HTTPException(409, 'agent 已空闲——回合即将结束，请稍后用普通消息')
-    seat.agent.steer(message)
-    return {'ok': True, 'sid': sid, 'queued': 'next-step'}
+    message_id = seat.agent.steer(message)
+    # 返回消息 id：前端据此乐观渲染"待处理"气泡（插队消息要等当前 step
+    # 结束才 claim 落 surface，不能干等）；claim 后 user_message 帧带同 id 认领。
+    return {'ok': True, 'sid': sid, 'queued': 'next-step', 'message_id': message_id}
 
 
 @app.post('/compact')

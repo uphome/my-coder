@@ -93,9 +93,16 @@ class Agent:
         """用户新输入：入队 next-turn 并唤醒（开启一个新回合）。"""
         self.send(create_user_message([TextBlock(text=text)]), 'next-turn', wakeup=True)
 
-    def steer(self, text: str) -> None:
-        """插队本回合：入队 next-step 并唤醒（当前回合内即时生效）。"""
-        self.send(create_user_message([TextBlock(text=text)]), 'next-step', wakeup=True)
+    def steer(self, text: str) -> str:
+        """插队本回合：入队 next-step 并唤醒（当前回合内即时生效）。
+
+        返回消息 id：Web 端据此立即乐观渲染"待处理"气泡（消息要等当前
+        step 跑完才 claim 落 surface，前端不能干等），claim 落 user/message
+        后 SSE 帧带同一个 id 认领转正。
+        """
+        message = create_user_message([TextBlock(text=text)])
+        self.send(message, 'next-step', wakeup=True)
+        return message.id
 
     def send(self, message: Message, target: str = 'next-turn', wakeup: bool = True) -> None:
         """唯一的入队入口：消息进 inbox，然后拍一下状态机。"""

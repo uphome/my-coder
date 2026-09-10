@@ -735,11 +735,18 @@ def test_web_chat_streams_events(tmp_path):
     assert '"type": "chunk"' in resp.text
     assert '"type": "tool_call"' in resp.text
     assert '"type": "turn_end"' in resp.text
-    # 统一投影模型的协议：回合开始帧、真人发言帧（带 turn）、内容帧带 turn/step
+    # 统一投影模型的协议：回合开始帧、真人发言帧（带 turn+message_id）、
+    # 请求边界帧（issue #4 ③）、内容帧带 turn/step
     assert '"type": "turn_start"' in resp.text
     assert '"type": "user_message"' in resp.text
     assert '"type": "chunk", "turn": 1' in resp.text      # chunk 带 turn（前端按节点分块）
-    assert '"type": "user_message", "text": "hi", "turn": 1' in resp.text
+    assert '"type": "request_start", "turn": 1' in resp.text  # 请求边界（按请求分块）
+    user_frame = [f for f in resp.text.split('data: ') if '"user_message"' in f]
+    assert user_frame, 'user_message frame missing'
+    frame = json.loads(user_frame[0].split('\n\n')[0])
+    assert frame['text'] == 'hi'
+    assert frame['turn'] == 1
+    assert frame['message_id'], 'user_message frame must carry message_id (乐观气泡认领用)'
 
     # 对话后历史可查（记忆 = 日志投影，Web 视角同样成立）
     payload = client.get('/history').json()
@@ -747,6 +754,58 @@ def test_web_chat_streams_events(tmp_path):
     history = payload['history']
     assert history[0]['role'] == 'user'
     assert any(m['role'] == 'assistant' and m['text'] for m in history)
+
+
+def test_history_projects_reasoning_per_request(tmp_path):
+    """issue #4：/history 把思维链（痕迹）投影到对应 assistant 消息上。
+
+    UI 是日志的投影——思维链虽不回灌模型，但历史/刷新后深度思考块必须能
+    重建。配对规则：assistant/reasoning 紧跟在它的 assistant/message 之前，
+    按 seq 顺序 buffer 配对；同一步工具循环的多次请求各配一份（不合并）。
+    """
+    from fastapi.testclient import TestClient
+
+    from agent_demo import web_app
+
+    web_app.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
+    client = TestClient(web_app.app)
+    session = web_app._session
+
+    # 手工落一轮：两次请求（同 turn/step，模拟工具循环），各带思维链
+    session.append('turn/start', {'turn': 1})
+    session.append('user/message', create_user_message([TextBlock(text='调查一下')]),
+                   surface_op='append')
+    session.append('step/start', {'turn': 1, 'step': 1})
+    # 第一次请求：reasoning + assistant/message（带 tool_call）
+    session.append('assistant/reasoning', {'turn': 1, 'step': 1, 'reasoning': '先读文件'})
+    session.append('assistant/message', {
+        'turn': 1, 'step': 1,
+        'message': create_assistant_message(
+            [ToolCallBlock(id='c1', name='read_file', arguments='{}')],
+            provider='fake', model='m'),
+    }, surface_op='append')
+    session.append('tool/call', {'turn': 1, 'step': 1, 'call_id': 'c1',
+                                 'name': 'read_file', 'arguments': '{}'})
+    session.append('tool/result', create_tool_result_message('c1', '内容', False), surface_op='append')
+    # 第二次请求：另一份 reasoning + 纯文本回答
+    session.append('assistant/reasoning', {'turn': 1, 'step': 1, 'reasoning': '看完了，可以总结'})
+    session.append('assistant/message', {
+        'turn': 1, 'step': 1,
+        'message': create_assistant_message([TextBlock(text='总结如下')],
+                                            provider='fake', model='m'),
+    }, surface_op='append')
+    session.append('step/end', {'turn': 1, 'step': 1})
+    session.append('turn/end', {'turn': 1, 'reason': 'completed'})
+
+    history = client.get('/history').json()['history']
+    assistants = [m for m in history if m['role'] == 'assistant']
+    assert len(assistants) == 2
+    # 每条 assistant 各自带自己那次的思维链（同一步两次请求不合并）
+    assert assistants[0]['reasoning'] == '先读文件'
+    assert assistants[1]['reasoning'] == '看完了，可以总结'
+    # 无思维链的消息不出现该字段
+    user_msgs = [m for m in history if m['role'] == 'user']
+    assert all('reasoning' not in m for m in user_msgs)
 
 
 def test_web_session_management(tmp_path):
@@ -2193,6 +2252,9 @@ async def test_web_steer_interrupts_open_sse_stream(tmp_path):
         steer_resp = await client.post('/steer', json={'message': '停一下改方向', 'sid': 'web'})
         assert steer_resp.status_code == 200
         assert steer_resp.json()['queued'] == 'next-step'
+        # 返回 message_id：前端乐观渲染"待处理"气泡、帧到达按 id 认领
+        steer_id = steer_resp.json().get('message_id')
+        assert steer_id, 'steer must return the queued message id'
         llm.release.set()                             # 放行：第一步完成，下一步轮到插队
         sse = await asyncio.wait_for(reader, timeout=10)
 
@@ -2200,6 +2262,13 @@ async def test_web_steer_interrupts_open_sse_stream(tmp_path):
     assert '首轮回答' in sse
     assert '插队后回答' in sse
     assert sse.count('"type": "turn_end"') == 1       # 一个回合结束 = 插队没开新回合
+    # 认领链路：插队消息的 user_message 帧带 /steer 返回的同一个 message_id
+    # （前端乐观气泡据此转正，不重复画）
+    steer_frames = [f for f in sse.split('data: ')
+                    if '"user_message"' in f and '停一下改方向' in f]
+    assert steer_frames, 'steer message must be pushed as a user_message frame'
+    steer_frame = json.loads(steer_frames[0].split('\n\n')[0])
+    assert steer_frame['message_id'] == steer_id
     # 事件日志：全程只有一次 turn/start，两条 user 消息都在
     turns = [e for e in seat.session.events if e.type == 'turn/start']
     assert len(turns) == 1

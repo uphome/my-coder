@@ -209,6 +209,20 @@ main { flex: 1; overflow-y: auto; overflow-anchor: auto; }
   max-width: 72%; white-space: pre-wrap; word-break: break-word;
   box-shadow: var(--shadow-card);
 }
+/* 插队乐观气泡（steer）：消息已发出但还没轮到它（等当前 step 结束 claim）。
+   半透明 + "待处理"小字——用户必须立刻看到"发出去了"，后端 user_message
+   帧按 message_id 认领后转正（去 pending 类）。 */
+.msg.user .bubble.pending { opacity: .6; position: relative; padding-right: 26px; }
+.msg.user .bubble.pending .pending-tag {
+  position: absolute; top: 2px; right: 6px;
+  font-size: 10px; opacity: .85; letter-spacing: .5px;
+}
+/* 插队失败提示（回合已结束等）：输入行上方短提示，几秒后自动消失 */
+.steer-error {
+  max-width: 840px; margin: 0 auto 6px; padding: 6px 12px;
+  background: var(--bg1); border: 1px solid var(--err); border-radius: var(--r-m);
+  color: var(--err); font-size: 12px;
+}
 /* ---- 助手消息 ---- */
 .msg.assistant .text { word-break: break-word; }
 /* 思考折叠块 */
@@ -793,9 +807,41 @@ function mountUser(node) {
   const row = el('div', 'msg user');
   const bubble = el('div', 'bubble');
   bubble.textContent = node.text;
+  if (node.pending) {
+    // 插队乐观气泡：已发出、等 claim（见 steer()）
+    bubble.classList.add('pending');
+    const tag = el('span', 'pending-tag');
+    tag.textContent = '待处理';
+    bubble.appendChild(tag);
+  }
   row.appendChild(bubble);
   messagesEl.appendChild(row);
+  node.bubbleEl = bubble;   // 供认领转正时去掉 pending 标记
   stickIfNeeded();
+}
+
+/* 插队乐观渲染：立即画"待处理"气泡（后端 user_message 帧按 id 认领转正）。
+   与帧驱动路径同形：也是 nodes 里的一个 user 节点，只是先于日志出现——
+   帧到达时认领它而不是重复画（nodes 仍是唯一事实源）。 */
+function mountPendingUser(text, messageId) {
+  closeLiveAssistant();     // 与 user_message 帧到达时行为一致：插队打断当前 assistant
+  const node = { kind: 'user', turn: lastUserTurn, text, pending: true, messageId };
+  nodes.push(node);
+  mountUser(node);
+}
+/* 认领：后端帧带 message_id 到达时，把对应的 pending 节点转正（不重画）。
+   返回 true = 已认领（调用方不再新建气泡）。 */
+function claimPendingUser(messageId) {
+  if (!messageId) return false;
+  const node = nodes.find(n => n.kind === 'user' && n.pending && n.messageId === messageId);
+  if (!node) return false;
+  node.pending = false;
+  if (node.bubbleEl) {
+    node.bubbleEl.classList.remove('pending');
+    const tag = node.bubbleEl.querySelector('.pending-tag');
+    if (tag) tag.remove();
+  }
+  return true;
 }
 
 /* 压缩 checkpoint 卡片（preamble + <compacted-summary> 摘要，非真人发言） */
@@ -1203,6 +1249,14 @@ function renderProjection() {
     else if (node.kind === 'checkpoint') addCheckpointCard(node);
     else if (node.kind === 'assistant') {
       mountAssistant(node);
+      // 深度思考块（历史/刷新后重建）：与实时路径同形——thinking 块挂在
+      // 节点上、位于文本之前；有 reasoning 才建（无则完全不出现）。
+      if (node.reasoning) {
+        const th = ensureThinkingOn(node);
+        th.body.textContent = node.reasoning;
+        // 历史渲染保持折叠（与实时流结束后的行为一致）
+        th.box.classList.remove('streaming-on');
+      }
       // 节点可能带完整内容（历史构建）或空壳等实时生长（applyFrame 里已 mount）
       if (node.text) {
         // 历史消息可能多段文本：历史 assistant 消息 text 是整段，一次铺满
@@ -1244,6 +1298,7 @@ function renderHistory(history) {
       const node = {
         kind: 'assistant', turn: lastUserTurn, step: nodes.filter(n => n.kind === 'assistant').length,
         text: m.text || '', tools: [], closed: true,
+        reasoning: m.reasoning || '',   // 深度思考（痕迹投影，历史/刷新后可见）
       };
       for (const tc of (m.tool_calls || [])) {
         node.tools.push({ callId: tc.call_id, name: tc.name, args: tc.arguments,
@@ -1407,6 +1462,14 @@ function liveAssistantFor(turn, step) {
 }
 function applyFrame(payload) {
   switch (payload.type) {
+    case 'request_start': {
+      // 请求边界（issue #4 ③）：同一步内工具循环的多次模型请求各自成块——
+      // 关闭上一个 assistant 节点，后续 chunk/reasoning/tool_call 会由
+      // liveAssistantFor 新建节点（思维链/文本/工具按"每次请求"分开）。
+      // 工具调用与结果留在发起它的节点（工具执行完才发下一个 request_start）。
+      closeLiveAssistant();
+      break;
+    }
     case 'chunk': {
       const node = liveAssistantFor(payload.turn, payload.step);
       node.text += payload.text;
@@ -1444,8 +1507,16 @@ function applyFrame(payload) {
       break;
     }
     case 'user_message': {
-      // 真人发言（首问或 steer 插队）：关掉上一个打开的 assistant。
-      // send/steer 只 POST 不清屏——气泡完全由这帧驱动（单一事实源）。
+      // 真人发言（首问或 steer 插队）：先尝试认领乐观渲染的"待处理"气泡
+      // （steer 已本地画过、带同一个 message_id）——认领则只转正、不重复画。
+      if (claimPendingUser(payload.message_id)) {
+        // 已认领：关掉可能已打开的 assistant（插队消息位置语义与新建一致）
+        closeLiveAssistant();
+        break;
+      }
+      // 未认领（普通发送/历史旧帧无 id）：关掉上一个打开的 assistant，新建气泡。
+      // send/steer 只 POST 不清屏——气泡完全由这帧驱动（单一事实源）；
+      // steer 成功路径另有乐观气泡，上面认领分支已覆盖。
       closeLiveAssistant();
       const node = { kind: 'user',
                      turn: payload.turn !== undefined ? payload.turn : lastUserTurn,
@@ -1560,7 +1631,9 @@ async function send() {
 }
 /* 运行中插队（steer）：消息进当前回合 next-step，回合不结束——所以
    不复用 /chat 的 SSE 读取循环（那个流还开着，模型下一步的事件会
-   继续沿它推过来）。用户气泡由后端 user_message 帧沿原流推回渲染。 */
+   继续沿它推过来）。用户气泡**乐观渲染**：POST 成功立即画"待处理"气泡
+   （消息要等当前 step 结束才 claim 落 surface，不能干等），后端
+   user_message 帧按 message_id 认领转正。 */
 async function steer(text) {
   input.value = '';
   input.style.height = 'auto';
@@ -1570,15 +1643,35 @@ async function steer(text) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ message: text, sid: currentSid }),
     });
-    if (!res.ok) {
-      const data = await res.json().catch(() => ({}));
-      // 插队失败（回合恰好结束/无活跃流）：文本放回输入框，稍后走普通消息
-      console.warn('steer failed:', data.detail || res.status);
-      input.value = text;
-      input.style.height = 'auto';
-      input.focus();
+    if (res.ok) {
+      const data = await res.json();
+      // 乐观气泡：立即让用户看到"发出去了"（pending 半透明 + 待处理标记）
+      mountPendingUser(text, data.message_id);
+      return;
     }
-  } catch (e) { console.error('steer failed', e); }
+    const data = await res.json().catch(() => ({}));
+    // 插队失败（回合恰好结束/无活跃流）：文本放回输入框 + 可见提示，
+    // 用户按回车即走 /chat 开新回合（此时 busy 已复位）。
+    console.warn('steer failed:', data.detail || res.status);
+    input.value = text;
+    input.style.height = 'auto';
+    input.focus();
+    showSteerError(data.detail || `插队失败（HTTP ${res.status}）——回合可能已结束，按回车重新发送`);
+  } catch (e) {
+    console.error('steer failed', e);
+    input.value = text;
+    input.style.height = 'auto';
+    input.focus();
+    showSteerError('插队失败（网络错误）——按回车重新发送');
+  }
+}
+/* 插队失败提示：输入行上方一条，6 秒后自动消失（不打断输入） */
+function showSteerError(message) {
+  const tip = el('div', 'steer-error');
+  tip.textContent = message;
+  const footer = input.closest('footer');
+  if (footer) footer.insertBefore(tip, footer.firstChild);
+  setTimeout(() => tip.remove(), 6000);
 }
 function setBusy(value) {
   busy = value;
