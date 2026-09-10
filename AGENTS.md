@@ -9,7 +9,7 @@ Python 复刻 deepseek-harness 架构的教学 demo（agent 框架本身，不�
 # 质量门：ruff + mypy + pytest 三绿才可提交（pyproject.toml 已配好）
 conda run -n agent-demo python -m ruff check agent_demo tests
 conda run -n agent-demo python -m mypy agent_demo
-conda run -n agent-demo python -m pytest        # 76 个测试
+conda run -n agent-demo python -m pytest        # 77 个测试
 
 # CLI（可 pip install -e . 后直接 agent-demo；或模块方式跑）
 conda run --no-capture-output -n agent-demo python -m agent_demo.cli --workspace . --fake "read README.md and summarize"
@@ -44,6 +44,13 @@ conda run --no-capture-output -n agent-demo python -m agent_demo.web_app --works
 
 ## 约定
 
+- **循环的 step 粒度 = 一次模型请求**（对齐 harness `core/agent-loop` 的
+  `step()`：发完一次请求 + 执行完这次的工具调用就返回）：工具循环由 `run_turn`
+  的外层循环驱动，**每轮开头都 claim inbox**。不要把它合并回 `_run_step` 的
+  内层 while——插队消息的落地时机、停止的及时性、将来 guard 的每请求卡点
+  全依赖这一点（旧实现把整段工具循环当一个 step，实测插队消息在 next-step 里
+  躺了 2 分 40 秒后被 cancel 清掉，模型从没见过它）。细节见
+  `ARCHITECTURE.md` §3.6
 - 注释/文档全部用中文，教学式讲解设计动机——新注释保持此风格
 - 值对象必须 frozen dataclass + tuple，禁止把可变容器放进消息/事件（JSON 往返依赖）
 - 严格校验哲学：未注册 prompt 变量、重复工具名、surface_op 缺失都在写入时刻抛错，宁炸勿静默

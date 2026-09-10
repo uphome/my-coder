@@ -2207,6 +2207,89 @@ async def test_steer_while_running_becomes_next_step_of_same_turn():
     assert agent.status == 'idle'
 
 
+@pytest.mark.asyncio
+async def test_steer_absorbed_at_next_request_inside_tool_loop():
+    """插队在**下一次模型请求**就被吸收——step 粒度 = 一次请求。
+
+    回归（真实日志实测）：step 曾是"整段工具循环"，`_run_step` 内部反复
+    模型↔工具，只有模型最终给出纯文本才回到外层 claim。于是插队消息在
+    next-step 里躺了 2 分 40 秒（50+ 次工具调用），最后被 cancel 清掉
+    （outcome='canceled'）——模型从头到尾没见过它，用户看到的就是
+    "插入信息不起作用"。
+
+    现在一步只发一次请求，claim 发生在每次请求**之前**，所以断言：
+    - 第 1 次请求的 messages 里没有插队文本（那时还没插队）
+    - 第 2 次请求（工具循环仍在继续）的 messages 里**已经有**它
+    - 日志里 step 数与请求数一一对应
+    """
+    from agent_demo.llm import ToolCallDelta
+
+    calls = []
+
+    async def read_file(args, agent, signal):  # noqa: ARG001
+        calls.append(args)
+        return ToolOutcome(content='line 1')
+
+    tools = ToolRegistry()
+    tools.register(ToolSpec(
+        name='read_file',
+        description='Read a file.',
+        parameters={'type': 'object', 'properties': {'file_path': {'type': 'string'}},
+                    'required': ['file_path']},
+        execute=read_file,
+    ))
+
+    class LoopLlm:
+        """前三轮都要求调用工具；每轮记下它这次请求收到的 user 文本。"""
+
+        def __init__(self):
+            self.seen: list[list[str]] = []
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def stream(self, request, signal=None):  # noqa: ARG002
+            self.seen.append([m.content[0].text for m in request.messages
+                              if m.role == 'user' and m.content
+                              and getattr(m.content[0], 'type', '') == 'text'])
+            index = len(self.seen)
+            if index == 1:
+                self.entered.set()
+                await self.release.wait()   # 卡住第 1 轮：给测试留插队窗口
+            if index <= 3:                  # 三轮工具循环，回合一直没收尾
+                yield StreamChunk(tool_calls=(ToolCallDelta(
+                    index=0, id=f'c{index}', name='read_file',
+                    arguments=json.dumps({'file_path': 'a.txt'})),))
+                yield StreamChunk(finish_reason='tool_calls')
+            else:
+                yield StreamChunk(text='done', finish_reason='stop')
+
+    session = Session(id='s')
+    llm = LoopLlm()
+    agent = Agent(session=session, llm=llm, prompt=PromptRegistry(), tools=tools,
+                  options={'provider': 'fake', 'model': 'fake-model'})
+    agent.followup('做一个长任务')
+    driver = asyncio.create_task(agent.when_idle())
+    await llm.entered.wait()
+    agent.steer('插队：改方向')          # 工具循环还在第 1 轮里
+    llm.release.set()
+    await asyncio.wait_for(driver, timeout=5)
+
+    assert len(llm.seen) == 4, llm.seen
+    assert not any('插队' in text for text in llm.seen[0])
+    assert any('插队：改方向' in text for text in llm.seen[1]), llm.seen
+    # 它不是等工具循环跑完才被看到的：第 2、3 轮仍在调用工具
+    assert len(calls) == 3
+    # 一步 = 一次请求：step/start 与模型请求数一一对应
+    assert len([e for e in session.events if e.type == 'step/start']) == len(llm.seen)
+    # durable 落地：插队的 user/message 排在第 2 次请求的 header 之前
+    claimed_seq = next(e.seq for e in session.events
+                       if e.type == 'user/message' and e.data.content[0].text == '插队：改方向')
+    headers = [e.seq for e in session.events if e.type == 'request/header']
+    assert claimed_seq < headers[1], (claimed_seq, headers)
+    assert session.events[-1].type == 'turn/end'
+    assert session.events[-1].data['reason'] == 'completed'
+
+
 def test_web_queue_actions_endpoint(tmp_path):
     """POST /queue/update：队列项操作（对齐 DSH 的 updateQueue(itemId, action)）。
 

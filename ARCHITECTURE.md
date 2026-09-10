@@ -163,26 +163,44 @@ idle --wake(拍一下)--> running --跑空 inbox--> idle
 
 ```
 turn 循环（外层，run_turn）     完成条件：inbox 没货 / blocked / 取消 / 出错
-   每循环一次：claim 一批消息 → 开一个 step → 干完
-step 循环（内层，_run_step）    完成条件：模型给出纯文本 / max-tokens
-   每循环一次：组请求 → 流式 → 有工具调用就执行 → 回来再调
+   每循环一次：claim 一批消息 → 开一个 step → 干完，再转一圈
+step（_run_step）               **只发一次模型请求**（+ 它发起的工具调用）
+                                返回 None = 有工具调用、回合还没收尾
 ```
 
-> 外层循环回答"还有没有任务"，内层循环回答"这次应答完没完"。
+> 外层循环回答"还有没有任务"，step 回答"这一次请求得到什么"。
+> **工具循环本身由外层循环驱动**——这是 harness 的粒度
+> （`core/agent-loop/src/agent.ts` 的 `step()` 发完一次请求就 `return`）。
+
+**为什么 step 必须是一次请求**（2026-09 实测教训）：插队消息进 next-step 后
+要等下一次 `claim` 才浮上水面，而 claim 就在外层循环每次循环的开头。若把
+**整段工具循环**算作一个 step（旧实现：`_run_step` 内部反复模型↔工具），插队
+就得等整段自主运行结束——长任务里是几分钟甚至永不。真实日志：一条插队消息在
+next-step 里躺了 2 分 40 秒（期间 50+ 次工具调用、`step` 恒为 1），最后被
+`cancel` 清掉（`outcome='canceled'`），模型从头到尾没见过它——用户看到的现象
+就是"插入信息不起作用"。
 
 关键点：
 - 第 1 步认领 next-turn，后续步认领 next-step
 - 认领到的消息在循环里落成 `user/message` surface 事件——从"水下"队列
   载荷变成模型记忆
-- 工具结果**只落日志**，没有"把结果发给模型"的代码——回到 while 顶部，
+- `end_reason is None` = 上一步发起了工具调用、回合还没收尾：即使这一步
+  claim 为空也要继续发请求，把工具结果送回模型
+- 工具结果**只落日志**，没有"把结果发给模型"的代码——下一个 step 组请求时
   下一次 `derive_messages()` 自动带上。循环不保存对话状态，只写日志，
   记忆自己浮现
 - 日志顺序就是因果顺序：step/start → user/message → request/header →
   chunks → assistant/message → tool/call → tool/result → step/end
+  （`step/start` 与 `request/header` 现在 1:1，除非 `request_error` 钩子重试）
+- max-tokens 有粘性：某步被截断后，后续步正常完成也不降级
 - turn/end 五种结局：completed / blocked / aborted / error / max-tokens；
   aborted 和 error 记完账后必须重新抛
 - config 三级 fallback：request 钩子 > agent.options > 上次 request/header
   （resume 恢复模型路由）
+
+> 代价与收益：step 变细后日志事件更多（一次请求一组 step/start…step/end），
+> 换来的是**插队延迟从一个工具循环降到一次模型往返**、停止更及时，以及将来
+> guard（重复工具提醒 / 单次调用超时）有了天然的"每请求卡点"。
 
 ### 3.7 决策走钩子：循环是骨架，钩子是关节
 
@@ -386,7 +404,7 @@ JSON 没有类型信息，用 `$xxx` 前缀 key 做类型标记：`$text`/`$tool
 | `web_app.py` | Web UI（FastAPI + SSE：会话/标题/approval/手动压缩/steer 插队；seat 化并发隔离；事件透传 turn/step + turn_start/user_message（带 message_id/rpc_id）/queue_update 帧供前端投影；队列项操作 `POST /queue/update`） |
 | `compaction.py` | 上下文压缩引擎（四步事务 + checkpoint + 会话 token 累计账） |
 | `show_memory.py` | 教学脚本：重放日志展示"记忆 = 投影" |
-| `tests/test_demo.py` | 76 个架构测试 |
+| `tests/test_demo.py` | 77 个架构测试 |
 
 ---
 
@@ -464,7 +482,7 @@ JSON 没有类型信息，用 `$xxx` 前缀 key 做类型标记：`$text`/`$tool
 | 学到并实现 | 简化/未实现（进化时的候选增量） |
 |---|---|
 | surface 事件标记 + 纯函数折叠投影；**replace 区间遮蔽（位置语义，compaction 用）** | 遮蔽区间溯源校验 |
-| Inbox 双队列 + claim 语义 + 持久化重放；**steer 插队（同回合 next-step）** | 多宿主并发仲裁、steer 中断"当前正在跑的 step" |
+| Inbox 双队列 + claim 语义 + 持久化重放；**steer 插队（同回合 next-step）；step = 一次模型请求（工具循环由 turn 循环驱动，插队一次往返内被吸收）** | 多宿主并发仲裁、turn-stopping 钩子（`agent/turn-stopping`）、`concludesTurn` 工具结果提前收尾 |
 | sections + 严格 `{{var}}` 插值 | 作用域链 shadow、complete 段 |
 | 工具分组执行 + 坏 JSON 兜底；**approval/权限桥 + `[exit code: N]` 跨调用准则** | OS 级沙箱、事件瀑布审批 |
 | request/header 落日志 + resume 恢复路由；**checkpoint 策略（四步事务 + 结构化摘要）** | 持久化后端抽象、token 预算选段 |

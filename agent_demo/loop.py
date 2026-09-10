@@ -78,11 +78,23 @@ class _BlockAssembler:
 async def run_turn(agent) -> bool:
     """一个 turn：turn/start → [pre_step + step] 循环 → turn/end。返回是否还有下一回合。
 
+    **step 的粒度 = 一次模型请求**（对齐 harness：`core/agent-loop/src/agent.ts`
+    的 `step()` 发完一次请求、执行完这次发起的工具调用就返回；工具循环由本函数
+    的外层循环驱动，每轮回到顶部重新 claim inbox）。
+
+    这个粒度是"插队能生效"的前提：steer 消息进 next-step 后，要等下一次 claim
+    才浮上水面，而 claim 就发生在下面每次循环的开头。旧实现把**整段工具循环**
+    算作一个 step（`_run_step` 内部 `while True` 反复模型↔工具），于是插队消息
+    得等整段自主运行结束——长任务里是几分钟，甚至永不。实测：一条插队消息在
+    next-step 里躺了 2 分 40 秒，最后被 cancel 清掉，模型从没见过它。
+
     外层循环的语义：
     - 第 1 步认领 next-turn（一条普通输入），后续步认领 next-step（插队消息）
-    - claim 为空：首步直接完成（没活干），后续步直接收尾
+    - `end_reason is None` = 上一步发起了工具调用，回合还没到收尾：即使这一步
+      claim 为空也要继续发请求，把工具结果送回模型
+    - 已收尾且没有新插队 → 结束；首步就 claim 为空 → 不花模型调用直接完成
     - pre_step 返回 None：本回合 blocked（钩子拒绝）
-    - next-step 空了就收尾，否则继续下一步
+    - max-tokens 有粘性：某一步被截断后，后续步正常完成也不降级
 
     五种结束原因（reason）：completed / blocked / aborted / error / max-tokens。
     aborted 和 error 记完账后必须重新抛——不能吞掉取消和架构性失败。
@@ -93,29 +105,33 @@ async def run_turn(agent) -> bool:
     session.append('turn/start', {'turn': turn})
     agent._last_turn = turn
     assembly = agent.prompt.assemble({'agent': agent})  # 每回合求值一次提示词快照
-    end_reason = 'completed'
+    end_reason: str | None = None   # None = 还在工具循环里，回合尚未收尾
     try:
         step = 0
+        target = 'next-turn'
         while True:
             step += 1
-            target = 'next-turn' if step == 1 else 'next-step'
             claimed = agent.inbox.claim(target, turn)
             messages = await _resolve_pre_step(agent, turn, step, claimed)
             if messages is None:
                 end_reason = 'blocked'
                 break
-            if not messages:
-                # 认领为空：首步不花模型调用直接完成，后续步直接收尾
-                end_reason = 'completed'
+            if end_reason is not None and not messages:
+                break                      # 已收尾，且没有新插队 → 回合结束
+            if step == 1 and not messages:
+                end_reason = 'completed'   # 首步没货：不花模型调用
                 break
             session.append('step/start', {'turn': turn, 'step': step})
             for message in messages:
                 # 认领到的消息在此刻浮上水面：从队列载荷变成模型记忆
                 session.append('user/message', message, surface_op='append')
-            end_reason = await _run_step(agent, turn, step, assembly)
+            outcome = await _run_step(agent, turn, step, assembly)
             session.append('step/end', {'turn': turn, 'step': step})
-            if not agent.inbox.next_step:
-                break
+            if end_reason != 'max-tokens':     # max-tokens 粘性：不降级
+                end_reason = outcome
+            if end_reason is not None and not agent.inbox.next_step:
+                break                      # 收尾了、也没有插队 → 不再空转一步
+            target = 'next-step'
     except asyncio.CancelledError:
         session.append('turn/end', {'turn': turn, 'reason': 'aborted'})
         raise
@@ -141,8 +157,18 @@ async def _resolve_pre_step(agent, turn: int, step: int, claimed: list[Message])
     return await agent.hooks.pre_step(ctx, default)
 
 
-async def _run_step(agent, turn: int, step: int, assembly: dict) -> str:
-    """一个 step：内层 while，直到模型给出纯文本。返回结束原因。
+async def _run_step(agent, turn: int, step: int, assembly: dict) -> str | None:
+    """一个 step：**只发一次**模型请求（+ 它发起的工具调用）。返回结束原因。
+
+    返回 None = 本步发起了工具调用、回合还没收尾：工具结果已落日志，
+    下一次请求由 run_turn 的下一个 step 发出（那时 derive_messages 自动带上
+    结果）。返回字符串 = 本步给这次回合定了性（completed / max-tokens）。
+
+    为什么不在本函数里接着循环（旧实现的做法）：那样"一个 step"就变成整段
+    工具循环，插队消息要等整段跑完才可能被 claim——实测能等 2 分 40 秒然后
+    被 cancel 掉。一步 = 一次请求，claim 才有机会在每次请求前发生。
+
+    内层 while 只服务一件事：request_error 钩子返回 'retry' 时重发本次请求。
 
     循环体内的关键机制：
     - 组请求：system 用本回合的提示词快照，messages 是此刻日志折叠出的记忆，
@@ -150,8 +176,7 @@ async def _run_step(agent, turn: int, step: int, assembly: dict) -> str:
     - request/header 落日志：含 system 全文和工具名，resume 恢复路由靠它
     - 流式：每个 chunk 都落 assistant/chunk 痕迹日志，再喂给组装器
     - request_error 钩子：返回 'retry' 就 continue 重新组请求
-    - 工具结果只落日志；回到 while 顶部，derive_messages 自动带上结果——
-      循环不需要"把结果发给模型"的代码
+    - 工具结果只落日志；下一个 step 组请求时 derive_messages 自动带上
     """
     session = agent.session
     while True:
@@ -237,7 +262,10 @@ async def _run_step(agent, turn: int, step: int, assembly: dict) -> str:
         if not tool_calls:
             return 'completed'
         await _execute_tool_calls(agent, turn, step, tool_calls)
-        # 结果已落 tool/result 日志；回到 while 顶部，derive_messages 自动带上
+        # 工具结果已落 tool/result 日志。本 step 到此为止：回到 run_turn 的外层
+        # 循环 → 下一个 step 的 claim 有机会吸收插队消息 → 再发下一次请求
+        # （那时 derive_messages 自动带上工具结果，不需要"把结果发给模型"的代码）。
+        return None
 
 
 async def _resolve_request(agent, turn: int, step: int) -> dict:
