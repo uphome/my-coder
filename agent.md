@@ -349,3 +349,56 @@ turn/step 序号、step/start、todo 痕迹都是**模型不可见的痕迹事�
 要求给结论）；或提示词/技能正文加收敛纪律（"验证核心事实后即汇报，把后续
 验证留给用户决定"）。DSH/opencode/PI 是否有对应的收敛机制待查（可作下一轮
 讨论的 codegraph 调研目标）。
+
+## 5. 待处理消息怎么显示：队列区（QueueDock）——2026-09 已定稿并落地
+
+### 5.1 问题：插队消息没有"位置"
+
+`steer` 消息进 `next-step` 队列后，要等当前 step 结束、下一次 `claim()` 才落
+`user/message`（surface）。这段"半开窗口"里它在日志里**没有 seq 位置**（实测
+延迟 890~1698 个事件）。上一版前端为了"用户必须立刻看到发出去了"，把它当
+乐观气泡插进消息流，靠 `(turn, step)` 锚点猜顺序——结果位置反复出错
+（气泡被后续输出挤到中间/下方），见 `mountPendingUser`/`pendingAnchor` 两次
+修 bug 的记录（提交 `8b17c24`、`00533de`）。
+
+### 5.2 DSH 的做法（codegraph 实测源码）
+
+- `packages/client/ui-conversation/src/client/queue/QueueDock.tsx`：队列条挂在
+  composer 的 `conversation.input.dock` slot（`order: 20`），**待处理消息从不
+  画进消息流**。
+- 数据：`rowCount === 0` 不渲染；单条直接一行（无头部）；多条给可折叠的
+  计数头部（默认收起）。行内 `placement` 区分 `queued`（普通排队）与
+  `steering`（插队 pending-steering）。
+- 操作（`conversation.updateQueue(itemId, action)`）：`edit` / `remove` /
+  `steer`（把排队项提升为插队项）。
+- 本地回显：`PendingSubmission`（`session.beginSubmission`）——提交在途时先
+  显示，`rpcId` 与 admission 后的真实行去重，"observed 退休"后撤掉。
+- 另有 e2e 场景 `apps/web/tests/steering.e2e.ts`（"QueueDock strictly …"）
+  把"两种 steer 入口都只进 QueueDock"当作不变式断言。
+
+### 5.3 本仓库落地方案（已实现）
+
+- **不进消息流**：未 claim 的消息一律画在输入框上方的 `#queue-dock`
+  （`web/index.html`），claim 落 `user/message` 后由帧移出、气泡进流。
+  位置问题从"猜锚点"变成"不存在"——这正是 DSH 绕开的坑。
+- **队列是日志投影**：`web_app._queue_rows(session)` 重放
+  `agent/inbox/spliced`（`start`/`removed_count`/`inserted`）折叠出两条队列
+  （next-turn→`queued`、next-step→`steering`）。和 todo 一样"不物化"：
+  日志里没有独立队列状态，投影是纯函数。
+- **三条推送通道**（幂等，互为兜底）：
+  1. SSE `queue_update` 帧（`agent/inbox/spliced` → 全量快照）
+  2. `POST /steer` 响应带 `queue`（**splice 先于响应**，所以响应快照已含刚入队
+     的那条，前端不需要按 id 去重）
+  3. `/history` 与 `/sessions/*/switch`、`/sessions/new` 带 `queue`（刷新/切会话恢复）
+- **本地在途回显**（对齐 `PendingSubmission`）：POST 未返回时先在队列区放一条
+  `发送中`（`.queue-item.sending`），请求收尾统一撤掉；成功则服务端快照无缝
+  接上，失败则连回显一起消失 + 文本回填输入框 + 输入行上方红字提示。
+- **撤回**（对齐 QueueDock 的 `remove`）：`POST /queue/remove` →
+  `Inbox.remove(id)`（内部仍走 `_splice`，先落 `agent/inbox/spliced`
+  `outcome='canceled'` 再改内存）。未 claim 的消息没有 surface，撤回后日志只
+  剩这条痕迹，模型记忆干净。已 claim 的返回 `ok=False`（那种"撤回"得新开回合
+  纠正）。**未移植**：`edit`（改待处理消息文本）与 `steer`（排队项提升为插队项）。
+- **兜底对账**：回合收尾（正常结束/停止/断开）后 `refreshQueue()` 拉一次
+  `/history` 快照——取消时服务端清空 inbox 的 spliced 事件推给了已关闭的流，
+  没人读。
+

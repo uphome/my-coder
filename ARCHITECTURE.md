@@ -291,9 +291,12 @@ JSON 没有类型信息，用 `$xxx` 前缀 key 做类型标记：`$text`/`$tool
   assistant 文本块如何平滑更新"，`_raw/_seg` 状态只活在 DOM 上，不再是
   会话事实的一部分——任何时刻全量重画都一致。
 - 后端配合：`event_to_payload` 透传 turn/step、SSE 补 `turn_start` /
-  `user_message`（带 turn）帧；设计注记见 `web/PROJECTION_DESIGN.md`。
-- todo dock / context 面板 / approval 卡片**不进**本投影（独立订阅、即时
-  UI），保持现状。
+  `user_message`（带 turn，claims 时带 message_id）/ `queue_update` 帧；
+  设计注记见 `web/PROJECTION_DESIGN.md`。
+- todo dock / context 面板 / **队列区（`#queue-dock`）** / approval 卡片
+  **不进**本投影（独立订阅、即时 UI）。队列区尤其关键：**未 claim 的待处理
+  消息没有 seq 位置**，画进消息流只能靠锚点猜顺序——一律画在输入框上方，
+  claim 落 `user/message` 后才进投影（对齐 DSH QueueDock，见 `agent.md` §5）。
 
 ---
 

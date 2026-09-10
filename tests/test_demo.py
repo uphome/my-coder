@@ -96,6 +96,36 @@ def test_inbox_rejects_duplicate_identity():
         inbox.append('next-step', message)
 
 
+def test_inbox_remove_is_durable_and_replays():
+    """撤回（队列区 × 按钮）：撤回同样先落 spliced 事件——重放不会复活它。
+
+    未 claim 的消息没有 surface，撤回后日志里只剩 spliced（outcome=canceled）
+    这一条痕迹；它不进模型记忆（surface 才进），所以撤回是干净的。
+    """
+    session = Session(id='s')
+    inbox = Inbox(session)
+    keep = create_user_message([TextBlock(text='keep')])
+    drop = create_user_message([TextBlock(text='drop')])
+    inbox.append('next-turn', keep)
+    inbox.append('next-step', drop)
+
+    assert inbox.remove(drop.id) is True
+    assert [m.id for m in inbox.next_step] == []
+    assert [m.id for m in inbox.next_turn] == [keep.id]
+    last = session.events[-1]
+    assert last.type == 'agent/inbox/spliced'
+    assert last.data['removed_count'] == 1 and last.data['outcome'] == 'canceled'
+    # 认领过的（不存在于任何队列）撤不回来：返回 False，不改日志
+    assert inbox.remove(drop.id) is False
+    splices = [e for e in session.events if e.type == 'agent/inbox/spliced']
+    assert len(splices) == 3      # 2 次入队 + 1 次撤回；失败的撤回不落事件
+
+    # 重放：队列原地复活成撤回后的样子（撤回不是"内存里删掉"）
+    replayed = Inbox(session)
+    assert [m.id for m in replayed.next_turn] == [keep.id]
+    assert [m.id for m in replayed.next_step] == []
+
+
 def test_interpolation_strict():
     registry = PromptRegistry()
     registry.section('persona', 0, 'You run on {{model}} in {{cwd}}.')
@@ -2177,6 +2207,80 @@ async def test_steer_while_running_becomes_next_step_of_same_turn():
     assert agent.status == 'idle'
 
 
+def test_web_queue_remove_endpoint(tmp_path):
+    """POST /queue/remove：撤回还没轮到的消息（队列区 × 按钮）。
+
+    两个语义要守住：
+    - 撤回后队列区快照为空，且日志里没有产生 user/message surface——
+      这条消息从未成为模型可见的输入（"没有状态不进日志"的逆向：撤回
+      只留 spliced 痕迹）
+    - 已 claim（已进消息流）的撤回返回 ok=False，前端据此提示"改不了"
+    """
+    from fastapi.testclient import TestClient
+
+    from agent_demo import web_app
+
+    web_app.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
+    client = TestClient(web_app.app)
+    seat = web_app._seats['web']
+
+    # 直接入队一条（wakeup=False：不真跑回合）：模拟"已发出、还没轮到"
+    message = create_user_message([TextBlock(text='这条还没轮到')])
+    seat.agent.send(message, 'next-step', wakeup=False)
+    queued_id = message.id
+    assert [r['id'] for r in web_app._queue_rows(seat.session)] == [queued_id]
+
+    # /history 与 /steer 一样带 queue（刷新页面也能恢复队列区）
+    hist = client.get('/history').json()
+    assert [(r['id'], r['placement']) for r in hist['queue']] == [(queued_id, 'steering')]
+    # 会话切换也带 queue
+    client.post('/sessions/new')
+    switched = client.post('/sessions/web/switch').json()
+    assert [r['id'] for r in switched['queue']] == [queued_id]
+
+    resp = client.post('/queue/remove', json={'message_id': queued_id, 'sid': 'web'})
+    assert resp.status_code == 200
+    assert resp.json() == {'ok': True, 'sid': 'web', 'queue': []}
+    assert not seat.agent.inbox.has_pending
+    assert not [e for e in seat.session.events if e.type == 'user/message']
+
+    # 已认领的消息撤不回来
+    assert client.post('/queue/remove',
+                       json={'message_id': queued_id, 'sid': 'web'}).json()['ok'] is False
+    # 校验：缺 id 400 / 会话不存在 404
+    assert client.post('/queue/remove', json={'message_id': '  '}).status_code == 400
+    assert client.post('/queue/remove',
+                       json={'message_id': 'x', 'sid': 'nope'}).status_code == 404
+
+
+def test_web_queue_rows_replay_splice_log(tmp_path):
+    """队列区是日志投影：_queue_rows 折叠拼接/撤回事件后与 inbox 内存一致。
+
+    注意入队走 wakeup=False：这里只测队列投影，不真跑回合（sync 测试里
+    没有事件循环，_wake 会拉不起 driver）。
+    """
+    from agent_demo import web_app
+
+    web_app.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
+    session, agent = web_app._session, web_app._agent
+    assert session is not None and agent is not None
+
+    first = create_user_message([TextBlock(text='插队一')])
+    agent.send(first, 'next-step', wakeup=False)
+    second = create_user_message([TextBlock(text='排队二')])
+    agent.send(second, 'next-turn', wakeup=False)      # next-turn = 'queued'
+    rows = web_app._queue_rows(session)
+    assert [(r['text'], r['placement']) for r in rows] == [
+        ('排队二', 'queued'), ('插队一', 'steering')]
+
+    agent.unqueue(first.id)
+    assert [(r['text'], r['placement']) for r in web_app._queue_rows(session)] == [
+        ('排队二', 'queued')]
+    # 投影与 inbox 内存两条路径同源：id 集合一致
+    projected = {r['id'] for r in web_app._queue_rows(session)}
+    assert projected == {m.id for m in (*agent.inbox.next_turn, *agent.inbox.next_step)}
+
+
 def test_web_steer_requires_active_stream(tmp_path):
     """POST /steer：无活跃对话流（idle）时 409 拒绝；提示用 /chat 开回合。"""
     from fastapi.testclient import TestClient
@@ -2252,9 +2356,12 @@ async def test_web_steer_interrupts_open_sse_stream(tmp_path):
         steer_resp = await client.post('/steer', json={'message': '停一下改方向', 'sid': 'web'})
         assert steer_resp.status_code == 200
         assert steer_resp.json()['queued'] == 'next-step'
-        # 返回 message_id：前端乐观渲染"待处理"气泡、帧到达按 id 认领
+        # 返回 message_id + 队列快照：前端据此在队列区显示"已发出、还没轮到"
         steer_id = steer_resp.json().get('message_id')
         assert steer_id, 'steer must return the queued message id'
+        queued = steer_resp.json()['queue']
+        assert [(r['id'], r['text'], r['placement']) for r in queued] == [
+            (steer_id, '停一下改方向', 'steering')]
         llm.release.set()                             # 放行：第一步完成，下一步轮到插队
         sse = await asyncio.wait_for(reader, timeout=10)
 
@@ -2263,12 +2370,18 @@ async def test_web_steer_interrupts_open_sse_stream(tmp_path):
     assert '插队后回答' in sse
     assert sse.count('"type": "turn_end"') == 1       # 一个回合结束 = 插队没开新回合
     # 认领链路：插队消息的 user_message 帧带 /steer 返回的同一个 message_id
-    # （前端乐观气泡据此转正，不重复画）
+    # （前端据此把它从队列区移进消息流，不重复画）
     steer_frames = [f for f in sse.split('data: ')
                     if '"user_message"' in f and '停一下改方向' in f]
     assert steer_frames, 'steer message must be pushed as a user_message frame'
     steer_frame = json.loads(steer_frames[0].split('\n\n')[0])
     assert steer_frame['message_id'] == steer_id
+    # 队列区通道：入队（spliced）推一条含插队消息的快照，claim 后再推一条空快照
+    queue_frames = [json.loads(f.split('\n\n')[0]) for f in sse.split('data: ')
+                    if '"queue_update"' in f]
+    assert queue_frames, 'inbox splice must be pushed as queue_update frames'
+    assert any(f['queue'] and f['queue'][0]['id'] == steer_id for f in queue_frames)
+    assert queue_frames[-1]['queue'] == []            # 认领后队列区清空
     # 事件日志：全程只有一次 turn/start，两条 user 消息都在
     turns = [e for e in seat.session.events if e.type == 'turn/start']
     assert len(turns) == 1

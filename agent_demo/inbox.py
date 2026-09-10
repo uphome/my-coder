@@ -83,6 +83,21 @@ class Inbox:
         self._splice('next-step', 0, len(self._state['next-step']), [])
         self._splice('next-turn', 0, len(self._state['next-turn']), [])
 
+    def remove(self, message_id: str) -> bool:
+        """按 id 撤回一条尚未认领的消息（Web 队列区的 × 按钮）。
+
+        撤回 = 从队列里 splice 掉：走的仍是 _splice 这条唯一通道，
+        所以 spliced 事件（带 outcome='canceled'）照样先落日志——
+        "入队即记账"对撤回同样成立，重放日志不会复活已撤回的消息。
+        返回 False = 没找到（多半已经被 claim 落成 surface 了）。
+        """
+        for target in TARGETS:
+            for index, message in enumerate(self._state[target]):
+                if message.id == message_id:
+                    self._splice(target, index, 1, [])
+                    return True
+        return False
+
     def claim(self, target: str, turn: int) -> list[Message]:
         """认领一步的完整批次：先取空整个 next-step，再从 next-turn 取一条。
 

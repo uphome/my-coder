@@ -209,14 +209,6 @@ main { flex: 1; overflow-y: auto; overflow-anchor: auto; }
   max-width: 72%; white-space: pre-wrap; word-break: break-word;
   box-shadow: var(--shadow-card);
 }
-/* 插队乐观气泡（steer）：消息已发出但还没轮到它（等当前 step 结束 claim）。
-   半透明 + "待处理"小字——用户必须立刻看到"发出去了"，后端 user_message
-   帧按 message_id 认领后转正（去 pending 类）。 */
-.msg.user .bubble.pending { opacity: .6; position: relative; padding-right: 26px; }
-.msg.user .bubble.pending .pending-tag {
-  position: absolute; top: 2px; right: 6px;
-  font-size: 10px; opacity: .85; letter-spacing: .5px;
-}
 /* 插队失败提示（回合已结束等）：输入行上方短提示，几秒后自动消失 */
 .steer-error {
   max-width: 840px; margin: 0 auto 6px; padding: 6px 12px;
@@ -462,6 +454,56 @@ main { flex: 1; overflow-y: auto; overflow-anchor: auto; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 footer { padding: 10px 22px 18px; background: var(--bg1); border-top: 1px solid var(--border); }
+
+/* ============ 待处理队列区（对齐 DSH QueueDock：输入框上方，"已发出但还没轮到"） ============
+   关键设计：**未 claim 的消息不进消息流**。它此刻在 inbox 里排队、还没有
+   seq 位置，硬插进对话流只能靠猜锚点（历史 bug 的根源）；DSH 的做法是
+   单独一条队列条——用户在输入框正上方看得见"发出去了"，claim 落
+   user/message 后自动从队列条移进消息流。 */
+#queue-dock { max-width: 840px; margin: 0 auto; padding: 0 0 6px; }
+.queue-panel {
+  background: var(--bg2); border: 1px solid var(--border);
+  border-radius: var(--r-m); overflow: hidden;
+}
+.queue-head {
+  width: 100%; display: flex; align-items: center; gap: 8px;
+  padding: 6px 10px; background: none; border: none; color: var(--text-2);
+  font-size: 12px; cursor: pointer; text-align: left;
+  transition: color .12s ease, background .12s ease;
+}
+.queue-head:hover { color: var(--text-1); background: var(--bg-hover); }
+.queue-head .q-ico { color: var(--accent); display: inline-flex; }
+.queue-head .q-count { font-weight: 600; }
+.queue-head .q-chev { margin-left: auto; display: inline-flex; font-size: 10px; color: var(--text-3);
+  transition: transform .18s ease; }
+.queue-panel.open .queue-head .q-chev { transform: rotate(180deg); }
+.queue-list { list-style: none; display: flex; flex-direction: column; }
+.queue-panel:not(.open) .queue-list { display: none; }
+.queue-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 10px; font-size: 12.5px; color: var(--text-1);
+  border-top: 1px solid var(--border);
+}
+.queue-panel:not(.open) .queue-item:first-child { border-top: none; }
+/* placement 徽标：silver=排队中（下一回合） / accent=插队（本回合下一步） */
+.queue-item .q-badge {
+  flex-shrink: 0; font-size: 10px; line-height: 1.6; padding: 0 6px; border-radius: 999px;
+  border: 1px solid var(--border); color: var(--text-3); white-space: nowrap;
+}
+.queue-item[data-placement="steering"] .q-badge { color: var(--accent); border-color: var(--accent-soft); }
+.queue-item .q-text {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--text-2);
+}
+.queue-item.sending .q-text { color: var(--text-3); font-style: italic; }
+.queue-item .q-remove {
+  flex-shrink: 0; width: 20px; height: 20px; line-height: 1; padding: 0;
+  background: none; border: none; border-radius: 4px; cursor: pointer;
+  color: var(--text-3); font-size: 14px;
+  transition: color .12s ease, background .12s ease;
+}
+.queue-item .q-remove:hover { color: var(--err); background: var(--bg-hover); }
+.queue-item .q-remove:disabled { opacity: .4; cursor: not-allowed; }
 #input-row { max-width: 840px; margin: 0 auto; display: flex; gap: 8px; align-items: flex-end; }
 #input {
   flex: 1; resize: none; background: var(--bg2);
@@ -512,6 +554,7 @@ footer { padding: 10px 22px 18px; background: var(--bg1); border-top: 1px solid 
     </main>
     <div id="todo-dock" hidden></div>
     <footer>
+      <div id="queue-dock" hidden></div>
       <div id="input-row">
         <textarea id="input" rows="1" placeholder="给 agent 一个任务…" autofocus></textarea>
         <div class="ctx-wrap" id="ctx-meter" hidden>
@@ -573,6 +616,7 @@ const sessionListEl = document.getElementById('session-list');
 const newBtn = document.getElementById('new-btn');
 const modelLabel = document.getElementById('model-label');
 const todoDockEl = document.getElementById('todo-dock');
+const queueDockEl = document.getElementById('queue-dock');
 const ctxMeter = document.getElementById('ctx-meter');       // .ctx-wrap 根
 const ctxRingBtn = document.getElementById('ctx-ring');       // 28px 圆环触发钮
 const ctxFill = ctxMeter.querySelector('.ctx-fill');
@@ -643,6 +687,7 @@ const ICON_PATHS = {
   edit: '<path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/>',
   bash: '<polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>',
   todo: '<polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>',
+  queue: '<line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><circle cx="4" cy="6" r="1"/><circle cx="4" cy="12" r="1"/><circle cx="4" cy="18" r="1"/>',
   zap: '<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>',
 };
 /* 工具名 → 变体分类 + 图标 + 标题（对齐 dsh 的 classifyTool/variant 系统） */
@@ -807,58 +852,9 @@ function mountUser(node) {
   const row = el('div', 'msg user');
   const bubble = el('div', 'bubble');
   bubble.textContent = node.text;
-  if (node.pending) {
-    // 插队乐观气泡：已发出、等 claim（见 steer()）
-    bubble.classList.add('pending');
-    const tag = el('span', 'pending-tag');
-    tag.textContent = '待处理';
-    bubble.appendChild(tag);
-  }
   row.appendChild(bubble);
   messagesEl.appendChild(row);
-  node.bubbleEl = bubble;   // 供认领转正时去掉 pending 标记
-  node.rowEl = row;         // 供位置锚点用（插队前请求的节点要插到它之前）
   stickIfNeeded();
-}
-
-/* 插队位置锚点：插队那一刻"当前请求"的 (turn, step) + 气泡 DOM。
-   用途见 liveAssistantFor——插队前的请求若尚未建节点（request_start 刚关掉
-   上一个、模型还没输出第一个 chunk），其后新建的节点要插到气泡**之前**。 */
-let pendingAnchor = null;
-
-/* 插队乐观渲染：立即画"待处理"气泡（后端 user_message 帧按 id 认领转正）。
-   与帧驱动路径同形：也是 nodes 里的一个 user 节点，只是先于日志出现——
-   帧到达时认领它而不是重复画（nodes 仍是唯一事实源）。
-
-   **不关闭当前 assistant**：插队消息要等当前 step 跑完才 claim，此前当前
-   step 的剩余 chunk 还会到达——它们属于插队**之前**那次输出，必须排在气泡
-   之上。若这里 closeLiveAssistant，后续 chunk 会新建节点 append 到气泡之
-   后，气泡被夹在中间（实测 bug）。
-
-   另设位置锚点：若插队时当前请求还没有 assistant 节点（典型：request_start
-   刚关闭上一个、模型尚未输出），后到的 chunk 新建节点时必须插到气泡之前
-   （见 liveAssistantFor），否则插队前的输出会掉到气泡下方。 */
-function mountPendingUser(text, messageId) {
-  const node = { kind: 'user', turn: lastUserTurn, text, pending: true, messageId };
-  nodes.push(node);
-  mountUser(node);
-  pendingAnchor = curRequest
-    ? { turn: curRequest.turn, step: curRequest.step, rowEl: node.rowEl }
-    : null;
-}
-/* 认领：后端帧带 message_id 到达时，把对应的 pending 节点转正（不重画）。
-   返回 true = 已认领（调用方不再新建气泡）。 */
-function claimPendingUser(messageId) {
-  if (!messageId) return false;
-  const node = nodes.find(n => n.kind === 'user' && n.pending && n.messageId === messageId);
-  if (!node) return false;
-  node.pending = false;
-  if (node.bubbleEl) {
-    node.bubbleEl.classList.remove('pending');
-    const tag = node.bubbleEl.querySelector('.pending-tag');
-    if (tag) tag.remove();
-  }
-  return true;
 }
 
 /* 压缩 checkpoint 卡片（preamble + <compacted-summary> 摘要，非真人发言） */
@@ -1110,6 +1106,139 @@ function addToolResultTo(node, res) {
   stickIfNeeded();
 }
 
+/* ============ 待处理队列区（对齐 DSH QueueDock） ============
+ * 为什么单独一块、而不是画进消息流：**未 claim 的消息没有 seq 位置**。
+ * steer 消息进 next-step 队列后，要等当前 step 结束才被 claim 落
+ * user/message（实测延迟 890~1698 个事件）；这段"半开窗口"里它在日志中
+ * 没有位置，画进对话流只能靠 (turn,step) 锚点猜顺序——上一版正是这么
+ * 做的，位置 bug 反复出现。DSH 的答案是根本不画进流里：单开一条队列条
+ * 显示"已发出、还没轮到"，claim 后自动移进消息流。
+ *
+ * 两份来源（nodes 之外的第二个投影，唯一事实源仍是服务端日志）：
+ *   serverQueue —— 服务端快照（SSE queue_update 帧 / POST 响应里的 queue），
+ *                  由 _queue_rows() 重放 agent/inbox/spliced 折叠出来；
+ *   localQueue  —— 本地在途回显（POST 还没回来时的"发送中"占位）。
+ * 渲染 = 两者拼接；serverQueue 是快照式替换（幂等），localQueue 只由
+ * 本地请求生命周期增删——所以 SSE 帧与 HTTP 响应谁先到都不会重复/丢失。 */
+let serverQueue = [];      // 服务端队列快照：[{id, text, placement}]
+let localQueue = [];       // 本地在途回显：[{id:'local-N', text, placement, local:true}]
+let queueSeq = 0;          // 本地回显 id 计数
+let queueOpen = true;      // 多条时是否展开（单条无头，直接显示）
+
+/* 服务端快照替换。注意：先 splice 后响应，所以响应里的 queue 一定已含
+   刚入队的那条——乐观回显与它无缝衔接，不需要按 id 去重。 */
+function setQueue(rows) {
+  serverQueue = Array.isArray(rows) ? rows : [];
+  renderQueueDock();
+}
+/* 本地在途回显：POST 发出即显示"发送中"，请求收尾时统一撤掉
+   （成功则服务端快照已含真身，失败则连回显一起消失 + 输入框回填）。 */
+function addLocalQueue(text, placement) {
+  const entry = { id: 'local-' + (++queueSeq), text, placement, local: true };
+  localQueue.push(entry);
+  renderQueueDock();
+  return entry.id;
+}
+function dropLocalQueue(id) {
+  localQueue = localQueue.filter(e => e.id !== id);
+  renderQueueDock();
+}
+/* claim 落 surface 后按 id 移出（队列区 → 消息流）。服务端的
+   queue_update 帧通常已经先一步做了这件事，这里是兜底（防帧丢失）。 */
+function removeQueuedById(messageId) {
+  if (!messageId) return;
+  const before = serverQueue.length;
+  serverQueue = serverQueue.filter(r => r.id !== messageId);
+  if (serverQueue.length !== before) renderQueueDock();
+}
+
+const PLACEMENT_LABEL = { queued: '排队中', steering: '插队' };
+
+function renderQueueDock() {
+  queueDockEl.innerHTML = '';
+  const rows = serverQueue.concat(localQueue);
+  if (!rows.length) { queueDockEl.hidden = true; return; }
+  queueDockEl.hidden = false;
+  const single = rows.length === 1;
+  // 单条：无头部（对齐 DSH：一行直接显示，不需要展开/收起）；多条：可折叠
+  const open = single || queueOpen;
+  const panel = el('div', 'queue-panel' + (open ? ' open' : ''));
+  if (!single) {
+    const head = el('button', 'queue-head');
+    head.type = 'button';
+    const ico = el('span', 'q-ico');
+    ico.innerHTML = svgIcon(ICON_PATHS.queue, ' width="13" height="13"');
+    const count = el('span', 'q-count');
+    count.textContent = `${rows.length} 条待处理`;
+    const chev = el('span', 'q-chev');
+    chev.textContent = '▾';
+    head.appendChild(ico);
+    head.appendChild(count);
+    head.appendChild(chev);
+    head.addEventListener('click', () => { queueOpen = !queueOpen; renderQueueDock(); });
+    panel.appendChild(head);
+  }
+  const list = el('ul', 'queue-list');
+  for (const row of rows) {
+    const li = el('li', 'queue-item' + (row.local ? ' sending' : ''));
+    li.dataset.placement = row.placement || 'queued';
+    const badge = el('span', 'q-badge');
+    badge.textContent = row.local ? '发送中' : (PLACEMENT_LABEL[row.placement] || '排队中');
+    const text = el('span', 'q-text');
+    text.textContent = row.text || '';
+    text.title = row.text || '';
+    li.appendChild(badge);
+    li.appendChild(text);
+    if (!row.local) {
+      // 撤回：只对还没 claim 的消息可用（后端不认已进流的历史）
+      const btn = el('button', 'q-remove');
+      btn.type = 'button';
+      btn.textContent = '×';
+      btn.title = '撤回（还没轮到它，撤回后不会进入对话）';
+      btn.addEventListener('click', () => removeQueuedItem(row.id, btn));
+      li.appendChild(btn);
+    }
+    list.appendChild(li);
+  }
+  panel.appendChild(list);
+  queueDockEl.appendChild(panel);
+}
+
+/* 撤回一条待处理消息：POST /queue/remove → 用返回的最新快照重画。
+   注意入队/撤回都是"先落日志再改内存"（agent/inbox/spliced），所以
+   同一会话的 SSE 也会推来 queue_update 帧——两条路径都写同一份快照，
+   幂等。 */
+async function removeQueuedItem(messageId, btn) {
+  btn.disabled = true;
+  try {
+    const res = await fetch('/queue/remove', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message_id: messageId, sid: currentSid }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+    if (!data.ok) showSteerError('这条消息已经开始了，撤回不了——直接发新指令纠正它');
+    setQueue(data.queue);
+  } catch (e) {
+    btn.disabled = false;
+    showSteerError('撤回失败：' + (e.message || e));
+  }
+}
+
+/* 队列区兜底刷新：回合收尾（正常结束 / 用户点停止 / 断开）后拉一次服务端
+   快照。为什么需要：停止/断开时服务端会 cancel 并清空 inbox（spliced 事件
+   落了日志），但那条 SSE 流已经关了，queue_update 帧没人读——不刷新的话
+   队列区会留着已经作废的条目。 */
+async function refreshQueue() {
+  try {
+    const res = await fetch(`/history?sid=${encodeURIComponent(currentSid)}`);
+    if (!res.ok) return;
+    const data = await res.json();
+    setQueue(data.queue);
+  } catch (e) { /* 拉不到就保持现状，下次入队/帧到达会再同步 */ }
+}
+
 /* ============ 常驻 todo dock（对齐 harness TodoDock：有清单才显示） ============ */
 const GLYPH_DONE = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><circle cx="7" cy="7" r="6.2" stroke="currentColor" stroke-width="1.2"/><path d="M4.2 7.2 L6.2 9.1 L9.8 5.1" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>';
 const GLYPH_RUN = '<svg class="glyph-run" width="14" height="14" viewBox="0 0 14 14" fill="none"><circle cx="7" cy="7" r="6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-dasharray="26 90"/></svg>';
@@ -1303,8 +1432,7 @@ function renderHistory(history) {
   lastTurnShown = null;
   lastUserTurn = null;
   liveAsst = null;   // 历史全量渲染：不再有实时打开的 assistant
-  pendingAnchor = null;   // 插队位置锚点引用的是旧 DOM，重建后失效
-  curRequest = null;
+  localQueue = [];   // 本地在途回显属于旧会话/旧流，全量重画时清掉
   let lastAsst = null;   // 历史构建期"最近的 assistant 节点"（tool_result 配对用）
   for (const m of history) {
     if (m.role === 'user') {
@@ -1355,6 +1483,7 @@ function renderHistory(history) {
     renderProjection();
   }
   messagesEl.classList.remove('no-anim');
+  renderQueueDock();   // 本地回显随会话/流一起清掉，队列区按服务端快照重画
   scrollBottom();
   stickBottom = true;
 }
@@ -1430,6 +1559,7 @@ async function switchSession(sid) {
     const data = await res.json();
     currentSid = data.id;
     setTodos(data.todos);
+    setQueue(data.queue);
     setCtxOpen(false);          // 切会话：收起上个会话展开的明细面板
     updateContext(data.context);
     renderHistory(data.history);
@@ -1456,6 +1586,7 @@ async function newSession() {
     const data = await res.json();
     currentSid = data.id;
     setTodos(data.todos);
+    setQueue(data.queue);
     setCtxOpen(false);          // 新建会话同理：面板默认收起
     updateContext(data.context);
     renderHistory(data.history);
@@ -1468,7 +1599,6 @@ async function newSession() {
    chunk/reasoning/tool_call 自带 turn+step（后端已透传）；tool_result 无
    key → 挂当前打开的 assistant（它紧跟在发出调用的 step 后）。 */
 let liveAsst = null;      // 实时流当前打开的 assistant 节点（渲染缓存挂 node）
-let curRequest = null;    // 最近 request_start 的 {turn, step}（插队锚点用）
 function closeLiveAssistant() { if (liveAsst) { closeAssistantNode(liveAsst); liveAsst = null; } }
 function liveAssistantFor(turn, step) {
   if (liveAsst && liveAsst.liveTurn === turn && liveAsst.liveStep === step) return liveAsst;
@@ -1477,13 +1607,6 @@ function liveAssistantFor(turn, step) {
                  liveTurn: turn, liveStep: step };
   nodes.push(node);
   mountAssistant(node);
-  // 插队位置锚点命中：这个节点属于"插队那一刻正在进行的请求"（插队前的输出），
-  // 要插到待处理气泡**之前**——否则它会 append 到气泡之后，插队前的输出
-  // 看起来排在插队消息下面（实测 bug）。
-  if (pendingAnchor && pendingAnchor.turn === turn && pendingAnchor.step === step
-      && pendingAnchor.rowEl && pendingAnchor.rowEl.parentNode === messagesEl) {
-    messagesEl.insertBefore(node.box, pendingAnchor.rowEl);
-  }
   liveAsst = node;
   return node;
 }
@@ -1495,10 +1618,6 @@ function applyFrame(payload) {
       // liveAssistantFor 新建节点（思维链/文本/工具按"每次请求"分开）。
       // 工具调用与结果留在发起它的节点（工具执行完才发下一个 request_start）。
       closeLiveAssistant();
-      // 新请求开始 = 之前的插队锚点已失效（插队前的那个请求已收尾）：
-      // 它之后的输出属于插队响应，应正常排在气泡之后。
-      curRequest = { turn: payload.turn, step: payload.step };
-      pendingAnchor = null;
       break;
     }
     case 'chunk': {
@@ -1538,16 +1657,11 @@ function applyFrame(payload) {
       break;
     }
     case 'user_message': {
-      // 真人发言（首问或 steer 插队）：先尝试认领乐观渲染的"待处理"气泡
-      // （steer 已本地画过、带同一个 message_id）——认领则只转正、不重复画。
-      if (claimPendingUser(payload.message_id)) {
-        // 已认领：关掉可能已打开的 assistant（插队消息位置语义与新建一致）
-        closeLiveAssistant();
-        break;
-      }
-      // 未认领（普通发送/历史旧帧无 id）：关掉上一个打开的 assistant，新建气泡。
-      // send/steer 只 POST 不清屏——气泡完全由这帧驱动（单一事实源）；
-      // steer 成功路径另有乐观气泡，上面认领分支已覆盖。
+      // 真人发言（首问或 steer 插队）：先把它从队列区移出（它已经 claim
+      // 落 user/message，位置从此确定），再关掉上一个打开的 assistant、
+      // 按真实 turn 新建气泡。send/steer 只 POST 不清屏——气泡完全由这帧
+      // 驱动（单一事实源，无双画风险）。
+      removeQueuedById(payload.message_id);
       closeLiveAssistant();
       const node = { kind: 'user',
                      turn: payload.turn !== undefined ? payload.turn : lastUserTurn,
@@ -1557,6 +1671,10 @@ function applyFrame(payload) {
       mountUser(node);
       break;
     }
+    case 'queue_update':
+      // 待处理队列快照（入队/撤回/claim 都会推）：整份替换，幂等
+      setQueue(payload.queue);
+      break;
     case 'todo_update':
       // 常驻 dock 实时更新：模型每次重写清单，面板跟着变
       setTodos(payload.todos);
@@ -1655,6 +1773,7 @@ async function send() {
     finalizeTurn();
     streaming = false;
     setBusy(false);
+    refreshQueue();   // 收尾对账：取消/断开时清掉作废的待处理条目
     loadSessions();   // 事件数/标题已变，立即刷新
     // 自动标题在回合结束后台生成（一次小 LLM 请求）：稍等再刷一次列表
     setTimeout(loadSessions, 2500);
@@ -1662,38 +1781,40 @@ async function send() {
 }
 /* 运行中插队（steer）：消息进当前回合 next-step，回合不结束——所以
    不复用 /chat 的 SSE 读取循环（那个流还开着，模型下一步的事件会
-   继续沿它推过来）。用户气泡**乐观渲染**：POST 成功立即画"待处理"气泡
-   （消息要等当前 step 结束才 claim 落 surface，不能干等），后端
-   user_message 帧按 message_id 认领转正。 */
+   继续沿它推过来）。反馈走**队列区**（不是消息流）：POST 期间先在
+   队列区放一条"发送中"回显（用户立刻知道发出去了），响应带回服务端
+   快照（已含真身）后撤掉回显；claim 落 user/message 时再自动移进
+   消息流。失败则撤掉回显 + 文本回填输入框 + 可见提示。 */
 async function steer(text) {
   input.value = '';
   input.style.height = 'auto';
+  const localId = addLocalQueue(text, 'steering');
   try {
     const res = await fetch('/steer', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ message: text, sid: currentSid }),
     });
-    if (res.ok) {
-      const data = await res.json();
-      // 乐观气泡：立即让用户看到"发出去了"（pending 半透明 + 待处理标记）
-      mountPendingUser(text, data.message_id);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      // 插队失败（回合恰好结束/无活跃流）：文本放回输入框 + 可见提示，
+      // 用户按回车即走 /chat 开新回合（此时 busy 已复位）。
+      console.warn('steer failed:', data.detail || res.status);
+      input.value = text;
+      input.style.height = 'auto';
+      input.focus();
+      showSteerError(data.detail || `插队失败（HTTP ${res.status}）——回合可能已结束，按回车重新发送`);
       return;
     }
-    const data = await res.json().catch(() => ({}));
-    // 插队失败（回合恰好结束/无活跃流）：文本放回输入框 + 可见提示，
-    // 用户按回车即走 /chat 开新回合（此时 busy 已复位）。
-    console.warn('steer failed:', data.detail || res.status);
-    input.value = text;
-    input.style.height = 'auto';
-    input.focus();
-    showSteerError(data.detail || `插队失败（HTTP ${res.status}）——回合可能已结束，按回车重新发送`);
+    setQueue(data.queue);
   } catch (e) {
     console.error('steer failed', e);
     input.value = text;
     input.style.height = 'auto';
     input.focus();
     showSteerError('插队失败（网络错误）——按回车重新发送');
+  } finally {
+    dropLocalQueue(localId);
   }
 }
 /* 插队失败提示：输入行上方一条，6 秒后自动消失（不打断输入） */
@@ -1770,6 +1891,7 @@ ctxCompactBtn.addEventListener('click', async () => {
       // 重新拉历史：checkpoint 顶替旧回合 → 卡片重新渲染、占用回落
       const hist = await (await fetch(`/history?sid=${encodeURIComponent(currentSid)}`)).json();
       setTodos(hist.todos);
+      setQueue(hist.queue);
       updateContext(hist.context);
       renderHistory(hist.history);
       loadSessions();
@@ -1807,6 +1929,7 @@ ctxCompactBtn.addEventListener('click', async () => {
     const res = await fetch(`/history?sid=${encodeURIComponent(currentSid)}`);
     const data = await res.json();
     setTodos(data.todos);
+    setQueue(data.queue);
     updateContext(data.context);
     renderHistory(data.history);
   } catch (e) { console.error('load history failed', e); }

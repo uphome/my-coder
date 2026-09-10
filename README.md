@@ -69,6 +69,10 @@ conda run -n agent-demo python -m agent_demo.web_app --workspace .           # �
 - **运行中可插队（steer）**：agent 干活时输入框仍可打字，回车 = 插队当前
   回合（下一步即时处理，事件沿原 SSE 流推回）；idle 时回车 = 开新回合。
   两会话并行跑互不干扰（每会话独立 agent/事件流/审批，seat 化隔离）
+- **待处理队列区（对齐 DSH QueueDock）**：已发出但还没轮到的消息（插队 /
+  排队）显示在输入框上方一条队列条里——**不插进消息流**（未 claim 的消息在
+  日志里没有 seq 位置）；claim 落 `user/message` 后自动移进对话，行尾 × 可
+  撤回（还没轮到就反悔）
 - 输入行旁一枚**上下文占用圆环**（dsh ContextMeter 同款）：常态只有 20px+
   SVG 环不占布局，点击展开悬浮面板——当前占用 %、**全会话累计消耗 token**、
   **全会话缓存命中率**（真实 usage 才显示）；面板底部有**压缩旧对话**按钮

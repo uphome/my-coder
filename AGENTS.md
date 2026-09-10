@@ -9,7 +9,7 @@ Python 复刻 deepseek-harness 架构的教学 demo（agent 框架本身，不�
 # 质量门：ruff + mypy + pytest 三绿才可提交（pyproject.toml 已配好）
 conda run -n agent-demo python -m ruff check agent_demo tests
 conda run -n agent-demo python -m mypy agent_demo
-conda run -n agent-demo python -m pytest        # 65 个测试
+conda run -n agent-demo python -m pytest        # 74 个测试
 
 # CLI（可 pip install -e . 后直接 agent-demo；或模块方式跑）
 conda run --no-capture-output -n agent-demo python -m agent_demo.cli --workspace . --fake "read README.md and summarize"
@@ -59,6 +59,21 @@ conda run --no-capture-output -n agent-demo python -m agent_demo.web_app --works
     正文作为 tool/result（source.kind='tool'）进 derive_messages，与读任何
     文件机制一致（落日志可重建、可被 compaction 折叠）；**不新增 skill() 专用
     加载工具**，不搞 DSH 式注入 user 快照
+- **待处理消息（inbox 队列）的显示规则**（落地时遵循；DSH 对照与两次位置
+  bug 的复盘见 `agent.md` §5）：
+  - **未 claim 的消息绝不画进消息流**——它在日志里还没有 seq 位置，插进去
+    只能靠 `(turn, step)` 锚点猜顺序（上一版就是这么错位的）。一律画在输入框
+    上方的 `#queue-dock`；claim 落 `user/message` 后由帧移出、气泡进流
+  - **队列是日志投影**：`web_app._queue_rows()` 重放 `agent/inbox/spliced`
+    折叠出 `[{id, text, placement}]`（next-turn→`queued` / next-step→
+    `steering`）；不新增队列状态。三条推送通道幂等：SSE `queue_update` 帧、
+    `POST /steer` 响应体、`/history` 与 `/sessions/*/switch|new` 响应体
+  - **撤回**：`POST /queue/remove` → `Inbox.remove(id)`，内部仍走 `_splice`
+    （先落 spliced `outcome='canceled'` 再改内存）；未 claim 的消息没有 surface，
+    撤回是干净的；已 claim 的返回 `ok=False`
+  - **前端两份队列**：`serverQueue`（服务端快照，整份替换）+
+    `localQueue`（POST 在途的"发送中"回显，请求收尾即撤）；渲染 = 两者拼接。
+    这样 SSE 帧与 HTTP 响应谁先到都不会重复或丢失
 
 ## 入口与工具
 

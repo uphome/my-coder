@@ -96,13 +96,22 @@ class Agent:
     def steer(self, text: str) -> str:
         """插队本回合：入队 next-step 并唤醒（当前回合内即时生效）。
 
-        返回消息 id：Web 端据此立即乐观渲染"待处理"气泡（消息要等当前
-        step 跑完才 claim 落 surface，前端不能干等），claim 落 user/message
-        后 SSE 帧带同一个 id 认领转正。
+        返回消息 id：Web 端据此在队列区标记这条待处理消息（消息要等
+        step 边界 claim 才落 user/message surface，不能干等）；claim 后
+        SSE 帧带同一个 id，前端据此把它从队列区移进消息流。
         """
         message = create_user_message([TextBlock(text=text)])
         self.send(message, 'next-step', wakeup=True)
         return message.id
+
+    def unqueue(self, message_id: str) -> bool:
+        """撤回一条还没被认领的待处理消息（Web 队列区的 × 按钮）。
+
+        只动 inbox：未 claim 的消息本来就没有 surface，撤回后日志里
+        只剩 spliced（outcome='canceled'）这一条痕迹——它不进模型记忆
+        （surface 才进），所以撤回是"干净"的。已 claim 的返回 False。
+        """
+        return self.inbox.remove(message_id)
 
     def send(self, message: Message, target: str = 'next-turn', wakeup: bool = True) -> None:
         """唯一的入队入口：消息进 inbox，然后拍一下状态机。"""

@@ -402,6 +402,35 @@ def _history_payloads(session) -> list[dict]:
     return payloads
 
 
+def _queue_rows(session) -> list[dict]:
+    """待处理队列（日志投影）→ 前端队列区的行。
+
+    对齐 DSH QueueDock：**未 claim 的消息不进消息流**（它们还没有 seq 位置，
+    硬插进流里会位置错乱），而是显示在输入框上方的队列区；claim 落
+    user/message（surface）后才进消息流。
+
+    队列本身是日志投影：重放 `agent/inbox/spliced` 事件折叠出两条队列
+    （next-turn = 普通排队 / next-step = 插队），placement 供前端区分标记。
+    """
+    state: dict[str, list] = {'next-turn': [], 'next-step': []}
+    for event in session.events:
+        if event.type != 'agent/inbox/spliced':
+            continue
+        data = event.data if isinstance(event.data, dict) else {}
+        target = data.get('target')
+        if target not in state:
+            continue
+        start = int(data.get('start', 0))
+        removed = int(data.get('removed_count', 0))
+        state[target][start:start + removed] = list(data.get('inserted') or [])
+    rows: list[dict] = []
+    for message in state['next-turn']:
+        rows.append({'id': message.id, 'text': _first_text_of(message), 'placement': 'queued'})
+    for message in state['next-step']:
+        rows.append({'id': message.id, 'text': _first_text_of(message), 'placement': 'steering'})
+    return rows
+
+
 def _open_session(sid: str, *, allow_missing: bool) -> dict:
     """打开/切换到会话：Seat get-or-create + 设置全局焦点（_session/_agent 别名）。"""
     global _session, _agent, _current_sid
@@ -414,6 +443,7 @@ def _open_session(sid: str, *, allow_missing: bool) -> dict:
         'id': sid,
         'history': _history_payloads(seat.session),
         'todos': fold_todos(seat.session) or [],  # 当前 todo 投影：切换会话时恢复 dock
+        'queue': _queue_rows(seat.session),        # 待处理队列投影：切换会话时恢复队列区
         'context': _context_payload(seat.session),  # 上下文占用：切换会话时恢复圆环
     }
 
@@ -549,6 +579,10 @@ def event_to_payload(event, session: Session | None = None) -> dict | None:
         # 常驻 dock 的实时更新：模型每次重写清单，前端面板跟着变
         todos = event.data.get('todos') if isinstance(event.data, dict) else None
         return {'type': 'todo_update', 'todos': todos or []}
+    if event.type == 'agent/inbox/spliced' and session is not None:
+        # 队列区实时更新（对齐 DSH QueueDock）：入队/认领/取消都落 spliced，
+        # 前端据此显示"待处理消息"（未 claim 不进消息流）。
+        return {'type': 'queue_update', 'queue': _queue_rows(session)}
     if event.type == 'turn/end':
         # 回合结束附带上下文占用（圆环数据）：真实 usage 估算 / 1M 窗口。
         # 用事件所属会话的占用（并发隔离：不要读全局焦点会话的）
@@ -703,6 +737,7 @@ def history(sid: str | None = None) -> dict:
     return {
         'history': _history_payloads(seat.session),
         'todos': fold_todos(seat.session) or [],
+        'queue': _queue_rows(seat.session),
         'context': _context_payload(seat.session),
     }
 
@@ -821,9 +856,37 @@ async def steer(request: Request) -> dict:
         # 前端会把输入放回，等回合真正结束后走 /chat。
         raise HTTPException(409, 'agent 已空闲——回合即将结束，请稍后用普通消息')
     message_id = seat.agent.steer(message)
-    # 返回消息 id：前端据此乐观渲染"待处理"气泡（插队消息要等当前 step
-    # 结束才 claim 落 surface，不能干等）；claim 后 user_message 帧带同 id 认领。
-    return {'ok': True, 'sid': sid, 'queued': 'next-step', 'message_id': message_id}
+    # 返回消息 id + 队列投影：前端把消息渲染进"队列区"（不进消息流——
+    # 未 claim 的消息还没有 seq 位置，硬插进流里会位置错乱，对齐 DSH
+    # QueueDock）；claim 后 user_message 帧带同 id 认领，从队列区移除。
+    return {
+        'ok': True,
+        'sid': sid,
+        'queued': 'next-step',
+        'message_id': message_id,
+        'queue': _queue_rows(seat.session),
+    }
+
+
+@app.post('/queue/remove')
+async def queue_remove(request: Request) -> dict:
+    """撤回一条待处理消息（队列区每行的 × 按钮，对齐 DSH QueueDock 的 remove）。
+
+    撤回不是"删除历史"：未 claim 的消息还没有 surface，从 inbox 里 splice
+    掉就等于它从未成为模型可见的输入（日志留 spliced 痕迹可审计/可重放）。
+    已 claim（已进消息流）的返回 ok=False——那种"撤回"要新开回合纠正。
+    """
+    _check_init()
+    body = await request.json()
+    message_id = (body.get('message_id') or '').strip()
+    if not message_id:
+        raise HTTPException(400, 'message_id must not be empty')
+    sid = body.get('sid') or _current_sid
+    seat = _seats.get(sid)
+    if seat is None:
+        raise HTTPException(404, f'session {sid!r} not open — switch to it first')
+    ok = seat.agent.unqueue(message_id)
+    return {'ok': ok, 'sid': sid, 'queue': _queue_rows(seat.session)}
 
 
 @app.post('/compact')

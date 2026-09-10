@@ -42,6 +42,7 @@ SSE 帧（后端已带 turn/step 标记后）落到投影：
 | `tool_result` {call_id,...} | 在**当前 assistant 的 tools** 里按 call_id 配对更新 |
 | `turn_end` | 关闭当前 assistant（流式收尾） |
 | `todo_update` | 独立订阅（不进投影） |
+| `queue_update` | 独立订阅（不进投影）——待处理消息还没有 seq 位置，画在输入框上方的队列区 |
 | `approval_request` | 独立 UI（不进投影） |
 
 关键：chunk/reasoning/tool_call 都带 **turn+step** 后，投影能精确找到
@@ -93,4 +94,8 @@ DOM 节点上、只服务"最后一个 assistant 的文本块如何平滑更新"
 ## 7. 范围外（保持现状）
 
 - todo dock / context 圆环：独立订阅，不进投影
+- 队列区（`#queue-dock`）：独立订阅，不进投影。**未 claim 的待处理消息
+  （steer/排队）没有 seq 位置**，硬插进对话流只能靠 `(turn,step)` 锚点猜顺序
+  （位置 bug 的根源）；改为输入框上方的队列条显示，claim 落 `user/message`
+  后才由帧移进投影。详见 `agent.md` §5
 - approval 卡片：即时 UI，不进投影（不落日志，刷新即消失——现状）
