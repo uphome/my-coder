@@ -22,12 +22,21 @@ GLOB_MAX_RESULTS = 100   # glob 内联保留的最大路径数
 # 截断提示教模型把大输出重定向到文件，再用 read_file 分页读。
 BASH_MAX_OUTPUT_CHARS = 8000
 
-# web_search 预算：结果条数上限（不进模型 schema，模型只看到"前 N 条"）、
-# 单次网络超时、以及默认搜索端点（DuckDuckGo HTML，无需 API key）。
-# 网络后端可注入（tools/web_search.register(backend=...)），这几个值只约束默认后端。
-WEB_SEARCH_MAX_RESULTS = 5
-WEB_SEARCH_TIMEOUT_S = 10.0
-WEB_SEARCH_ENDPOINT = 'https://html.duckduckgo.com/html/'
+# web_search 预算与端点（对齐 DSH packages/web/web-search-deepseek）：
+# 搜索能力由 DeepSeek 官方在服务端提供（原生 web_search_20250305 服务端工具），
+# 我们只做"发请求 + 解析结构化结果"——绝不自己抓网页、绝不从正文抠 URL。
+#
+# 注意端点：这是 DeepSeek 的 **Anthropic 兼容** Messages 端点（不是
+# chat-completions 的 DEEPSEEK_BASE_URL），只共享 DEEPSEEK_API_KEY，
+# 不复用那个环境变量当 base（DSH provider.ts 原话如此）。
+WEB_SEARCH_BASE_URL = 'https://api.deepseek.com/anthropic/v1'
+WEB_SEARCH_MODEL = 'deepseek-v4-flash'
+WEB_SEARCH_MAX_USES = 5       # 服务端工具每次请求最多搜索几次（进请求体，不是 schema）
+WEB_SEARCH_MAX_RESULTS = 5    # 合并去重后返回给模型的结果条数上限
+WEB_SEARCH_MAX_QUERIES = 4    # 一次工具调用允许的 query 条数上限（DSH WEB_SEARCH_MAX_QUERIES）
+# 一次搜索 = 一个完整模型轮次（服务端工具要真去搜、还要生成答复），
+# 别按普通 HTTP 给 10s——60s 量级才够（DSH 也把预算交给调用方 timeoutMs）。
+WEB_SEARCH_TIMEOUT_S = 60.0
 
 # 上下文压缩默认阈值：deepseek-v4 窗口 1M token，过半（0.5M）就自动压
 # 旧回合，给后续回合留足空间（摘要请求本身也吃窗口）。显式 0 可关闭。
