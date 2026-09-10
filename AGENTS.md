@@ -9,7 +9,7 @@ Python 复刻 deepseek-harness 架构的教学 demo（agent 框架本身，不�
 # 质量门：ruff + mypy + pytest 三绿才可提交（pyproject.toml 已配好）
 conda run -n agent-demo python -m ruff check agent_demo tests
 conda run -n agent-demo python -m mypy agent_demo
-conda run -n agent-demo python -m pytest        # 74 个测试
+conda run -n agent-demo python -m pytest        # 75 个测试
 
 # CLI（可 pip install -e . 后直接 agent-demo；或模块方式跑）
 conda run --no-capture-output -n agent-demo python -m agent_demo.cli --workspace . --fake "read README.md and summarize"
@@ -64,10 +64,13 @@ conda run --no-capture-output -n agent-demo python -m agent_demo.web_app --works
   - **未 claim 的消息绝不画进消息流**——它在日志里还没有 seq 位置，插进去
     只能靠 `(turn, step)` 锚点猜顺序（上一版就是这么错位的）。一律画在输入框
     上方的 `#queue-dock`；claim 落 `user/message` 后由帧移出、气泡进流
-  - **队列是日志投影**：`web_app._queue_rows()` 重放 `agent/inbox/spliced`
-    折叠出 `[{id, text, placement}]`（next-turn→`queued` / next-step→
-    `steering`）；不新增队列状态。三条推送通道幂等：SSE `queue_update` 帧、
-    `POST /steer` 响应体、`/history` 与 `/sessions/*/switch|new` 响应体
+  - **队列是状态层投影**：`Inbox.queued_items()` 折重放结果产出
+    `QueuedItem(placement, message)`（next-turn→`queued` / next-step→
+    `steering`），和 `Session.derive_messages()` 并列；**折叠只有一份**
+    （`_apply`/`_splice` 共用 splice 语义），web/cli 等宿主只做序列化
+    （`web_app._queue_rows(agent)` 摊平成 JSON）。三条推送通道幂等：SSE
+    `queue_update` 帧、`POST /steer` 响应体、`/history` 与
+    `/sessions/*/switch|new` 响应体
   - **撤回**：`POST /queue/remove` → `Inbox.remove(id)`，内部仍走 `_splice`
     （先落 spliced `outcome='canceled'` 再改内存）；未 claim 的消息没有 surface，
     撤回是干净的；已 claim 的返回 `ok=False`

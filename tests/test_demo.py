@@ -2228,7 +2228,7 @@ def test_web_queue_remove_endpoint(tmp_path):
     message = create_user_message([TextBlock(text='这条还没轮到')])
     seat.agent.send(message, 'next-step', wakeup=False)
     queued_id = message.id
-    assert [r['id'] for r in web_app._queue_rows(seat.session)] == [queued_id]
+    assert [r['id'] for r in web_app._queue_rows(seat.agent)] == [queued_id]
 
     # /history 与 /steer 一样带 queue（刷新页面也能恢复队列区）
     hist = client.get('/history').json()
@@ -2253,10 +2253,46 @@ def test_web_queue_remove_endpoint(tmp_path):
                        json={'message_id': 'x', 'sid': 'nope'}).status_code == 404
 
 
-def test_web_queue_rows_replay_splice_log(tmp_path):
-    """队列区是日志投影：_queue_rows 折叠拼接/撤回事件后与 inbox 内存一致。
+def test_inbox_queued_items_is_a_session_projection():
+    """队列投影在**状态层**：Inbox.queued_items() 与 derive_messages() 并列。
 
-    注意入队走 wakeup=False：这里只测队列投影，不真跑回合（sync 测试里
+    为什么这条要单独测（架构回归）：投影曾被放在 web_app 里自己重放
+    agent/inbox/spliced——同一事件类型两份折叠（Inbox._apply 一份、web 一份）
+    必然分叉，而且投影绑死在 Web 宿主上（CLI/测试拿不到）。现在只有一份：
+    _state 本身就是重放结果，queued_items() 只是给它贴上 placement 语义。
+
+    断言三件事：
+    - placement 映射：next-turn→queued、next-step→steering，顺序固定
+    - 撤回/拼接后投影跟着变（走的是同一份折叠）
+    - **换个 Inbox 重放同一段日志，投影逐字段相同**（可重建 ⟺ 模型可见的
+      同款保证；resume 后队列区不会变形）
+    """
+    session = Session(id='s')
+    inbox = Inbox(session)
+    steer_one = create_user_message([TextBlock(text='插队一')])
+    queued_two = create_user_message([TextBlock(text='排队二')])
+    steer_three = create_user_message([TextBlock(text='插队三')])
+    inbox.append('next-step', steer_one)
+    inbox.append('next-turn', queued_two)
+    inbox.append('next-step', steer_three)
+
+    items = inbox.queued_items()
+    assert [(i.placement, i.id) for i in items] == [
+        ('queued', queued_two.id), ('steering', steer_one.id), ('steering', steer_three.id)]
+    assert items[0].message is queued_two          # 值对象持有本体，不是副本
+    assert items[1].id == steer_one.id             # id 直接取自 message
+
+    inbox.remove(steer_one.id)
+    assert [i.id for i in inbox.queued_items()] == [queued_two.id, steer_three.id]
+
+    replayed = Inbox(session).queued_items()       # 日志重放 → 同一投影
+    assert replayed == inbox.queued_items()        # frozen dataclass：逐字段相等
+
+
+def test_web_queue_rows_serialize_state_projection(tmp_path):
+    """web 层只做序列化：_queue_rows 把状态层的投影摊平成前端 JSON。
+
+    注意入队走 wakeup=False：这里只测投影，不真跑回合（sync 测试里
     没有事件循环，_wake 会拉不起 driver）。
     """
     from agent_demo import web_app
@@ -2269,16 +2305,16 @@ def test_web_queue_rows_replay_splice_log(tmp_path):
     agent.send(first, 'next-step', wakeup=False)
     second = create_user_message([TextBlock(text='排队二')])
     agent.send(second, 'next-turn', wakeup=False)      # next-turn = 'queued'
-    rows = web_app._queue_rows(session)
+    rows = web_app._queue_rows(agent)
     assert [(r['text'], r['placement']) for r in rows] == [
         ('排队二', 'queued'), ('插队一', 'steering')]
 
     agent.unqueue(first.id)
-    assert [(r['text'], r['placement']) for r in web_app._queue_rows(session)] == [
+    assert [(r['text'], r['placement']) for r in web_app._queue_rows(agent)] == [
         ('排队二', 'queued')]
-    # 投影与 inbox 内存两条路径同源：id 集合一致
-    projected = {r['id'] for r in web_app._queue_rows(session)}
-    assert projected == {m.id for m in (*agent.inbox.next_turn, *agent.inbox.next_step)}
+    # 序列化 = 投影的镜像（id 集合一致，一一对应）
+    assert [r['id'] for r in web_app._queue_rows(agent)] == [
+        item.id for item in agent.inbox.queued_items()]
 
 
 def test_web_steer_requires_active_stream(tmp_path):

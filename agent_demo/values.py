@@ -117,6 +117,32 @@ def create_tool_result_message(call_id: str, content: str, is_error: bool) -> Me
     )
 
 
+# 队列占位：待处理消息"为什么在队列里"。placement 决定它何时被认领、
+# 以及前端队列区怎么标它（对齐 dsh 的 SessionQueuedItem.placement）。
+QueuedPlacement = Literal['queued', 'steering']
+
+
+@dataclass(frozen=True)
+class QueuedItem:
+    """inbox 里的一条待处理消息 = 队列投影的元素。
+
+    - placement='queued'：普通排队（next-turn）——等当前回合干完，开新回合处理
+    - placement='steering'：插队（next-step）——当前回合的下一步就处理
+    - message：消息本体；id/text 都从它取，不另存副本（值对象不重复状态）
+
+    dsh 还有第三种 placement='context'（运行时上下文快照：进队列区但不等处理）。
+    本仓库刻意不走那条路——动态上下文靠每轮现叠 <todo_status> 合成消息
+    （方案 A，见 agent.md §4），所以队列只有两种 placement。
+    """
+    placement: QueuedPlacement
+    message: Message
+
+    @property
+    def id(self) -> str:
+        """消息 id（撤回、认领、前端去重都用它）。"""
+        return self.message.id
+
+
 @dataclass(frozen=True)
 class SessionEvent:
     """一条会话事件：日志（唯一事实源）的最小单位。

@@ -1116,7 +1116,8 @@ function addToolResultTo(node, res) {
  *
  * 两份来源（nodes 之外的第二个投影，唯一事实源仍是服务端日志）：
  *   serverQueue —— 服务端快照（SSE queue_update 帧 / POST 响应里的 queue），
- *                  由 _queue_rows() 重放 agent/inbox/spliced 折叠出来；
+ *                  由状态层 Inbox.queued_items() 折 agent/inbox/spliced 得到
+ *                  （web_app._queue_rows 只负责摊平成 JSON）；
  *   localQueue  —— 本地在途回显（POST 还没回来时的"发送中"占位）。
  * 渲染 = 两者拼接；serverQueue 是快照式替换（幂等），localQueue 只由
  * 本地请求生命周期增删——所以 SSE 帧与 HTTP 响应谁先到都不会重复/丢失。 */
@@ -1129,19 +1130,19 @@ let queueOpen = true;      // 多条时是否展开（单条无头，直接显�
    刚入队的那条——乐观回显与它无缝衔接，不需要按 id 去重。 */
 function setQueue(rows) {
   serverQueue = Array.isArray(rows) ? rows : [];
-  renderQueueDock();
+  scheduleQueueRender();
 }
 /* 本地在途回显：POST 发出即显示"发送中"，请求收尾时统一撤掉
    （成功则服务端快照已含真身，失败则连回显一起消失 + 输入框回填）。 */
 function addLocalQueue(text, placement) {
   const entry = { id: 'local-' + (++queueSeq), text, placement, local: true };
   localQueue.push(entry);
-  renderQueueDock();
+  scheduleQueueRender();
   return entry.id;
 }
 function dropLocalQueue(id) {
   localQueue = localQueue.filter(e => e.id !== id);
-  renderQueueDock();
+  scheduleQueueRender();
 }
 /* claim 落 surface 后按 id 移出（队列区 → 消息流）。服务端的
    queue_update 帧通常已经先一步做了这件事，这里是兜底（防帧丢失）。 */
@@ -1149,7 +1150,20 @@ function removeQueuedById(messageId) {
   if (!messageId) return;
   const before = serverQueue.length;
   serverQueue = serverQueue.filter(r => r.id !== messageId);
-  if (serverQueue.length !== before) renderQueueDock();
+  if (serverQueue.length !== before) scheduleQueueRender();
+}
+
+/* 渲染合并：同一事件批次里可能连推多条 queue_update——普通发送是
+   「入队（queued）→ 第一步立刻 claim（空）」，插队是「入队（steering）→
+   若干秒后 claim（空）」。合并到微任务末尾只画最终态，于是"发出即被认领"
+   的消息不会在队列区闪一下（DSH 里 idle 发送直接进 transcript，从不进
+   QueueDock；只有真正在等的消息才出现在队列区）。
+   这只是渲染优化：serverQueue 仍是权威状态，DOM 任何时刻都等于它。 */
+let queueRenderScheduled = false;
+function scheduleQueueRender() {
+  if (queueRenderScheduled) return;
+  queueRenderScheduled = true;
+  queueMicrotask(() => { queueRenderScheduled = false; renderQueueDock(); });
 }
 
 const PLACEMENT_LABEL = { queued: '排队中', steering: '插队' };

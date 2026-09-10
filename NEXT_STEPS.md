@@ -293,17 +293,20 @@ Web 端原先是**全局单例**：`_session/_agent/_current_sid` 指向"当前�
 事件），这段半开窗口里把它当乐观气泡插进消息流靠 `(turn,step)` 锚点猜顺序，
 位置反复出错（两次修 bug：`8b17c24`/`00533de`）。改为 DSH 式队列区：
 
-- 后端：`_queue_rows(session)` 重放 `agent/inbox/spliced` 投影出
-  `[{id, text, placement}]`；SSE 新增 `queue_update` 帧，`/steer`、`/history`、
-  `/sessions/*/switch|new` 响应都带 `queue`；新增 `POST /queue/remove` →
-  `Inbox.remove(id)`（未 claim 的消息没有 surface，撤回是干净的）
+- 后端：`Inbox.queued_items()` 在**状态层**折重放结果产出
+  `QueuedItem(placement, message)`（与 `Session.derive_messages()` 并列的
+  投影）；SSE 新增 `queue_update` 帧，`/steer`、`/history`、
+  `/sessions/*/switch|new` 响应都带 `queue`（`web_app._queue_rows(agent)`
+  只做序列化）；新增 `POST /queue/remove` → `Inbox.remove(id)`（未 claim 的
+  消息没有 surface，撤回是干净的）
 - 前端：输入框上方 `#queue-dock`（单条一行无头部 / 多条可折叠计数头 /
   placement 徽标 / × 撤回 / POST 在途"发送中"回显）；claim 帧到达即移出、
   气泡进流；回合收尾 `refreshQueue()` 对账（停止/断开时服务端清空 inbox 的
   事件推给了已关闭的流）
-- 测试：pytest 74（新增 `_queue_rows` 投影一致性、`/queue/remove` 语义、
-  `queue_update` 帧序列）+ jsdom 无头 30 项 DOM 断言（显示/隐藏、徽标、
-  回显转正、claim 移出、折叠、撤回、失败回填、history 恢复）
+- 测试：pytest 75（新增 `Inbox.queued_items()` 投影/重放一致性、
+  `_queue_rows` 序列化、`/queue/remove` 语义、`queue_update` 帧序列）
+  \+ jsdom 无头 33 项 DOM 断言（显示/隐藏、徽标、回显转正、claim 移出、
+  折叠、撤回、失败回填、history 恢复、同批次快照只画最终态）
 
 ## Web 前端统一消息投影（已完成）
 

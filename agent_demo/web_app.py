@@ -402,33 +402,24 @@ def _history_payloads(session) -> list[dict]:
     return payloads
 
 
-def _queue_rows(session) -> list[dict]:
-    """待处理队列（日志投影）→ 前端队列区的行。
+def _queue_rows(agent) -> list[dict]:
+    """待处理队列 → 前端队列区的行（web 层只做序列化）。
 
-    对齐 DSH QueueDock：**未 claim 的消息不进消息流**（它们还没有 seq 位置，
-    硬插进流里会位置错乱），而是显示在输入框上方的队列区；claim 落
-    user/message（surface）后才进消息流。
+    投影本身在状态层：`Inbox.queued_items()` 折 agent/inbox/spliced 得到
+    `QueuedItem(placement, message)`——和 `Session.derive_messages()` 一样是
+    "日志 → 不可变投影"。为什么不在这一层自己重放日志：web 层重放会造成
+    **同一事件类型两份折叠**（Inbox._apply 一份、这里一份）必然分叉，而且
+    投影被绑死在 Web 宿主上（CLI / 测试都拿不到）。所以这里只把值对象摊平成
+    JSON：id 给前端去重与撤回、text 给队列区显示、placement 给徽标。
 
-    队列本身是日志投影：重放 `agent/inbox/spliced` 事件折叠出两条队列
-    （next-turn = 普通排队 / next-step = 插队），placement 供前端区分标记。
+    未 claim 的消息**不进消息流**（对齐 DSH QueueDock）：它在日志里还没有
+    seq 位置，插进去只能靠 (turn, step) 锚点猜顺序；claim 落 user/message
+    后才由 user_message 帧移进对话。
     """
-    state: dict[str, list] = {'next-turn': [], 'next-step': []}
-    for event in session.events:
-        if event.type != 'agent/inbox/spliced':
-            continue
-        data = event.data if isinstance(event.data, dict) else {}
-        target = data.get('target')
-        if target not in state:
-            continue
-        start = int(data.get('start', 0))
-        removed = int(data.get('removed_count', 0))
-        state[target][start:start + removed] = list(data.get('inserted') or [])
-    rows: list[dict] = []
-    for message in state['next-turn']:
-        rows.append({'id': message.id, 'text': _first_text_of(message), 'placement': 'queued'})
-    for message in state['next-step']:
-        rows.append({'id': message.id, 'text': _first_text_of(message), 'placement': 'steering'})
-    return rows
+    return [
+        {'id': item.id, 'text': _first_text_of(item.message), 'placement': item.placement}
+        for item in agent.inbox.queued_items()
+    ]
 
 
 def _open_session(sid: str, *, allow_missing: bool) -> dict:
@@ -443,7 +434,7 @@ def _open_session(sid: str, *, allow_missing: bool) -> dict:
         'id': sid,
         'history': _history_payloads(seat.session),
         'todos': fold_todos(seat.session) or [],  # 当前 todo 投影：切换会话时恢复 dock
-        'queue': _queue_rows(seat.session),        # 待处理队列投影：切换会话时恢复队列区
+        'queue': _queue_rows(seat.agent),          # 待处理队列投影：切换会话时恢复队列区
         'context': _context_payload(seat.session),  # 上下文占用：切换会话时恢复圆环
     }
 
@@ -523,11 +514,12 @@ def init_web(workspace: Path, fake: bool = False, model: str = 'deepseek-v4-flas
     _open_session(sid, allow_missing=True)
 
 
-def event_to_payload(event, session: Session | None = None) -> dict | None:
+def event_to_payload(event, session: Session | None = None, agent=None) -> dict | None:
     """会话事件 → 前端最小协议（只挑前端关心的；其余事件前端不渲染）。
 
-    session 参数：turn/end 附带的 context 属于"这个事件的会话"（并发下
-    多个会话各自跑，不能读全局焦点会话的占用）——SSE 循环按 seat 传入。
+    session / agent 参数都是"这个事件属于哪个会话"的定位：turn/end 附带的
+    context 读 session，agent/inbox/spliced 的队列快照读 agent.inbox——并发下
+    多个会话各自跑，绝不能读全局焦点会话的状态。SSE 循环按 seat 传入。
 
     统一投影模型的协议：chunk/reasoning/tool_call 都带 turn/step，前端
     据此把事件挂到对应 assistant 节点（不再靠"当前块"猜）。turn/start
@@ -549,8 +541,8 @@ def event_to_payload(event, session: Session | None = None) -> dict | None:
         # 文本取第一条 text block；纯工具结果的 user 消息没有 text，不发帧
         # （工具结果显示由 tool/result 事件驱动）。turn 由前端用最近一次
         # turn_start 推导（user/message 事件本身不带 turn）。
-        # 带 message_id：前端据此认领乐观渲染的"待处理"气泡（steer 插队时
-        # 已本地画过一条，claim 落盘后靠 id 转正，不重复画）。
+        # 带 message_id：前端据此把这条从"队列区"移进消息流（steer 插队时
+        # 它在队列区里等过 claim，靠同一个 id 对上，不重复画）。
         text = _first_text_of(event.data)
         if text:
             return {'type': 'user_message', 'text': text, 'message_id': event.data.id}
@@ -579,10 +571,10 @@ def event_to_payload(event, session: Session | None = None) -> dict | None:
         # 常驻 dock 的实时更新：模型每次重写清单，前端面板跟着变
         todos = event.data.get('todos') if isinstance(event.data, dict) else None
         return {'type': 'todo_update', 'todos': todos or []}
-    if event.type == 'agent/inbox/spliced' and session is not None:
-        # 队列区实时更新（对齐 DSH QueueDock）：入队/认领/取消都落 spliced，
+    if event.type == 'agent/inbox/spliced' and agent is not None:
+        # 队列区实时更新（对齐 DSH QueueDock）：入队/认领/撤回都落 spliced，
         # 前端据此显示"待处理消息"（未 claim 不进消息流）。
-        return {'type': 'queue_update', 'queue': _queue_rows(session)}
+        return {'type': 'queue_update', 'queue': _queue_rows(agent)}
     if event.type == 'turn/end':
         # 回合结束附带上下文占用（圆环数据）：真实 usage 估算 / 1M 窗口。
         # 用事件所属会话的占用（并发隔离：不要读全局焦点会话的）
@@ -737,7 +729,7 @@ def history(sid: str | None = None) -> dict:
     return {
         'history': _history_payloads(seat.session),
         'todos': fold_todos(seat.session) or [],
-        'queue': _queue_rows(seat.session),
+        'queue': _queue_rows(seat.agent),
         'context': _context_payload(seat.session),
     }
 
@@ -799,7 +791,7 @@ async def chat(request: Request) -> StreamingResponse:
                     # Web approval 请求（钩子直接放的自定义载荷，非 session 事件）
                     yield f'data: {json.dumps(item, ensure_ascii=False)}\n\n'
                     continue
-                payload = event_to_payload(item, session)
+                payload = event_to_payload(item, session, agent)
                 if payload is None:
                     continue
                 if payload['type'] == 'turn_start':
@@ -858,13 +850,13 @@ async def steer(request: Request) -> dict:
     message_id = seat.agent.steer(message)
     # 返回消息 id + 队列投影：前端把消息渲染进"队列区"（不进消息流——
     # 未 claim 的消息还没有 seq 位置，硬插进流里会位置错乱，对齐 DSH
-    # QueueDock）；claim 后 user_message 帧带同 id 认领，从队列区移除。
+    # QueueDock）；claim 后 user_message 帧带同 id，从队列区移进消息流。
     return {
         'ok': True,
         'sid': sid,
         'queued': 'next-step',
         'message_id': message_id,
-        'queue': _queue_rows(seat.session),
+        'queue': _queue_rows(seat.agent),
     }
 
 
@@ -886,7 +878,7 @@ async def queue_remove(request: Request) -> dict:
     if seat is None:
         raise HTTPException(404, f'session {sid!r} not open — switch to it first')
     ok = seat.agent.unqueue(message_id)
-    return {'ok': ok, 'sid': sid, 'queue': _queue_rows(seat.session)}
+    return {'ok': ok, 'sid': sid, 'queue': _queue_rows(seat.agent)}
 
 
 @app.post('/compact')

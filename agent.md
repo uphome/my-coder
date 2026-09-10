@@ -381,10 +381,17 @@ turn/step 序号、step/start、todo 痕迹都是**模型不可见的痕迹事�
 - **不进消息流**：未 claim 的消息一律画在输入框上方的 `#queue-dock`
   （`web/index.html`），claim 落 `user/message` 后由帧移出、气泡进流。
   位置问题从"猜锚点"变成"不存在"——这正是 DSH 绕开的坑。
-- **队列是日志投影**：`web_app._queue_rows(session)` 重放
-  `agent/inbox/spliced`（`start`/`removed_count`/`inserted`）折叠出两条队列
-  （next-turn→`queued`、next-step→`steering`）。和 todo 一样"不物化"：
-  日志里没有独立队列状态，投影是纯函数。
+- **队列是状态层投影**：`Inbox.queued_items()` 折重放结果产出
+  `QueuedItem(placement, message)`（next-turn→`queued`、next-step→`steering`），
+  和 `Session.derive_messages()` 并列——都是"日志 → 不可变投影"。和 todo 一样
+  "不物化"：日志里没有独立队列状态，投影是纯函数。
+  - **分层教训**：投影一度写在 `web_app._queue_rows()` 里自己重放
+    `agent/inbox/spliced`——后果有两个：① 同一事件类型出现**两份折叠实现**
+    （`Inbox._apply` 一份、web 一份），语义一变就分叉；② 投影绑死在 Web
+    宿主上（CLI、测试都拿不到，测试要绕过 web 模块才测得到）。现在折叠只有
+    一份，web 层只把值对象摊平成 JSON。
+  - DSH 的对应物是会话层的 `SessionSnapshot['queue']`（快照的一部分），
+    不是渲染层自己算的。
 - **三条推送通道**（幂等，互为兜底）：
   1. SSE `queue_update` 帧（`agent/inbox/spliced` → 全量快照）
   2. `POST /steer` 响应带 `queue`（**splice 先于响应**，所以响应快照已含刚入队

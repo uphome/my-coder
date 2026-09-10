@@ -29,7 +29,7 @@ harness 的四个核心设计：
         loop.py       turn/step 两级循环 + 三个钩子
         │
 状态层  session.py    追加式事件日志（唯一事实源）+ derive_messages 投影
-        inbox.py      双队列 pending 消息（spliced 事件的持久化投影）
+        inbox.py      双队列 pending 消息（spliced 事件的持久化投影 + queued_items 队列投影）
         prompt.py     sections 按 order 拼接 + {{变量}} 严格插值
         registry.py   工具类型：ToolSpec（schema + executor + 模式）
         │
@@ -117,6 +117,17 @@ adopt ：旧事件重放 → 只重建日志与投影，不触发监听、不重
 
 claim 的批次语义：先取空整个 next-step，再从 next-turn 取一条；
 `discard=False` 表示认领不是丢弃，不触发 discarded 通知。
+
+**队列投影和记忆投影并列，都住状态层**：`Inbox.queued_items()` 折 `_state`
+（重放 spliced 的结果）产出 `QueuedItem(placement, message)`——
+`placement='queued'`（next-turn）/ `'steering'`（next-step）。这和
+`Session.derive_messages()` 是同一种东西：**日志 → 不可变投影的纯函数**，
+只是对象一个是"还没浮上水面的待处理输入"，一个是"模型可见的记忆"。
+
+分层要求：**折叠实现只有一份**（`_apply`/`_splice` 共用同一套 splice 语义），
+上层宿主（web/cli）只做序列化。投影一度被写在 `web_app` 里自己重放
+spliced——同一事件类型两份折叠必然分叉，而且投影绑死在 Web 宿主上
+（CLI/测试拿不到）。
 
 ### 3.5 被动状态机：wake / 补拉 / when_idle
 
@@ -337,7 +348,7 @@ JSON 没有类型信息，用 `$xxx` 前缀 key 做类型标记：`$text`/`$tool
 |---|---|
 | `values.py` | 值层：不可变 Message/SessionEvent + tagged dict 编解码 |
 | `session.py` | 日志 + surface 折叠投影（append / derive_messages / adopt / request_header） |
-| `inbox.py` | 双队列（next-turn / next-step）+ claim 语义 + 持久化重放 |
+| `inbox.py` | 双队列（next-turn / next-step）+ claim 语义 + 持久化重放 + `queued_items()` 队列投影 |
 | `prompt.py` | sections 按 order 拼接 + `{{var}}` 严格插值 |
 | `registry.py` | 工具类型（ToolSpec：schema + executor + 模式 + 超时 + requires_approval） |
 | `llm.py` | 能力层：SSE 流式客户端 + FakeLlm + wire 双向翻译（含思维链字段解析） |
