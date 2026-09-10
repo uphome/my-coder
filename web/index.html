@@ -1537,26 +1537,55 @@ function renderTodoDock() {
   todoDockEl.appendChild(panel);
 }
 
-/* 会话切换 / 历史加载时恢复 dock */
-/* todo 跨回合持续（后端 fold 不再 turn/start 清空）：清单一旦建立就一直
-   显示，模型可在后续回合继续更新；收到"全部 completed"快照 = 任务收尾 →
-   展示全勾约 2 秒后自动隐藏（用户看到完成反馈，dock 不长期占位）。
-   收尾计时器防重入：期间又来新清单（新一轮任务）就取消隐藏。 */
-let todoDoneTimer = null;
-function setTodos(todos) {
-  const allDone = Array.isArray(todos) && todos.length > 0
-    && todos.every((t) => t.status === 'completed');
-  currentTodos = (Array.isArray(todos) && todos.length) ? todos : null;
-  renderTodoDock();
-  if (todoDoneTimer) { clearTimeout(todoDoneTimer); todoDoneTimer = null; }
-  if (allDone && currentTodos) {
-    // 全勾收尾：短暂展示后自动隐藏（对齐"任务完成"的确认感）
-    todoDoneTimer = setTimeout(() => {
-      todoDoneTimer = null;
-      currentTodos = null;
-      renderTodoDock();
-    }, 2000);
+/* todo 跨回合持续（后端 fold 不再 turn/start 清空）：清单一旦建立就显示，
+   模型可在后续回合继续更新。
+
+   "全勾后展示 2 秒再隐藏"是**事件动画**（任务刚刚收尾的确认感），不是状态
+   规则——所以只有 announce=true 的调用（实时 todo_update 帧）才播。
+   曾经的 bug（用户实测：切窗口时卡片渲染 2 秒然后消失）：这条动画挂在状态
+   入口上，而 setTodos 有 4 个恢复路径（切会话 / 新建会话 / 刷新 / 压缩后），
+   于是只要那个会话的清单是全勾的，每次恢复都重放一遍"任务刚刚完成"。
+   修法就是把它从状态规则改成事件：
+   - 恢复路径遇到的**全勾清单直接隐藏**（不占位、不播）——完成反馈在它发生的
+     那一刻已经给过了
+   - todoFarewellShown 保证同一次收尾只播一次（模型可能连推几条全勾快照），
+     清单回到未完成时复位，下一次收尾还能播
+   - document.hidden 时也不播：没人在看就不放动画（这是防御性的，不是已观测
+     到的 bug） */
+let todoDoneTimer = null;        // 告别计时器
+let todoFarewellShown = false;   // 这次收尾是否已经播过告别（防重复快照重复播）
+
+function setTodos(todos, opts) {
+  const announce = !!(opts && opts.announce);   // 只有实时帧才可能播告别
+  const list = (Array.isArray(todos) && todos.length) ? todos : null;
+  const allDone = !!list && list.every((t) => t.status === 'completed');
+  if (!allDone) todoFarewellShown = false;      // 清单回到未完成：收尾状态复位
+
+  if (allDone && announce && !document.hidden) {
+    currentTodos = list;
+    renderTodoDock();
+    if (!todoFarewellShown) {                   // 收尾那一刻只播一次
+      todoFarewellShown = true;
+      cancelTodoFarewell();
+      todoDoneTimer = setTimeout(() => {
+        todoDoneTimer = null;
+        todoFarewellShown = false;              // 播完复位：下次收尾还能再播
+        currentTodos = null;
+        renderTodoDock();
+      }, 2000);
+    }
+    return;
   }
+  // 恢复路径（切会话/刷新/压缩）、页面在后台、或刚写过但没在播告别：
+  // 全勾清单一律不显示也不播动画
+  cancelTodoFarewell();
+  todoFarewellShown = false;
+  currentTodos = allDone ? null : list;
+  renderTodoDock();
+}
+
+function cancelTodoFarewell() {
+  if (todoDoneTimer) { clearTimeout(todoDoneTimer); todoDoneTimer = null; }
 }
 
 /* ---------- 上下文圆环 + 明细面板（dsh ContextMeter 同款交互）---------- */
@@ -1908,8 +1937,10 @@ function applyFrame(payload) {
       setQueue(payload.queue);
       break;
     case 'todo_update':
-      // 常驻 dock 实时更新：模型每次重写清单，面板跟着变
-      setTodos(payload.todos);
+      // 常驻 dock 实时更新：模型每次重写清单，面板跟着变。
+      // announce=true：只有这条路（实时帧）才播"任务收尾"的告别动画——
+      // 恢复路径（切会话/刷新/压缩）传 false，避免重放别人的完成动画
+      setTodos(payload.todos, { announce: true });
       break;
     case 'approval_request':
       showApprovalCard(payload.id, payload.name, payload.arguments);
@@ -1971,7 +2002,8 @@ async function send() {
   // agent 运行中：回车 = 插队（/steer，当前回合下一步即时生效）
   if (busy) { steer(text); return; }
   // 新回合不清 dock：todo 跨回合持续（后端 fold 不再 turn/start 清空）——
-  // 上一任务的清单保留，模型可继续更新；全部 completed 时 dock 自动收尾隐藏。
+  // 上一任务的清单保留，模型可继续更新；实时收到全勾清单时 dock 播 2 秒
+  // 告别再隐藏（恢复路径不播，见 setTodos 的注释）。
   input.value = '';
   input.style.height = 'auto';
   const requestId = beginSubmission(text, 'transcript');
