@@ -22,6 +22,13 @@ GLOB_MAX_RESULTS = 100   # glob 内联保留的最大路径数
 # 截断提示教模型把大输出重定向到文件，再用 read_file 分页读。
 BASH_MAX_OUTPUT_CHARS = 8000
 
+# web_search 预算：结果条数上限（不进模型 schema，模型只看到"前 N 条"）、
+# 单次网络超时、以及默认搜索端点（DuckDuckGo HTML，无需 API key）。
+# 网络后端可注入（tools/web_search.register(backend=...)），这几个值只约束默认后端。
+WEB_SEARCH_MAX_RESULTS = 5
+WEB_SEARCH_TIMEOUT_S = 10.0
+WEB_SEARCH_ENDPOINT = 'https://html.duckduckgo.com/html/'
+
 # 上下文压缩默认阈值：deepseek-v4 窗口 1M token，过半（0.5M）就自动压
 # 旧回合，给后续回合留足空间（摘要请求本身也吃窗口）。显式 0 可关闭。
 DEFAULT_COMPACT_TOKENS = 524288  # 1M 窗口的一半

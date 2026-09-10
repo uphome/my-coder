@@ -13,11 +13,15 @@ from __future__ import annotations
 from pathlib import Path
 
 from ..registry import ToolRegistry
-from . import file_io, search, shell, todo
+from . import file_io, search, shell, todo, web_search
 
 
 def build_tools(workspace: Path | None, bash_timeout_s: float = 60.0) -> ToolRegistry:
-    """工具注册表：全部文件工具共用一个 workspace 边界（轻量沙箱）。"""
+    """工具注册表：全部文件工具共用一个 workspace 边界（轻量沙箱）。
+
+    web_search 是唯一的例外——它读的是公共互联网，不走 workspace 沙箱
+    （网络后端可注入，见 tools/web_search.register）。
+    """
     if workspace is None:
         raise ValueError('build_tools requires an explicit workspace（安全边界必须显式声明）')
     workspace = workspace.resolve()
@@ -26,4 +30,5 @@ def build_tools(workspace: Path | None, bash_timeout_s: float = 60.0) -> ToolReg
     search.register(registry, workspace)
     shell.register(registry, workspace, bash_timeout_s=bash_timeout_s)
     todo.register(registry)
+    web_search.register(registry)
     return registry

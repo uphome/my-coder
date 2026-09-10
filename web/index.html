@@ -718,6 +718,7 @@ const ICON_PATHS = {
   read: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/>',
   folder: '<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>',
   search: '<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>',
+  globe: '<circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>',
   write: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><line x1="9" y1="15" x2="15" y2="15"/>',
   edit: '<path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/>',
   bash: '<polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>',
@@ -730,6 +731,7 @@ function classifyTool(name) {
   if (name === 'read_file') return { variant: 'read', icon: 'read', label: '读取文件' };
   if (name === 'list_files') return { variant: 'read', icon: 'folder', label: '列出目录' };
   if (name === 'grep' || name === 'glob') return { variant: 'search', icon: 'search', label: '搜索' };
+  if (name === 'web_search') return { variant: 'search', icon: 'globe', label: '联网搜索' };
   if (name === 'write_file') return { variant: 'write', icon: 'write', label: '写入文件' };
   if (name === 'edit') return { variant: 'edit', icon: 'edit', label: '编辑文件' };
   if (name === 'bash') return { variant: 'bash', icon: 'bash', label: '执行命令' };
@@ -763,6 +765,7 @@ function deriveSummary(name, args) {
     case 'edit': return relPath(arg('file_path')) || '(未指定文件)';
     case 'grep': return arg('pattern') || '(未指定 pattern)';
     case 'glob': return arg('pattern') || '(未指定 pattern)';
+    case 'web_search': return arg('query') || '(未指定 query)';
     case 'todo_write': {
       const todos = Array.isArray(args.todos) ? args.todos.length : 0;
       return todos ? `待办 ${todos} 项` : '(待办清单)';
