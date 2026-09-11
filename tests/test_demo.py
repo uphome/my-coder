@@ -2777,9 +2777,9 @@ def _web_search_backend(monkey_env='test-key'):
         })
         return httpx.Response(200, json=_WEB_SEARCH_FIXTURE)
 
-    async def backend(query: str, max_results: int):
+    async def backend(query: str, max_results: int, config):
         return await ws.deepseek_search_backend(
-            query, max_results,
+            query, max_results, config,
             transport=httpx.MockTransport(handler), api_key=monkey_env,
         )
 
@@ -2851,7 +2851,7 @@ async def test_web_search_backend_request_shape_and_failures(monkeypatch):
     from agent_demo.tools import web_search as ws
 
     backend, requests = _web_search_backend()
-    results = await backend('deepseek-harness 架构', 3)
+    results = await backend('deepseek-harness 架构', 3, ws.default_config())
     # 夹具里只有 a / b 是唯一且非空的 URL（重复项与空 url 被丢弃）
     assert [r.url for r in results] == ['https://example.com/a', 'https://example.com/b']
 
@@ -2940,6 +2940,44 @@ async def test_web_search_tool_multi_query_merge_and_trace(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_web_search_trace_matches_the_real_request(tmp_path):
+    """痕迹事件记的必须是**那次真实请求**用的配置（回归：两份默认值会脱节）。
+
+    旧实现的 endpoint/model/max_uses 来自 register() 的闭包参数，而真正发请求的
+    后端用自己的默认值——于是 ① 日志可能记一个端点、请求打到另一个；
+    ② register(endpoint=...) 这类覆盖对真实请求**完全无效**（静默失效）。
+    现在配置是一个值对象，由工具层解析一次、trace 与请求共用。
+    """
+    from agent_demo.registry import ToolRegistry
+    from agent_demo.session import Session
+    from agent_demo.tools import web_search as ws
+
+    backend, requests = _web_search_backend()
+    custom = ws.SearchConfig(endpoint='http://mock.local/v1/messages',
+                             model='custom-search-model', max_uses=2)
+    registry = ToolRegistry()
+    ws.register(registry, backend=backend, max_results=3, config=custom)
+
+    session = Session(id='web-search-config')
+    agent = type('A', (), {'session': session})()
+    outcome = await registry.execute('web_search', {'queries': ['q']}, agent)
+    assert outcome.is_error is False
+
+    trace = next(e for e in session.events if e.type == 'web/search')
+    assert trace.data == {
+        'query': 'q',
+        'endpoint': 'http://mock.local/v1/messages',
+        'model': 'custom-search-model',
+        'max_uses': 2,
+    }
+    # 真实请求与痕迹逐字段一致（这才是"日志 = 请求"）
+    sent = requests[0]
+    assert sent['url'] == trace.data['endpoint']
+    assert sent['body']['model'] == trace.data['model']
+    assert sent['body']['tools'][0]['max_uses'] == trace.data['max_uses']
+
+
+@pytest.mark.asyncio
 async def test_web_search_tool_degrades_to_is_error(tmp_path):
     """工具包装层：坏入参 / 后端失败都返回 is_error 的 ToolOutcome，绝不抛异常。"""
     from agent_demo.registry import ToolRegistry
@@ -2963,7 +3001,7 @@ async def test_web_search_tool_degrades_to_is_error(tmp_path):
     assert out.is_error is True
 
     # 后端结构化失败（缺 key）→ is_error，且带上 code 供模型/诊断识别
-    async def no_key_backend(query, max_results):
+    async def no_key_backend(query, max_results, config):
         raise ws.WebSearchError('WEB_PROVIDER_CREDENTIAL_MISSING', 'no key')
 
     registry2 = ToolRegistry()
@@ -2972,7 +3010,7 @@ async def test_web_search_tool_degrades_to_is_error(tmp_path):
     assert out.is_error is True and 'WEB_PROVIDER_CREDENTIAL_MISSING' in out.content
 
     # 后端抛别的异常也不穿：一律降级为 is_error 结果（不变式⑤）
-    async def boom(query, max_results):
+    async def boom(query, max_results, config):
         raise RuntimeError('boom')
 
     registry3 = ToolRegistry()

@@ -22,9 +22,10 @@
 | Web 会话并发隔离（seat 化） | ✅ 已完成（两会话并行互不干扰，见下节） |
 | steer 插队 + CLI REPL | ✅ 已完成（双队列第二队实战入口；CLI 无任务参数进 REPL） |
 | **Web 前端统一消息投影** | ✅ 已完成（前端 nodes 投影；实时 SSE 与 /history 收敛同一渲染，见下节） |
+| **web_search（联网搜索）** | ✅ 已完成（DeepSeek 官方原生搜索，见下节） |
 | 阶段一收尾（更新 README / ARCHITECTURE 定稿） | ✅ 已完成（含 2026-09 架构重构与本文档同步） |
 
-> 当前全量测试：65 passed（AGENTS.md 里的数字保持同步）。
+> 当前全量测试：85 passed（AGENTS.md 里的数字保持同步）。
 
 ## read_file 升级（已完成）
 
@@ -288,6 +289,58 @@ Web 端原先是**全局单例**：`_session/_agent/_current_sid` 指向"当前�
 命令`。模型行为：先完成正在进行的①②，随后在同一回合内重写收敛答复
 （`③ 跳过`、`② 收敛`），全程无第二个回合，`reason=completed`——插队是
 "下一步批量吸收并重新规划"，不是生硬打断。
+
+## web_search：联网搜索（DeepSeek 官方原生搜索，已完成）
+
+工具集里唯一"读工作区之外"的能力。第一版自己抓 DuckDuckGo HTML 页面（正则 +
+还原 `uddg=` 跳转），**已废弃**——收集能力不该靠猜页面结构。改为对齐 DSH
+`packages/web/web-search-deepseek`：搜索由 DeepSeek 在服务端执行，我们只
+"发请求 + 解析结构化结果"。
+
+**协议（实测 HTTP 200 可用，用的是同一个 `DEEPSEEK_API_KEY`）**
+- `POST https://api.deepseek.com/anthropic/v1/messages`
+  （**Anthropic 兼容**端点；`DEEPSEEK_BASE_URL` 是 chat-completions 的 base，
+  **不复用**，只共享 API key——DSH provider.ts:30-35 的原话）
+- headers：`x-api-key` + `anthropic-version: 2023-06-01`
+- body：`{model, max_tokens, messages:[{role:user, content:[{type:text,
+  text:'Perform a web search for the query: <q>'}]}],
+  tools:[{type:'web_search_20250305', name:'web_search', max_uses:N}]}`
+- 响应 `content[]`：`thinking` → `server_tool_use` → **`web_search_tool_result`**
+  （`content[]` 里是 `web_search_result{title,url,page_age,encrypted_content}`）
+  → `thinking` → `text`
+
+**落地要点**
+- **只认结构化块**：`web_search_tool_result` → `web_search_result`；**绝不从
+  text 正文里抠 URL**。snippet 走 text 块的 `citations[].cited_text`（按 url 键），
+  `page_age` 与 citations **实测都常缺** → 一律可选，缺失留空不报错
+- **没触发原生搜索 = 响亮失败**：响应里没有结果块时抛 `WEB_PROVIDER_ERROR`
+  （DSH 同款），**不**退化成"没找到"——否则模型会把"搜索没发生"当成"世上没有"
+- **失败降级为结果**（不变式⑤）：缺 key / HTTP 非 200 / 超时 / 响应不可解析 /
+  后端任意异常 → `is_error` 的 ToolOutcome，不炸循环
+- **出站请求也记账**（不变式①）：派发前落 `web/search` 痕迹（query / endpoint /
+  model / max_uses，**绝不含 key**），对齐 DSH 的
+  `web/deepseek-search-llm-request`；它**不是 surface**，不进模型记忆
+- **配置只有一个来源**：`SearchConfig(endpoint, model, max_uses)` 值对象，由工具层
+  解析一次、**trace 与真实请求共用**——修掉了"日志记一套、请求发另一套"以及
+  `register(endpoint=...)` 静默失效的问题（有专门的回归测试逐字段对账）
+- 模型可见形状对齐 DSH `tool-web/src/search.ts`：外部内容提示（逐字取自
+  `trust.ts`）→ `Sources:` markdown 列表（title 空则退化 hostname）→ 截断提示
+  → 引用纪律；入参 `queries: string[]`（1–4 条，执行期校验 + 精确重复折叠），
+  多 query 逐条搜索后按 url 去重合并再截断
+- 不返回模型给的答复正文：DSH 的 deepseek provider **刻意永不返回**
+  （"provider prose is not trusted as an answer"），我们一致
+
+**成本**：一次搜索 = 一个完整模型轮次。实测一次 `input_tokens ≈ 11.3k /
+output_tokens ≈ 1.2k`；所以 `WEB_SEARCH_TIMEOUT_S = 60`（工具超时 65s），
+`max_uses = 5`、`max_results = 5`、`max_queries = 4`。
+
+**不做 approval**：它不读文件、无副作用（判据是"不可逆/会执行/会改磁盘"）；
+且搜索请求打的是**同一家厂商**的另一个端点——会话里读过的文件本来就随每次
+聊天请求发给它了，增量外泄面只是"这句 query 会到搜索索引去"。DSH 也不给
+web 工具审批门（它用 trust notice 管入站内容、用 sandbox 管执行）。
+
+**未做**：DSH 的 `web_fetch`（抓取单个 URL 转正文）、多 provider 接缝
+（Exa / Perplexity）、`usage.server_tool_use.web_search_requests` 审计字段。
 
 ### step 粒度改成"一次模型请求"（2026-09，修"插入信息不起作用"）
 

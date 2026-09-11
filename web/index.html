@@ -765,7 +765,11 @@ function deriveSummary(name, args) {
     case 'edit': return relPath(arg('file_path')) || '(未指定文件)';
     case 'grep': return arg('pattern') || '(未指定 pattern)';
     case 'glob': return arg('pattern') || '(未指定 pattern)';
-    case 'web_search': return arg('query') || '(未指定 query)';
+    case 'web_search': {
+      // 参数是 queries 数组（1-4 条），不是单数 query——概要按实际形状拼
+      const queries = Array.isArray(args.queries) ? args.queries : [];
+      return queries.length ? queries.join(' · ') : '(未指定 queries)';
+    }
     case 'todo_write': {
       const todos = Array.isArray(args.todos) ? args.todos.length : 0;
       return todos ? `待办 ${todos} 项` : '(待办清单)';

@@ -446,3 +446,57 @@ turn/step 序号、step/start、todo 痕迹都是**模型不可见的痕迹事�
   「入队 queued → 第一步立刻 claim 空」），合并到微任务末尾只画最终态，
   所以"发出即被认领"的消息不会闪一下。
 
+## 6. web_search：联网搜索走官方原生能力（2026-09 已定稿并落地）
+
+### 6.1 问题：第一版自己抓网页
+
+工具集里 `web_search` 要"读工作区之外"，第一版实现抓 DuckDuckGo 的 HTML
+页面、正则抠结果、还原 `uddg=` 跳转参数。问题不在于能不能跑，而在于**收集
+能力建立在猜页面结构上**：对方改一次模板就全废，而且只能拿到标题+链接。
+
+### 6.2 DSH 的做法（读源码实测）
+
+DSH 把"搜索"这一能力**完全交给提供方**，自己只做协议与解析：
+
+- `packages/web/web-search-deepseek/src/provider.ts`：搜索 = 向 DeepSeek 的
+  **Anthropic 兼容**端点 `https://api.deepseek.com/anthropic/v1` + `/messages`
+  发一次 Messages 请求，body 里挂**服务端工具**
+  `{type:'web_search_20250305', name:'web_search', max_uses:N}`。注释写明
+  **这不是 chat-completions 的 base**（`https://api.deepseek.com`），
+  **只共享 API key**。DeepSeek 没有专用搜索端点，所以一次搜索 = 一个完整
+  模型轮次（延迟 + token 都按模型算）。
+- 结果只从**结构化块**取：`content[]` 里的 `web_search_tool_result` →
+  `web_search_result{url,title,page_age}`；snippet 来自 text 块的
+  `citations[].cited_text`（按 url 拼）。**绝不从模型正文里抓 URL**。
+  没有结果块 = `WEB_PROVIDER_ERROR` **响亮失败**，不降级。
+- `packages/web/tool-web/src/search.ts`：模型可见的工具形状——
+  `queries: string[]`（`WEB_SEARCH_MAX_QUERIES = 4`）、结果格式
+  `formatSearchOutput`（外部内容提示 → `Sources:` 列表 → 截断提示 →
+  引用纪律）；`trust.ts` 的 `EXTERNAL_WEB_CONTENT_NOTICE` 提醒模型
+  搜索结果**是不可信数据**。
+- 另有 `web-search-exa` / `web-search-perplexity` 两个 provider 与 `web_fetch`：
+  provider 是可替换的接缝（我们这个 demo 不需要，一个够）。
+
+### 6.3 本仓库落地（与 DSH 的对应与差异）
+
+| DSH | 我们 |
+|---|---|
+| `web-search-deepseek` provider | `agent_demo/tools/web_search.py` 的 `deepseek_search_backend`（默认后端，可注入） |
+| `tool-web` 的 `web_search` 工具 | 同名工具，schema/输出格式照抄 |
+| `web/deepseek-search-llm-request` 痕迹 | **`web/search`** 痕迹事件（query/endpoint/model/max_uses，无 key） |
+| `WebError(code)` 抛给调用方 | `WebSearchError(code)` → 工具层降级为 `is_error` 结果（不变式⑤） |
+| provider 按次投影 Settings（凭证/端点/上限） | `SearchConfig` 值对象：工具层解析一次，**trace 与真实请求共用** |
+| 多 provider + `web_fetch` | 未做（单 provider；`web_fetch` 待定） |
+
+**实测形状差异**（对着真响应验的，别照抄 DSH 注释里的字段假设）：
+`page_age` 实测多为 `null`；`text` 块实测**没有** `citations`；`web_search_result`
+还带一个 `encrypted_content`（我们不用）；`usage.server_tool_use.web_search_requests`
+是本次服务端搜索次数（可留作审计，未用）。
+
+**不做 approval 门**：判据是"不可逆/会执行/会改磁盘"，它不沾；而且搜索请求打的是
+**同一家厂商**的另一个端点——会话里读过的文件本来就随每次聊天请求发给它了，
+增量外泄面只是"这句 query 会到搜索索引/第三方去"。DSH 也不给 web 工具审批门。
+
+**真实成本**（实测一次）：`input_tokens ≈ 11.3k / output_tokens ≈ 1.2k`——
+所以超时给 60s（工具 65s），`max_uses`/`max_results`/`max_queries` 都压在 4~5。
+
