@@ -486,7 +486,8 @@ DSH 把"搜索"这一能力**完全交给提供方**，自己只做协议与解�
 | `web/deepseek-search-llm-request` 痕迹 | **`web/search`** 痕迹事件（query/endpoint/model/max_uses，无 key） |
 | `WebError(code)` 抛给调用方 | `WebSearchError(code)` → 工具层降级为 `is_error` 结果（不变式⑤） |
 | provider 按次投影 Settings（凭证/端点/上限） | `SearchConfig` 值对象：工具层解析一次，**trace 与真实请求共用** |
-| 多 provider + `web_fetch` | 未做（单 provider；`web_fetch` 待定） |
+| `content` 槽留空（deepseek provider 刻意不填） | **填**（+ 标注 + 上限 + `include_summary` 开关，见 §6.4） |
+| 多 provider + `web_fetch` | 未做（单 provider；`web_fetch` 明确暂缓，见 §6.4） |
 
 **实测形状差异**（对着真响应验的，别照抄 DSH 注释里的字段假设）：
 `page_age` 实测多为 `null`；`text` 块实测**没有** `citations`；`web_search_result`
@@ -497,6 +498,27 @@ DSH 把"搜索"这一能力**完全交给提供方**，自己只做协议与解�
 **同一家厂商**的另一个端点——会话里读过的文件本来就随每次聊天请求发给它了，
 增量外泄面只是"这句 query 会到搜索索引/第三方去"。DSH 也不给 web 工具审批门。
 
-**真实成本**（实测一次）：`input_tokens ≈ 11.3k / output_tokens ≈ 1.2k`——
+### 6.4 我们与 DSH 相反的一处选择：**返回那段摘要**
+
+DSH 的 deepseek provider 刻意丢掉 `text` 块（"provider prose is not trusted as an
+answer"）；**我们留着**，并加了三道约束：
+
+- 摘要前贴 `SUMMARY_NOTICE`：明说它是"搜索模型生成的转述、没有结构化引用"，要
+  当线索用、以 Sources 为准——因为它**句句无据**（见下）；
+- 每条按 `WEB_SEARCH_SUMMARY_MAX_CHARS = 3000` 截断（实测一条 ≈2.4k 字符，
+  4 条 query 最坏 ~10k）；多条 query 才加 `### <query>` 标题（DSH 总是加）；
+- `SearchConfig.include_summary=False` 可一键退回 DSH 的策略。
+
+**为什么敢跟 DSH 不一样**：DSH 有 `web_fetch` + 三家 provider，模型能读原文、也能
+换 Exa/Perplexity，所以 deepseek 那条路只当"找链接"用就够；我们**没有 fetch**，
+摘要是不读原文时唯一的内容线索。**将来补上 `web_fetch` 就该把这个开关关掉。**
+
+**实测关键结论：DeepSeek 不返回结构化 `citations`**（两次探针，连 system 里明确
+要求"每句都标来源 URL"也没有）。后果三条：① `citationSnippets()` 恒为空映射 →
+snippet 永远空；② 摘要无法做"句句有据"的引用；③ 摘要正文里的 markdown 链接是
+**那个模型自己写的**，可能漏、可能挂错——所以才有上面那条标注。
+
+**真实成本**（实测）：`input_tokens` **10.6k~22.4k**（服务端把搜索结果原文喂回那个
+模型让它写摘要）/ `output_tokens` 0.5k~1.2k，摘要再以 ~2.4k 字符进会话上下文。
 所以超时给 60s（工具 65s），`max_uses`/`max_results`/`max_queries` 都压在 4~5。
 

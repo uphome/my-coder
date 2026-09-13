@@ -34,6 +34,9 @@ WEB_SEARCH_MODEL = 'deepseek-v4-flash'
 WEB_SEARCH_MAX_USES = 5       # 服务端工具每次请求最多搜索几次（进请求体，不是 schema）
 WEB_SEARCH_MAX_RESULTS = 5    # 合并去重后返回给模型的结果条数上限
 WEB_SEARCH_MAX_QUERIES = 4    # 一次工具调用允许的 query 条数上限（DSH WEB_SEARCH_MAX_QUERIES）
+# 摘要上限：那段摘要是搜索请求里的**辅助模型**写的转述（实测一条 ≈2.4k 字符），
+# queries 拉满 4 条最坏 ~10k 字符；截断保上下文（超出会附一句截断标记）。
+WEB_SEARCH_SUMMARY_MAX_CHARS = 3000
 # 一次搜索 = 一个完整模型轮次（服务端工具要真去搜、还要生成答复），
 # 别按普通 HTTP 给 10s——60s 量级才够（DSH 也把预算交给调用方 timeoutMs）。
 WEB_SEARCH_TIMEOUT_S = 60.0

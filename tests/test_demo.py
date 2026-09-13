@@ -2757,7 +2757,7 @@ _WEB_SEARCH_FIXTURE = {
             {'type': 'web_search_result', 'title': '空 url 应被丢弃',
              'url': '', 'page_age': None},
         ]},
-        {'type': 'text', 'text': '以下是整理后的答复。'},
+        {'type': 'text', 'text': '以下是整理后的答复，参考 [架构文档](https://example.com/a)。'},
     ],
     'usage': {'server_tool_use': {'web_search_requests': 1}},
 }
@@ -2790,27 +2790,80 @@ def test_web_search_parses_structured_blocks_only():
     """只认结构化块：去重 / 空 url 丢弃 / title 缺失 / page_age=null 都不炸。"""
     from agent_demo.tools import web_search as ws
 
-    results = ws.parse_search_response(_WEB_SEARCH_FIXTURE)
+    outcome = ws.parse_search_response(_WEB_SEARCH_FIXTURE)
+    results = list(outcome.results)
     assert [r.url for r in results] == ['https://example.com/a', 'https://example.com/b']
     assert results[0].title == 'Harness 架构（中文）'
     assert results[1].title == ''            # 缺 title 不是错误
     assert results[0].published_at == ''     # page_age 实测为 null → 空
     assert results[0].snippet == ''          # 实测 text 块没有 citations → snippet 空
+    # 摘要来自 text 块（那个辅助模型的转述）
+    assert outcome.summary == '以下是整理后的答复，参考 [架构文档](https://example.com/a)。'
 
-    # 空 title 的 label 退化到 hostname；`No results found.` 只在真的空列表时出现
-    output = ws.format_search_output(results)
+    # 摘要必须带"转述、无结构化引用"的标注，且排在 Sources 之前
+    output = ws.format_search_output(results, summary=outcome.summary)
     assert output.startswith(ws.EXTERNAL_WEB_CONTENT_NOTICE)
+    assert ws.SUMMARY_NOTICE in output
+    assert output.index(ws.SUMMARY_NOTICE) < output.index('Sources:')
     assert '- [Harness 架构（中文）](https://example.com/a)' in output
     assert '- [example.com](https://example.com/b)' in output
     assert output.endswith(ws.CITE_INSTRUCTION)
     assert 'No results found.' not in output
 
+    # 没来源但有摘要：不打 "No results found."（否则自相矛盾）
+    only_summary = ws.format_search_output([], summary='一段转述')
+    assert 'No results found.' not in only_summary and ws.SUMMARY_NOTICE in only_summary
+
+    # 两者都没有：才说"没找到"
     empty = ws.format_search_output([])
     assert 'No results found.' in empty and 'Sources:' not in empty
+    assert ws.SUMMARY_NOTICE not in empty
+
+
+def test_web_search_summary_merge_and_truncation():
+    """多 query 的摘要分段拼接（>1 条才加 ### 标题）、超长截断、可整体关掉。"""
+    from agent_demo.tools import web_search as ws
+
+    def outcome(summary: str, url: str) -> ws.SearchOutcome:
+        return ws.SearchOutcome(
+            summary=summary,
+            results=(ws.SearchResult(title='T', url=url),),
+        )
+
+    # 单 query：不加多余的 ### 标题
+    summary, results, truncated = ws.merge_outcomes(
+        ['q1'], [outcome('答话一', 'https://a.test')], 5)
+    assert summary == '答话一'
+    assert [r.url for r in results] == ['https://a.test'] and truncated is False
+
+    # 多 query：按 DSH 的分段形状，各自带 query 标题
+    summary, results, _ = ws.merge_outcomes(
+        ['q1', 'q2'],
+        [outcome('答话一', 'https://a.test'),
+         outcome('答话二', 'https://a.test'),    # 重复 URL → 只留一条
+         ],
+        5)
+    assert summary == '### q1\n\n答话一\n\n### q2\n\n答话二'
+    assert [r.url for r in results] == ['https://a.test']
+
+    # 超长截断 + 标记
+    long_summary, _, _ = ws.merge_outcomes(['q'], [outcome('x' * 100, 'https://a.test')], 5,
+                                           max_summary_chars=40)
+    assert long_summary.startswith('x' * 40)
+    assert 'Summary truncated at 40 chars.' in long_summary
+
+    # 某条 query 没写答话（text 块缺失）→ 那一段跳过，不产生空标题
+    summary, _, _ = ws.merge_outcomes(
+        ['q1', 'q2'], [outcome('', 'https://a.test'), outcome('只有二', 'https://b.test')], 5)
+    assert summary == '### q2\n\n只有二'
 
 
 def test_web_search_citation_snippet_when_present():
-    """text 块的 citations 提供 snippet（DSH 的 citationSnippets 语义；首次出现者胜）。"""
+    """text 块的 citations 提供 snippet（DSH 的 citationSnippets 语义；首次出现者胜）。
+
+    注意：这是**防御性**覆盖——DeepSeek 实测从不返回 citations（探针两次确认，
+    连 system 里明确要求标注来源也没有），但协议支持，所以解析层照 DSH 实现。
+    """
     from agent_demo.tools import web_search as ws
 
     payload = {
@@ -2824,10 +2877,11 @@ def test_web_search_citation_snippet_when_present():
             ]},
         ],
     }
-    results = ws.parse_search_response(payload)
-    assert results[0].snippet == '第一次的摘录'
-    assert results[0].published_at == '2026-08-13'
-    assert '(2026-08-13)' in ws.format_search_output(results)
+    outcome = ws.parse_search_response(payload)
+    assert outcome.results[0].snippet == '第一次的摘录'
+    assert outcome.results[0].published_at == '2026-08-13'
+    assert outcome.summary == '正文'
+    assert '(2026-08-13)' in ws.format_search_output(list(outcome.results))
 
 
 def test_web_search_no_result_block_is_error_not_empty():
@@ -2851,9 +2905,10 @@ async def test_web_search_backend_request_shape_and_failures(monkeypatch):
     from agent_demo.tools import web_search as ws
 
     backend, requests = _web_search_backend()
-    results = await backend('deepseek-harness 架构', 3, ws.default_config())
+    outcome = await backend('deepseek-harness 架构', 3, ws.default_config())
     # 夹具里只有 a / b 是唯一且非空的 URL（重复项与空 url 被丢弃）
-    assert [r.url for r in results] == ['https://example.com/a', 'https://example.com/b']
+    assert [r.url for r in outcome.results] == ['https://example.com/a', 'https://example.com/b']
+    assert outcome.summary.startswith('以下是整理后的答复')
 
     sent = requests[0]
     assert sent['url'] == 'https://api.deepseek.com/anthropic/v1/messages'
@@ -2975,6 +3030,17 @@ async def test_web_search_trace_matches_the_real_request(tmp_path):
     assert sent['url'] == trace.data['endpoint']
     assert sent['body']['model'] == trace.data['model']
     assert sent['body']['tools'][0]['max_uses'] == trace.data['max_uses']
+
+    # include_summary=False：模型可见文本里不留那段转述（将来有 web_fetch 时退回
+    # DSH 的 deepseek 策略），但结构化来源照旧
+    no_summary = ws.SearchConfig(endpoint=custom.endpoint, model=custom.model,
+                                 max_uses=custom.max_uses, include_summary=False)
+    registry2 = ToolRegistry()
+    ws.register(registry2, backend=_web_search_backend()[0], max_results=3, config=no_summary)
+    plain = await registry2.execute('web_search', {'queries': ['q']}, agent)
+    assert plain.is_error is False
+    assert ws.SUMMARY_NOTICE not in plain.content
+    assert 'Sources:' in plain.content
 
 
 @pytest.mark.asyncio

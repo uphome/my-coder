@@ -320,18 +320,30 @@ Web 端原先是**全局单例**：`_session/_agent/_current_sid` 指向"当前�
 - **出站请求也记账**（不变式①）：派发前落 `web/search` 痕迹（query / endpoint /
   model / max_uses，**绝不含 key**），对齐 DSH 的
   `web/deepseek-search-llm-request`；它**不是 surface**，不进模型记忆
-- **配置只有一个来源**：`SearchConfig(endpoint, model, max_uses)` 值对象，由工具层
-  解析一次、**trace 与真实请求共用**——修掉了"日志记一套、请求发另一套"以及
-  `register(endpoint=...)` 静默失效的问题（有专门的回归测试逐字段对账）
+- **配置只有一个来源**：`SearchConfig(endpoint, model, max_uses, include_summary)`
+  值对象，由工具层解析一次、**trace 与真实请求共用**——修掉了"日志记一套、
+  请求发另一套"以及 `register(endpoint=...)` 静默失效的问题（有专门的回归测试
+  逐字段对账）
 - 模型可见形状对齐 DSH `tool-web/src/search.ts`：外部内容提示（逐字取自
-  `trust.ts`）→ `Sources:` markdown 列表（title 空则退化 hostname）→ 截断提示
-  → 引用纪律；入参 `queries: string[]`（1–4 条，执行期校验 + 精确重复折叠），
-  多 query 逐条搜索后按 url 去重合并再截断
-- 不返回模型给的答复正文：DSH 的 deepseek provider **刻意永不返回**
-  （"provider prose is not trusted as an answer"），我们一致
+  `trust.ts`）→ **摘要** → `Sources:` markdown 列表（title 空则退化 hostname）
+  → 截断提示 → 引用纪律；入参 `queries: string[]`（1–4 条，执行期校验 + 精确
+  重复折叠），多 query 逐条搜索后按 url 去重合并再截断
+- **返回那段摘要（与 DSH 的 deepseek provider 相反，是本仓库的有意选择）**：
+  原因是我们**没有 `web_fetch`**，摘要是不读原文时唯一的内容线索。三条约束：
+  ① 摘要前必须贴 `SUMMARY_NOTICE`——它是**那个辅助模型的转述、且没有结构化
+  引用**，标注成"线索、以 Sources 为准"才不会被当事实复述；② 每条摘要按
+  `WEB_SEARCH_SUMMARY_MAX_CHARS = 3000` 截断（实测一条 ≈2.4k 字符，4 条 query
+  最坏 ~10k）；③ `SearchConfig.include_summary=False` 可一键退回 DSH 的
+  deepseek 策略——将来补上抓取、模型能读原文时就该关掉
 
-**成本**：一次搜索 = 一个完整模型轮次。实测一次 `input_tokens ≈ 11.3k /
-output_tokens ≈ 1.2k`；所以 `WEB_SEARCH_TIMEOUT_S = 60`（工具超时 65s），
+**关键实测结论：DeepSeek 不返回结构化 `citations`**（探针两次确认，连 system 里
+明确要求"每句都标来源 URL"也没有）。所以：snippet 永远是空；摘要句句无据；摘要
+正文里那些 markdown 链接是**那个模型自己写的**，可能漏、可能挂错。这也是 DSH 的
+`citationSnippets()` 在我们这儿恒为空映射的原因。
+
+**成本**：一次搜索 = 一个完整模型轮次。实测 `input_tokens` **10.6k~22.4k**（服务端
+把搜索结果原文喂回那个模型，让它写摘要），`output_tokens` 0.5k~1.2k；摘要本身再以
+~2.4k 字符进会话上下文。所以 `WEB_SEARCH_TIMEOUT_S = 60`（工具超时 65s），
 `max_uses = 5`、`max_results = 5`、`max_queries = 4`。
 
 **不做 approval**：它不读文件、无副作用（判据是"不可逆/会执行/会改磁盘"）；
