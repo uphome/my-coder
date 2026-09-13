@@ -44,6 +44,15 @@ conda run --no-capture-output -n agent-demo python -m agent_demo.web_app --works
 
 ## 约定
 
+- **提示词纪律的归属**：`system` 是唯一"每轮都生效"的通道；文档（含本文件）只有愿意读
+  的 agent 才看得到。所以**反复被踩的坑要提成 system 里的通用规则**（`factory.py` 的
+  `discipline` 段，order 10），文档只留事故、证据与理由。分层：通用规则放
+  `identity`/`persona`/`discipline`，工具专属规则放各自的 `tool:*` 段——两者不互串
+  （通用段塞工具细节 = 每轮都付的噪声；工具坑写进通用段 = 换个工具就失效）。
+  当前三条通用纪律：**Scope**（"看看 / 评估 / 解释"= 只读调查，不为好奇制造真实副作用）、
+  **Economy**（先查工作区、不重复调用、外部或昂贵操作先自问是否必要）、
+  **Evidence**（命令必须自证输出——静默成功既不能证明成功也不能证明失败；多行脚本写
+  临时文件再跑，内联多行的引号/换行跨 shell 会被吃掉）
 - **循环的 step 粒度 = 一次模型请求**（对齐 harness `core/agent-loop` 的
   `step()`：发完一次请求 + 执行完这次的工具调用就返回）：工具循环由 `run_turn`
   的外层循环驱动，**每轮开头都 claim inbox**。不要把它合并回 `_run_step` 的

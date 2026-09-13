@@ -1007,6 +1007,37 @@ async def test_identity_prompt_is_neutral(tmp_path):
                    'Claude', 'Anthropic', 'GPT', 'OpenAI'):
         assert banned not in system, f'identity must not mention {banned!r}'
 
+@pytest.mark.asyncio
+async def test_system_prompt_carries_general_discipline(tmp_path):
+    """通用行为纪律必须在 system 里，且**排在工具专属规则之前**。
+
+    为什么守这条：system 是唯一"每轮都生效"的通道，文档（AGENTS.md）只有愿意读的
+    agent 才看得到——反复被踩的坑如果不提成 system 里的通用规则，agent 每次都要
+    重新踩一遍。三条纪律（范围 / 成本 / 自证）与具体工具无关，所以放在通用段
+    （identity/persona/discipline）而不是某个 tool:* 段；这里断言它们真的渲染进了
+    system，且位置在工具段之前（顺序错位会让"通用性"名存实亡）。
+    """
+    from argparse import Namespace
+
+    from agent_demo import factory
+
+    args = Namespace(fake=True, model='fake-model', workspace=tmp_path, hide_reasoning=False,
+                     session='id', sessions=str(tmp_path), prompt='x', resume=False, verbose=False)
+    session = Session(id='id')
+    agent = factory.build_agent(session, args, {'reasoning_started': False, 'request_no': 0, 'tool_no': 0})
+    agent.followup('hi')
+    await agent.when_idle()
+    headers = [e.data for e in session.events if e.type == 'request/header']
+    assert headers, 'expected a request/header event'
+    system = headers[0]['system']
+
+    for label in ('Scope:', 'Economy:', 'Evidence:'):
+        assert label in system, f'通用纪律缺 {label}（应提成 system 规则，而不是只写在文档里）'
+    # 通用段排在工具段之前；且"验证"不再等同于"执行"（理解代码不必跑命令）
+    assert system.index('Scope:') < system.index('Use bash')
+    assert 'reading code needs no execution' in system
+
+
 def test_todo_write_folds_and_injects_into_prompt(tmp_path):
     """todo_write 全链路：写整表 → 折叠读回 → 作为 live 段注入下次请求的 system。"""
     import asyncio
@@ -1273,7 +1304,7 @@ async def test_skill_catalog_injected_into_system(tmp_path):
     assert '秘密技能正文' not in system              # 正文始终不进 system
 
     # 目录段在工具提示段之前（todo 为空时无 todo 段，取 bash 提示为序界）
-    assert system.index('可用技能') < system.index('Use bash to verify')
+    assert system.index('可用技能') < system.index('Use bash')
 
 
 def test_web_skill_catalog_survives_reload(tmp_path):
