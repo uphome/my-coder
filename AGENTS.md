@@ -9,7 +9,7 @@ Python 复刻 deepseek-harness 架构的教学 demo（agent 框架本身，不�
 # 质量门：ruff + mypy + pytest 三绿才可提交（pyproject.toml 已配好）
 conda run -n agent-demo python -m ruff check agent_demo tests
 conda run -n agent-demo python -m mypy agent_demo
-conda run -n agent-demo python -m pytest        # 77 个测试
+conda run -n agent-demo python -m pytest        # 85 个测试
 
 # CLI（可 pip install -e . 后直接 agent-demo；或模块方式跑）
 conda run --no-capture-output -n agent-demo python -m agent_demo.cli --workspace . --fake "read README.md and summarize"
@@ -30,7 +30,7 @@ conda run --no-capture-output -n agent-demo python -m agent_demo.web_app --works
 > 规则提炼进本文件，agent.md 只留背景。
 
 包结构 `agent_demo/`（取代早期平铺）。依赖方向不变，仍是四层单向：
-入口（`cli.py` / `web_app.py` → `factory.py` 组装）→ 框架循环（`agent.py` 被动状态机 / `loop.py` turn-step）→ 状态（`session.py`/`inbox.py`/`prompt.py`/`registry.py`）→ 能力（`llm.py`/`hooks.py`）→ 值（`values.py` + `persistence.py`）。应用内容独立成包：工具在 `agent_demo/tools/`（file_io/search/shell/todo + build_tools 组装）、渲染在 `ui.py`、路径边界在 `sandbox.py`、常量在 `constants.py`。上层依赖下层，下层不感知上层。
+入口（`cli.py` / `web_app.py` → `factory.py` 组装）→ 框架循环（`agent.py` 被动状态机 / `loop.py` turn-step）→ 状态（`session.py`/`inbox.py`/`prompt.py`/`registry.py`）→ 能力（`llm.py`/`hooks.py`）→ 值（`values.py` + `persistence.py`）。应用内容独立成包：工具在 `agent_demo/tools/`（file_io/search/shell/todo/web_search + build_tools 组装）、渲染在 `ui.py`、路径边界在 `sandbox.py`、常量在 `constants.py`。上层依赖下层，下层不感知上层。
 
 **日志（`.sessions/<id>.jsonl`）是唯一事实源**：模型记忆（`derive_messages`）、inbox 队列、回合号、模型路由全部是日志的重放投影。恢复 = 重放（`adopt`），没有独立的对话状态。本仓库已建 CodeGraph 索引（`.codegraph/`），理解/定位代码先 `codegraph_explore`。
 
@@ -44,6 +44,15 @@ conda run --no-capture-output -n agent-demo python -m agent_demo.web_app --works
 
 ## 约定
 
+- **提示词纪律的归属**：`system` 是唯一"每轮都生效"的通道；文档（含本文件）只有愿意读
+  的 agent 才看得到。所以**反复被踩的坑要提成 system 里的通用规则**（`factory.py` 的
+  `discipline` 段，order 10），文档只留事故、证据与理由。分层：通用规则放
+  `identity`/`persona`/`discipline`，工具专属规则放各自的 `tool:*` 段——两者不互串
+  （通用段塞工具细节 = 每轮都付的噪声；工具坑写进通用段 = 换个工具就失效）。
+  当前三条通用纪律：**Scope**（"看看 / 评估 / 解释"= 只读调查，不为好奇制造真实副作用）、
+  **Economy**（先查工作区、不重复调用、外部或昂贵操作先自问是否必要）、
+  **Evidence**（命令必须自证输出——静默成功既不能证明成功也不能证明失败；多行脚本写
+  临时文件再跑，内联多行的引号/换行跨 shell 会被吃掉）
 - **循环的 step 粒度 = 一次模型请求**（对齐 harness `core/agent-loop` 的
   `step()`：发完一次请求 + 执行完这次的工具调用就返回）：工具循环由 `run_turn`
   的外层循环驱动，**每轮开头都 claim inbox**。不要把它合并回 `_run_step` 的
@@ -97,5 +106,6 @@ conda run --no-capture-output -n agent-demo python -m agent_demo.web_app --works
 - `agent_demo/cli.py`：CLI 入口；`--fake` 用脚本化假模型离线跑通全流程（不需要 API key）；`--resume` 演示日志重放恢复
 - `agent_demo/web_app.py`：Web UI（FastAPI + SSE，会话管理/标题/approval）；`factory.py` 的 `build_agent`/`load_env` 被 CLI 与 Web 共用
 - `show_memory.py`：教学脚本，重放日志展示"记忆 = 日志投影"
-- 工具在 `agent_demo/tools/`：`build_tools(workspace)` 组装（read_file 行号分页 / list_files / grep / glob / edit / write_file / bash / todo_write），工具类型（`ToolSpec`：schema + executor + 模式 + 超时 + requires_approval）在 `registry.py`；`--workspace` 必填（路径边界，`sandbox.py` 实现）；bash/write_file/edit 执行前需人工确认；阶段一实施进度见 `NEXT_STEPS.md`
+- 工具在 `agent_demo/tools/`：`build_tools(workspace)` 组装（read_file 行号分页 / list_files / grep / glob / edit / write_file / bash / todo_write / web_search），工具类型（`ToolSpec`：schema + executor + 模式 + 超时 + requires_approval）在 `registry.py`；`--workspace` 必填（路径边界，`sandbox.py` 实现）；bash/write_file/edit 执行前需人工确认；阶段一实施进度见 `NEXT_STEPS.md`
+- `web_search` 是唯一"读工作区之外"的工具：**搜索能力由 DeepSeek 官方在服务端提供**（Anthropic 兼容 `.../anthropic/v1/messages` + 原生服务端工具 `web_search_20250305`），我们只做"发请求 + 解析结构化块"——绝不自己抓网页、绝不从模型正文里抠 URL；没有结果块要**响亮报错**而不是退化成"没找到"。它不读文件、无副作用，所以**不走 workspace 沙箱、也不需要 approval**（与 DSH 一致，见 `agent.md` §6）
 - `.env` 存 `DEEPSEEK_API_KEY`/`DEEPSEEK_BASE_URL`；`.sessions/`、`.codegraph/`、`.env` 均不入库

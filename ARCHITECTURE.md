@@ -303,10 +303,23 @@ JSON 没有类型信息，用 `$xxx` 前缀 key 做类型标记：`$text`/`$tool
 - **工具注册的两份用途**：ToolSpec 把"给模型看的 schema"和"给自己跑的
   executor"绑在一个对象里，漂移在结构上不可能——模型看到的和系统执行
   的是同一个东西的两面
+- **出站辅助请求也要记账**：`web_search` 会向 DeepSeek 的搜索端点发一条
+  **独立**的模型请求（不属于会话上下文）。派发前先落一条痕迹事件
+  `web/search`（query / endpoint / model / max_uses），**绝不含 key**——
+  对齐 DSH 的 `web/deepseek-search-llm-request`（"模型可见的辅助输入不能
+  逃出日志"）。配置是一个 `SearchConfig` 值对象、由工具层解析一次后
+  **trace 与真实请求共用**：否则日志可能记一个端点、请求打到另一个
+  （而且 `register(endpoint=...)` 这类覆盖会静默失效）
 - **每次请求都带全部工具 schema**：模型在请求间无状态，工具描述是每轮
   的固定 token 成本——进化时加工具要算 token 账
 - **提示词每回合快照一次**：`assemble` 在 turn 开头求值，整个 turn 内
   system 恒定，可预期、可调试
+- **提示词分三层，别互串**：通用规则（`identity`/`persona`/`discipline`）、
+  工具专属规则（`tool:*`）、技能目录（`skill:*`）。通用规则的作用域是"任何工具、
+  任何任务"——换工具仍然成立；工具规则换个工具就该失效。混起来两种坏结果：通用段
+  塞工具细节 = 每轮都付的噪声；工具坑写进通用段 = 失去作用域、换个工具还挂着。
+  维护动作是单向的：**反复被踩的坑从文档上移到通用段**（文档只有愿意读的 agent
+  才看得到，system 才是每轮都生效的通道）
 - **prompt sections 用 order 数值排序**：主序按 order 升序、平局按名字；
   factory.py 用 -100/0/110 间隔留插队空间。排序本身是架构性的（插件插队），
   长提示词下首因/近因效应才变成真实的调优手段
@@ -396,7 +409,7 @@ JSON 没有类型信息，用 `$xxx` 前缀 key 做类型标记：`$text`/`$tool
 | `loop.py` | turn/step 两级循环 + 流组装 + 工具分组执行 + 思维链痕迹落盘 + 四层兜底 |
 | `agent.py` | 被动状态机：wake / kick / when_idle / cancel |
 | `persistence.py` | JSONL 追加写 + 重放读 |
-| `tools/` | 应用工具（file_io 读写/编辑、search grep/glob、shell bash、todo）+ `build_tools(workspace)` |
+| `tools/` | 应用工具（file_io 读写/编辑、search grep/glob、shell bash、todo、**web_search 联网搜索**）+ `build_tools(workspace)` |
 | `sandbox.py` | workspace 路径边界（轻量沙箱：归一化 + 前缀匹配） |
 | `ui.py` | 终端渲染（_render_event / _paint，UI 是日志投影） |
 | `factory.py` | build_agent / load_env（CLI 与 Web 共用组装） |
