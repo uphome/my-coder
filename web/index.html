@@ -181,7 +181,14 @@ header h1 .dot { color: var(--ok); }
 #model-label.fake { color: var(--warn); border-color: rgba(210, 153, 34, .4); }
 
 main { flex: 1; overflow-y: auto; overflow-anchor: auto; }
-#messages { max-width: 840px; margin: 0 auto; padding: 18px 22px 60px; }
+/* 定宽居中三件套：width:100% + max-width + margin:0 auto，**缺一不可**。
+   为什么 width 不能省：`#messages` 是 `#main-col`（flex column）的 flex item，
+   而 flex item 一旦有交叉轴 auto 外边距（`margin: 0 auto`），`align-self: stretch`
+   就失效——宽度退化成"由内容决定"（fit-content），此时 `max-width` 只封顶不撑底：
+   短消息 → 整列收缩 → 右对齐气泡的右缘跟着漂移（issue #1：短消息右侧留白大、
+   长消息贴边）。显式 100% 把宽度与内容解耦，max-width 才真正只是封顶，auto 外边距
+   负责居中（DSH 的 .column 同款三件套）。 */
+#messages { width: 100%; max-width: 840px; margin: 0 auto; padding: 18px 22px 60px; }
 /* 无动画模式：批量渲染历史时关掉入场动画，避免整页闪动 */
 #messages.no-anim .msg, #messages.no-anim .turn-sep, #messages.no-anim .tool-activity,
 #messages.no-anim .thinking, #messages.no-anim .approval-card { animation: none !important; }
@@ -431,8 +438,10 @@ main { flex: 1; overflow-y: auto; overflow-anchor: auto; }
 .cp-md h1, .cp-md h2, .cp-md h3 { margin: .8em 0 .3em; font-size: 1em; color: var(--text-1); }
 
 /* ============ 常驻 todo dock（有清单才显示；输入框上方） ============ */
+/* 同 #messages：它也是 `#main-col` 的 flex item，同样需要显式宽度，
+   否则面板宽度会随清单文字收缩、而不是对齐 840 列（同一根因，见上面 #messages 注释） */
 #todo-dock {
-  max-width: 840px; margin: 0 auto; padding: 0 22px 4px;
+  width: 100%; max-width: 840px; margin: 0 auto; padding: 0 22px 4px;
 }
 .todo-panel {
   background: var(--bg1); border: 1px solid var(--border);
