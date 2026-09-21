@@ -9,7 +9,7 @@ Python 复刻 deepseek-harness 架构的教学 demo（agent 框架本身，不�
 # 质量门：ruff + mypy + pytest 三绿才可提交（pyproject.toml 已配好）
 conda run -n agent-demo python -m ruff check agent_demo tests
 conda run -n agent-demo python -m mypy agent_demo
-conda run -n agent-demo python -m pytest        # 97 个测试
+conda run -n agent-demo python -m pytest        # 101 个测试
 
 # CLI（可 pip install -e . 后直接 agent-demo；或模块方式跑）
 conda run --no-capture-output -n agent-demo python -m agent_demo.cli --workspace . --fake "read README.md and summarize"
@@ -32,7 +32,7 @@ conda run --no-capture-output -n agent-demo python -m agent_demo.web_app --works
 包结构 `agent_demo/`（取代早期平铺）。依赖方向不变，仍是四层单向：
 入口（`cli.py` / `web_app.py` → `factory.py` 组装）→ 框架循环（`agent.py` 被动状态机 / `loop.py` turn-step）→ 状态（`session.py`/`inbox.py`/`prompt.py`/`registry.py`）→ 能力（`llm.py`/`hooks.py`）→ 值（`values.py` + `persistence.py`）。应用内容独立成包：工具在 `agent_demo/tools/`（file_io/search/shell/todo/web_search + build_tools 组装）、渲染在 `ui.py`、路径边界在 `sandbox.py`、常量在 `constants.py`。上层依赖下层，下层不感知上层。
 
-**日志（`.sessions/<id>.jsonl`）是唯一事实源**：模型记忆（`derive_messages`）、inbox 队列、回合号、模型路由全部是日志的重放投影。恢复 = 重放（`adopt`），没有独立的对话状态。本仓库已建 CodeGraph 索引（`.codegraph/`），理解/定位代码先 `codegraph_explore`。
+**日志（`.sessions/<id>.jsonl`）是唯一事实源**：模型记忆（`derive_messages`）、inbox 队列、回合号、模型路由全部是日志的重放投影。恢复 = 重放（`adopt`）+ **自愈**（补上崩溃留下的悬空工具调用，见 `recovery.py`），没有独立的对话状态。本仓库已建 CodeGraph 索引（`.codegraph/`），理解/定位代码先 `codegraph_explore`。
 
 ## 编辑时不可破坏的五个不变式
 
@@ -86,6 +86,16 @@ conda run --no-capture-output -n agent-demo python -m agent_demo.web_app --works
     结果，否则模型记忆里会留下"带了 tool_calls 却没有结果"的 assistant 消息——
     wire 格式非法，下一轮请求直接 400。`tool/skipped` 这类痕迹事件不算数：
     它进不了 `derive_messages`
+- **恢复要自愈"悬空工具调用"**（落地时遵循；实测证据与 400 原文见
+  `ARCHITECTURE.md` §3.16）：取消路径能补记账，但**进程被 kill / 断电 / OOM** 时
+  没有任何代码有机会跑——日志会停在 `tool/call`（痕迹已落）与 `tool/result`
+  （surface 未落）之间。后果不是"少一条结果"，而是模型记忆里留下"带了 tool_calls
+  却没有结果"的 assistant 消息 → wire 非法 → **之后每次发送都失败，整个会话报废**
+  （用户只能新建会话或手改 JSONL；UI 上先表现为那条工具行永远转圈）。规则：
+  **每个恢复入口（重放之后、`bind_store` 之后）都调
+  `recovery.repair_dangling_tool_calls`**；修复必须**写进日志**（补 is_error 合成
+  结果 + 先落一条 `session/repaired` 痕迹），**禁止在请求构造时静默补占位消息**——
+  那会把"这里断过"从唯一事实源里抹掉。函数幂等，可无条件调用
 - 注释/文档全部用中文，教学式讲解设计动机——新注释保持此风格
 - 值对象必须 frozen dataclass + tuple，禁止把可变容器放进消息/事件（JSON 往返依赖）
 - 严格校验哲学：未注册 prompt 变量、重复工具名、非法执行模式、surface_op 缺失都在写入时刻抛错，宁炸勿静默
