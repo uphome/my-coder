@@ -24,6 +24,8 @@ from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from typing import Any
 
+from .constants import TOOL_RESULT_MAX_CHARS
+
 # 合法的执行模式：parallel=可与其他调用并发；sequential=独占（也是默认值）。
 EXECUTION_MODES = frozenset({'parallel', 'sequential'})
 
@@ -114,7 +116,8 @@ class ToolRegistry:
     async def execute(self, name: str, arguments: dict, agent, signal=None) -> ToolOutcome:
         """执行一条工具调用：校验参数 → 超时包裹执行 → 返回结果。
 
-        唯一的兜底在这里：asyncio.TimeoutError 降级成 is_error 结果。
+        唯一的兜底在这里：asyncio.TimeoutError 降级成 is_error 结果，
+        以及执行结果统一过 `_truncate_outcome`（字符预算，最后的安全网）。
         参数校验抛出的 ValueError 不在这里捕获——由循环层统一捕获降级
         （见 loop._run_one），保证"任何工具失败都变成一条结果"。
 
@@ -131,9 +134,10 @@ class ToolRegistry:
         else:
             pending = spec.execute(arguments, agent, signal)
         try:
-            return await asyncio.wait_for(pending, timeout=spec.timeout_s)
+            outcome = await asyncio.wait_for(pending, timeout=spec.timeout_s)
         except TimeoutError:
             return ToolOutcome(content=f'tool {name!r} timed out after {spec.timeout_s}s', is_error=True)
+        return _truncate_outcome(outcome)
 
 
 def _run_blocking(factory: Callable[..., Coroutine[Any, Any, ToolOutcome]], *args: Any) -> ToolOutcome:
@@ -161,3 +165,20 @@ def _validate_arguments(name: str, parameters: dict, arguments: dict) -> None:
     for key in arguments:
         if properties and key not in properties:
             raise ValueError(f'tool {name!r} got unexpected argument {key!r}')
+
+
+def _truncate_outcome(outcome: ToolOutcome) -> ToolOutcome:
+    """registry 层统一兜底：超长工具结果截断并附导航提示。
+
+    提示文本也算进总预算，保证最终 content 长度不超过 TOOL_RESULT_MAX_CHARS；
+    is_error 原样保留——截断只是内容预算，不改变成功/失败语义。
+    """
+    content = outcome.content or ''
+    if len(content) <= TOOL_RESULT_MAX_CHARS:
+        return outcome
+    notice = (
+        f'\n(output truncated at {TOOL_RESULT_MAX_CHARS} chars; '
+        'narrow the request or page the result)'
+    )
+    keep = max(0, TOOL_RESULT_MAX_CHARS - len(notice))
+    return ToolOutcome(content=content[:keep] + notice, is_error=outcome.is_error)
