@@ -379,6 +379,14 @@ JSON 没有类型信息，用 `$xxx` 前缀 key 做类型标记：`$text`/`$tool
 | **结果按模型顺序落盘** | `slots` + `commit_ready()`：队首连续就绪才 `append` | `commitReady()`：`committed` 只跨连续槽位推进 |
 | **取消补合成结果** | `_run_group` 的 `except CancelledError` + `_record_aborted_calls`（补 `tool/call` + is_error 的 `tool/result`） | `appendSkippedToolCall()` |
 
+**未注册的工具名也走 fail-closed**：`ToolRegistry.mode()` 对不存在的工具返回
+`'sequential'` 而不是抛 KeyError。分组发生在**执行之前**——在这里抛错的后果不是
+"报个错"，而是 `_run_one` 里那段专门把"工具未注册"降级成 is_error 结果的兜底
+永远没机会执行：整回合没有 `turn/end`，日志里只留下"请求了工具却没有结果"的
+assistant 消息（wire 非法），模型什么都看不到（实测旧行为：`driver error: tool
+'no_such_tool' is not registered`，`turn/end` 缺失）。对齐 harness：`executionMode()`
+对未注册工具同样返回 `exclusive`，调用照旧派发，失败在派发阶段变成结果。
+
 为什么"按模型顺序落盘"重要：并发只该改变**谁先跑完**，不该改变**日志顺序**。
 顺序一乱，同一段对话每次重放出的前缀就不同——前缀缓存命中率下降、测试不稳定、
 前端除了按 call_id 配对还得处理"结果早于调用"的畸形序列。
@@ -388,8 +396,10 @@ JSON 没有类型信息，用 `$xxx` 前缀 key 做类型标记：`$text`/`$tool
 却没有结果"的 assistant 消息——wire 格式要求每个 tool_call 都有对应的工具消息，
 **下一轮请求直接 400**。注意 `tool/skipped` 只是审计痕迹（非 surface 事件），
 进不了模型记忆，所以它不算记账。harness 先 drain 已派发的调用（拿到真结果）
-再给剩下的补合成结果；我们简化成"取消时一次性给所有没结果的调用补一条 is_error
-结果"，文案按是否已派发分成 `aborted before dispatch` / `aborted while running`。
+再给剩下的补合成结果；**我们同样先 drain**：取消前已经跑完的调用认它的真结果，
+拿不到结果的才补合成结果，文案按是否已派发分成 `aborted before dispatch` /
+`aborted while running`。drain 那一步挡住二次取消（连点两次停止）——它不能让
+后面的补记账被跳过，否则又回到"有调用没结果"。
 （旧实现两边都没有：取消时两条 `tool/call` 已落盘、`tool/result` 一条没有。）
 实测暴露面：真实会话 69 个多调用批次里有 7 个是 `[parallel…, sequential…]`
 形状，旧实现会把它们整批塞进同一个并发池。

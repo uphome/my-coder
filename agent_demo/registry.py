@@ -103,8 +103,17 @@ class ToolRegistry:
             raise KeyError(f'tool {name!r} is not registered') from None
 
     def mode(self, name: str) -> str:
-        """查执行模式——循环层按它把工具调用分组（parallel/sequential）。"""
-        return self.get(name).execution_mode
+        """查执行模式；**未注册的工具按 fail-closed 返回 'sequential'**。
+
+        为什么这里不能抛 KeyError：分组发生在执行之前。模型幻觉出一个不存在的
+        工具名时，若在这一步炸掉，`_run_one` 里那段"把 `get()` 的 KeyError 降级
+        成 is_error 结果"的兜底就永远没机会执行——后果是整回合没有 `turn/end`、
+        日志里留下"请求了工具却没有结果"的 assistant 消息（wire 格式非法）。
+        对齐 harness `executionMode()`：未注册 / 未声明 / 判定抛异常一律
+        `exclusive`，调用照旧往下走，失败由执行阶段降级成结果（不变式 5）。
+        """
+        spec = self._tools.get(name)
+        return spec.execution_mode if spec is not None else 'sequential'
 
     def schemas(self) -> list[dict]:
         """投影成 OpenAI 的 tools 字段格式；模型看到的工具世界就是这份列表。"""

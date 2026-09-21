@@ -400,12 +400,20 @@ async def _run_group(agent, turn: int, step: int, group: list[ToolCallBlock], mo
             commit_ready()
             fill()
     except asyncio.CancelledError:
+        # 取消：先 drain 已起跑的调用，再给拿不到结果的补合成结果
         for task in running:
             task.cancel()
         if running:
-            # 排空已起跑的调用（harness 的 drain 语义）：它们内部会放行
-            # CancelledError，这里只等它们停下，别留下没人回收的任务
-            await asyncio.gather(*running, return_exceptions=True)
+            # drain（harness 语义）：只等它们停下。挡住二次取消（用户连点两次
+            # 停止 / 停止后又关会话）——它不能让下面的补记账被跳过
+            try:
+                await asyncio.gather(*running, return_exceptions=True)
+            except asyncio.CancelledError:
+                pass
+            # 取消前就跑完的调用，认它的真结果——drain 的意义就在这里
+            for task, index in running.items():
+                if not task.cancelled() and task.exception() is None:
+                    slots[index] = task.result()
         for index in range(started):
             if slots[index] is None:
                 slots[index] = _aborted_message(group[index], ABORTED_WHILE_RUNNING)

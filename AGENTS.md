@@ -9,7 +9,7 @@ Python 复刻 deepseek-harness 架构的教学 demo（agent 框架本身，不�
 # 质量门：ruff + mypy + pytest 三绿才可提交（pyproject.toml 已配好）
 conda run -n agent-demo python -m ruff check agent_demo tests
 conda run -n agent-demo python -m mypy agent_demo
-conda run -n agent-demo python -m pytest        # 94 个测试
+conda run -n agent-demo python -m pytest        # 97 个测试
 
 # CLI（可 pip install -e . 后直接 agent-demo；或模块方式跑）
 conda run --no-capture-output -n agent-demo python -m agent_demo.cli --workspace . --fake "read README.md and summarize"
@@ -66,7 +66,9 @@ conda run --no-capture-output -n agent-demo python -m agent_demo.web_app --works
     **副作用**而不是它快不快：读文件/搜索并发安全；`todo_write` 改日志投影，
     `bash`/`edit`/`write_file` 要人工把关——都是独占。漏声明的代价是不确定的交错
     （并发读-改-写丢更新），多声明一次的代价只是慢一点：方向反过来代价不对称。
-    非法模式值在注册时刻抛错（宁炸勿静默）
+    非法模式值在注册时刻抛错（宁炸勿静默）；**未注册的工具名同样按 fail-closed
+    当独占**——分组阶段不许抛错，否则"工具未注册"这条失败会抢在执行之前的
+    `mode()` 上炸掉整个回合，`_run_one` 的降级兜底永远没机会跑（不变式 5）
   - **"能不能并发"与"阻不阻塞事件循环"是两根正交的轴**：后者用 `offload=True`
     单独表达（executor 体内全是同步 I/O、没有任何 await 才声明）。不卸载的后果是
     `asyncio.wait_for` 的定时器根本没机会触发（超时保护形同虚设）+ 同进程的

@@ -325,8 +325,36 @@ def test_execution_mode_is_fail_closed_by_default():
     registry.register(_spec('declared', noop, execution_mode='parallel'))
     assert registry.mode('declared') == 'parallel'
 
+    # 未注册的工具名也按 fail-closed 当独占：分组阶段不许抛错，
+    # 否则它会在执行之前炸掉整个回合（失败必须留给执行阶段降级成结果）
+    assert registry.mode('never-registered') == 'sequential'
+
     with pytest.raises(ValueError):
         registry.register(_spec('typo', noop, execution_mode='paralell'))
+
+
+async def test_unknown_tool_name_degrades_to_a_result():
+    """模型幻觉出不存在的工具：整回合照常收尾，模型拿到一条 is_error 结果。
+
+    旧实现在分组阶段就 `mode()` → KeyError 炸出 run_turn：日志里连 turn/end 都没有，
+    只留下"请求了工具却没有结果"的 assistant 消息（wire 非法），模型什么都看不到。
+    """
+    tools = ToolRegistry()          # 空注册表：模型点的名字必然不存在
+    agent, session = _tool_agent([
+        {'tool_calls': [{'id': 'c1', 'name': 'no_such_tool', 'arguments': '{}'}],
+         'finish_reason': 'tool_calls'},
+        {'text': 'adapted', 'finish_reason': 'stop'},
+    ], tools)
+    agent.followup('call a tool that does not exist')
+    await agent.when_idle()
+
+    assert session.events[-1].type == 'turn/end'
+    assert session.events[-1].data['reason'] == 'completed'
+    results = [block for message in session.derive_messages() for block in message.content
+               if isinstance(block, ToolResultBlock)]
+    assert len(results) == 1
+    assert results[0].tool_call_id == 'c1'
+    assert results[0].is_error and 'not registered' in results[0].content
 
 
 async def test_parallel_group_stops_at_a_sequential_barrier():
