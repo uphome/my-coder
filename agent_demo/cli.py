@@ -16,6 +16,7 @@ from pathlib import Path
 
 from .factory import build_agent, load_env
 from .persistence import load_events
+from .recovery import repair_dangling_tool_calls
 from .session import Session
 from .ui import render_event
 
@@ -38,6 +39,11 @@ async def _prepare(args) -> tuple[Session, dict]:
             render_event(event, args.hide_reasoning, ui_state)  # 重放历史到终端
         print(f'resumed {args.session}: {len(session.events)} events restored')
     session.bind_store(session_path)
+    # 恢复即自愈：上次跑到一半被 kill 掉的话，日志里会留下"请求了工具却没有结果"
+    # 的悬空调用——不补记的话之后每次请求都是 400（见 recovery.py）
+    repaired = repair_dangling_tool_calls(session)
+    if repaired:
+        print(f'repaired {len(repaired)} tool call(s) left dangling by an interrupted run')
     return session, ui_state
 
 

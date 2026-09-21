@@ -34,6 +34,7 @@ from .factory import build_agent, load_env
 from .hooks import Hooks
 from .llm import LlmRequest
 from .persistence import load_events
+from .recovery import repair_dangling_tool_calls
 from .session import Session
 from .tools.todo import fold_todos
 from .values import TextBlock, create_user_message
@@ -303,6 +304,12 @@ def _open_session_seat(sid: str, *, allow_missing: bool) -> Seat:
         for event in load_events(log_path):
             session.adopt(event)
     session.bind_store(log_path)  # 追加式实时落盘（没有状态不进日志）
+    # 崩溃/被 kill 留下的"悬空工具调用"在这里自愈：不修的话模型记忆里会留下
+    # "请求了工具却没有结果"的 assistant 消息，之后每次发送都是 400（见 recovery.py）
+    repaired = repair_dangling_tool_calls(session)
+    if repaired:
+        print(f'[repair] session {sid}: {len(repaired)} dangling tool call(s) repaired',
+              flush=True)
     if not log_path.exists():
         # 新会话立即落盘（空文件）：列表可见、可切换——"会话存在 = 有文件"
         log_path.touch()
