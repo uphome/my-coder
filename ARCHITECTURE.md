@@ -234,6 +234,7 @@ demo 运行时挂的第一个钩子是 `request_error`（上下文压缩的溢�
 | 工具执行抛异常 | loop.py 捕获降级 |
 | 工具卡死超时 | tools/ 包 wait_for 兜底（**同步阻塞的 executor 要先声明 `offload`，否则 wait_for 的定时器永远不会触发**，见 §3.15） |
 | 用户取消（组执行中途） | loop.py 给已请求但没结果的调用补一条 is_error 合成结果——失败要降级成结果，取消也不例外（见 §3.15） |
+| 进程被 kill / 断电（没有任何代码有机会跑） | 恢复时自愈：`recovery.py` 补 is_error 合成结果 + `session/repaired` 痕迹（见 §3.16） |
 
 模型看到 `ValueError: missing required argument` 这类结果，自己知道怎么
 改。**任何异常都不能越过 `_run_one` 炸掉循环**，唯一能打断的只有用户
@@ -421,6 +422,46 @@ assistant 消息（wire 非法），模型什么都看不到（实测旧行为�
 卸载的边界同样是硬约束：**只给纯 I/O**——换了线程，`session`/`agent` 的内存
 状态就没人在循环线程上守了（不变式 3 的"入队即记账"依赖单线程串行 append）。
 
+### 3.16 会话自愈：崩溃留下的"悬空工具调用"
+
+工具执行期间落两类事件：`tool/call`（痕迹，起跑前）和 `tool/result`（surface，
+跑完后）。取消路径两者都补记账（§3.15），但**进程被 kill / 断电 / OOM / 宿主机崩**
+时没有任何 Python 代码有机会运行——日志就停在这两个时刻之间。
+
+**后果不是"少一条结果"**：`derive_messages` 会把那条"请求了工具"的 assistant
+消息折进模型记忆，而 `_to_wire_messages` 是纯翻译、不修复，于是 wire 上成了
+"assistant 带 `tool_calls`、却没有对应的 tool 消息"。实测（真发一次）：
+
+```
+HTTP 400 An assistant message with 'tool_calls' must be followed by tool messages
+         responding to each 'tool_call_id'. (insufficient tool messages following tool_calls message)
+```
+
+而且**不自愈**：那条 assistant 消息永久留在日志里，之后每次发送都是同一个 400
+（实测连发两次同样失败，且每次失败还往日志里再插一条 user 消息）。用户只剩两条
+出路——新建会话（丢掉上下文）或手改 JSONL。UI 上还有一个更早的征兆：那条工具行
+会**永远转圈**（前端建卡片时一律 `state:'running'`，只有拿到 `tool_result` 才翻）。
+
+**修法**（`recovery.py`，恢复入口调用）：重放之后扫一遍投影，给缺结果的调用补一条
+`is_error` 合成结果，并**先落一条 `session/repaired` 痕迹**说明这次自愈。两个刻意的
+选择：
+
+- **只在恢复时修，不在请求构造时补占位消息**。后者能让 400 消失，但会把"这里断过"
+  从日志里抹掉——而日志是唯一事实源。合成结果的文案本身就说清它的来历
+  （`no result was recorded — the session was interrupted …`），修复痕迹里记着
+  `call_ids`，读日志的人一眼能看出哪几条结果是合成的。
+- **修完即持久**（走 `session.append`，在 `bind_store` 之后调用）：从磁盘重放一次
+  依然一致，不会每次打开都"修一遍内存"。
+
+判据只看**投影**（`derive_messages`），不看痕迹事件：只有进得了模型记忆的调用才会
+让 wire 非法；被 compaction 遮蔽掉的老调用不该被算进来。函数幂等（补完再扫就什么都不
+缺），所以两个恢复入口（`web_app._open_session_seat`、`cli._prepare`）都可以无条件调一次。
+
+实测修复效果：同一条崩溃日志，修完再发真请求 → `turn/end{reason: 'completed'}`，
+模型正确复述"收到过一条失败的工具结果，提示可重新发起"，没有幻觉成"我读过那个文件"。
+（反向的"孤儿结果"——有结果没有对应调用——当前没有任何路径能造出来：结果总是跟在
+调用之后落盘，compaction 也按整段遮蔽，所以不修。）
+
 ---
 
 ## 4. 一条消息的完整生命周期
@@ -462,12 +503,13 @@ assistant 消息（wire 非法），模型什么都看不到（实测旧行为�
 | `session.py` | 日志 + surface 折叠投影（append / derive_messages / adopt / request_header） |
 | `inbox.py` | 双队列（next-turn / next-step）+ claim 语义 + 持久化重放 + `queued_items()` 队列投影 |
 | `prompt.py` | sections 按 order 拼接 + `{{var}}` 严格插值 |
-| `registry.py` | 工具类型（ToolSpec：schema + executor + 模式 + 超时 + requires_approval） |
+| `registry.py` | 工具类型（ToolSpec：schema + executor + 并发模式 + 卸载声明 + 超时 + requires_approval） |
 | `llm.py` | 能力层：SSE 流式客户端 + FakeLlm + wire 双向翻译（含思维链字段解析） |
 | `hooks.py` | 三个决策钩子的类型 |
-| `loop.py` | turn/step 两级循环 + 流组装 + 工具分组执行 + 思维链痕迹落盘 + 四层兜底 |
+| `loop.py` | turn/step 两级循环 + 流组装 + 工具分组执行（自限池/有序提交/取消补记）+ 思维链痕迹落盘 + 四层兜底 |
 | `agent.py` | 被动状态机：wake / kick / when_idle / cancel |
 | `persistence.py` | JSONL 追加写 + 重放读 |
+| `recovery.py` | 会话自愈：恢复时给崩溃留下的悬空工具调用补 is_error 合成结果 + `session/repaired` 痕迹 |
 | `tools/` | 应用工具（file_io 读写/编辑、search grep/glob、shell bash、todo、**web_search 联网搜索**）+ `build_tools(workspace)` |
 | `sandbox.py` | workspace 路径边界（轻量沙箱：归一化 + 前缀匹配） |
 | `ui.py` | 终端渲染（_render_event / _paint，UI 是日志投影） |
@@ -476,7 +518,7 @@ assistant 消息（wire 非法），模型什么都看不到（实测旧行为�
 | `web_app.py` | Web UI（FastAPI + SSE：会话/标题/approval/手动压缩/steer 插队；seat 化并发隔离；事件透传 turn/step + turn_start/user_message（带 message_id/rpc_id）/queue_update 帧供前端投影；队列项操作 `POST /queue/update`） |
 | `compaction.py` | 上下文压缩引擎（四步事务 + checkpoint + 会话 token 累计账） |
 | `show_memory.py` | 教学脚本：重放日志展示"记忆 = 投影" |
-| `tests/test_demo.py` | 77 个架构测试 |
+| `tests/test_demo.py` | 101 个架构测试 |
 
 ---
 

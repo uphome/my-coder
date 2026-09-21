@@ -603,3 +603,71 @@ snippet 永远空；② 摘要无法做"句句有据"的引用；③ 摘要正�
   的 `consumed` 回传**——外层"只看队首"本身没问题，前提是内层能把"我停在哪"
   交回去。
 
+## 8. 崩溃路径：恢复时自愈悬空工具调用（2026-09 已定稿并落地）
+
+§7 处理的是**取消**留下的"没有结果的工具调用"；这一节是同一形状的另一个来源，
+也是唯一修不了"当场补记"的那一个。
+
+### 8.1 触发窗口：两类事件之间
+
+工具执行期间落两类事件——`tool/call`（痕迹，起跑前）与 `tool/result`（surface，
+跑完后）。取消路径两者都能补记（`loop._run_group` 的 `except CancelledError`），
+但**进程被 kill / 断电 / OOM / 宿主机崩**时没有任何 Python 代码有机会运行，日志就
+停在这两者之间。窗口是毫秒级（工具执行时间），比取消更难撞上；但 web 进程长期
+在线（会被 Ctrl+C、会被休眠、会被 OOM kill），而且撞上就是整个会话报废。
+
+### 8.2 后果（全部实测，不是推断）
+
+手造一条"断电日志"（turn 1 完整；turn 2 请求了工具、`tool/call` 已落，然后什么都没有），
+走真正的恢复路径（`load_events` + `adopt`）后：
+
+1. **wire 非法**：assistant 带 `tool_calls` 1 条、tool 回复 **0** 条。把这份 payload
+   真发给 DeepSeek：
+
+   ```
+   HTTP 400 An assistant message with 'tool_calls' must be followed by tool messages
+            responding to each 'tool_call_id'. (insufficient tool messages following tool_calls message)
+   ```
+
+2. **不会自愈**：接真模型连发两条消息，两条都是同一个 400、`turn/end{reason:'error',
+   code:'HTTP_ERROR'}`——那条 assistant 消息永久留在 `derive_messages` 里，而
+   `_to_wire_messages` 是纯翻译、不做修复。**该会话报废**，用户只能新建会话
+   （丢上下文）或手改 JSONL。更糟的是每次失败还往日志里再插一条 `user/message`。
+3. **UI 上的早期征兆**：前端建工具卡一律 `state:'running'`（`web/index.html:1729`、
+   `:1925`），只有拿到 `tool_result` 才翻状态——所以那条工具行**永远转圈**。
+4. **回合号/状态本身没坏**（`_last_turn` 恢复正确、status=idle），所以表面上"看着
+   还挺正常"，问题要到下一次发送才暴露。
+
+### 8.3 修法（`agent_demo/recovery.py`）
+
+恢复（重放）之后扫一遍**投影**，给缺结果的调用补一条 `is_error` 合成结果，并**先落
+一条 `session/repaired` 痕迹**。两个刻意的选择：
+
+- **只在恢复时修，绝不在请求构造时补占位消息**。后者能让 400 消失，但会把"这里断过"
+  从日志里抹掉——而日志是唯一事实源。合成结果的文案自己说清来历，修复痕迹里记着
+  `call_ids`，读日志的人一眼看出哪几条结果是合成的。
+- **修完即持久**：`session.append` 落在 `bind_store` 之后，重放一次依然一致。
+
+判据只看投影、不看痕迹事件（只有进得了模型记忆的调用才会让 wire 非法；被
+compaction 遮蔽的老调用不该被算进来）。函数幂等，所以 `web_app._open_session_seat`
+与 `cli._prepare` 两个恢复入口都无条件调一次。
+
+### 8.4 修复效果（真模型验证）
+
+同一条崩溃日志，修完再发一次真请求：
+
+```
+修复前: turn/end {reason: 'error', code: 'HTTP_ERROR', ... 400 ...}
+修复后: turn/end {reason: 'completed'}
+        模型回答：我收到过的工具结果是一条错误信息：调用 read_file 读取 a.txt 时
+        "no result was recorded — the session was interrupted (crash or kill)"，
+        并提示视为失败、如需可重新发起。
+```
+
+模型没有幻觉成"我读过那个文件"——这正是合成结果必须写明来历的原因：它让模型知道
+该重发，而不是基于幻觉继续推理。
+
+**没有对应机制的对照**：harness 的 `runGroup` 同样只在 abort 路径补记
+（`appendSkippedToolCall`），崩溃恢复不属于它的职责面（进程没了，谁都不在）。
+所以这一节是我们自己的机制，不是抄的。
+
