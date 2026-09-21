@@ -9,7 +9,7 @@ Python 复刻 deepseek-harness 架构的教学 demo（agent 框架本身，不�
 # 质量门：ruff + mypy + pytest 三绿才可提交（pyproject.toml 已配好）
 conda run -n agent-demo python -m ruff check agent_demo tests
 conda run -n agent-demo python -m mypy agent_demo
-conda run -n agent-demo python -m pytest        # 109 个测试
+conda run -n agent-demo python -m pytest        # 112 个测试
 
 # CLI（可 pip install -e . 后直接 agent-demo；或模块方式跑）
 conda run --no-capture-output -n agent-demo python -m agent_demo.cli --workspace . --fake "read README.md and summarize"
@@ -115,6 +115,13 @@ conda run --no-capture-output -n agent-demo python -m agent_demo.web_app --works
     不写密钥临时状态未验证猜测）属于**每轮都生效**的通用纪律 → 进 `discipline` 段；
     live 段只承载**状态与内容**。内容载体是内置技能 `skills/project-instructions.md`
     （骨架 + 该写/不该写 + 何时更新），由技能目录按需加载
+  - **探测是三态，不是两态**（对齐 DSH 的 `ScopeInstructionProbe` 与 opencode 的
+    `SystemContext.unavailable`，后者原话是"distinguishes confirmed absence from
+    provider failure"）：**确认存在**（注入正文）/ **确认不存在**（只有这一态才允许
+    说"没有项目指令文件"、才允许建议创建）/ **读不到**（权限拒绝、IO 错误、同名目录
+    ——必须说"内容未知"：既不许当成"没有约定"，也不许提议创建，因为可能覆盖一份已
+    存在只是读不到的文件）。**不要把"不知道"降级成"没有"**，这是不变式 5 与
+    "宁炸勿静默"在探测上的对应物
   - **写入一律走 approval**：指令文件归根到底是个文件，创建/修改走 `write_file`/`edit`
     的 approval 门 → 变更作为 `tool/call` + `tool/result` 进日志（不变式 1）。**不做**
     DSH 的 baseline/delta 版本账（它注入一次所以要记增量）——我们每请求重渲染，

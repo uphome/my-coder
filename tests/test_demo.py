@@ -3,6 +3,7 @@
 import asyncio
 import json
 import time
+from pathlib import Path
 
 import httpx
 import pytest
@@ -1552,6 +1553,64 @@ def test_instructions_skips_a_file_over_the_source_cap(tmp_path):
     loaded = InstructionLoader(tmp_path).load()
     assert loaded.files[0].truncated is False                  # 没截断——根本没读
     assert 'too large to inline' in loaded.files[0].content
+
+
+def test_instructions_report_unreadable_instead_of_absent(tmp_path, monkeypatch):
+    """第三态：文件在、但**读不到** → 说"不知道"，不说"没有"，也不提议创建。
+
+    把"读不到"渲染成 files="none" 会同时对用户和模型撒谎（不变式⑤ / 宁炸勿静默
+    在探测上的对应物：不要把"不知道"降级成"没有"）。对齐 DSH 的
+    ScopeInstructionProbe 与 opencode 的 SystemContext.unavailable。
+    """
+    (tmp_path / 'AGENTS.md').write_text('约定正文', encoding='utf-8')
+    original = Path.read_text
+
+    def deny(self, *args, **kwargs):
+        if self.name == 'AGENTS.md':
+            raise PermissionError('denied by test')
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'read_text', deny)
+    loader = InstructionLoader(tmp_path)
+    loaded = loader.load()
+    assert loaded.found is False
+    assert [f.display for f in loaded.unreadable] == ['AGENTS.md']
+    assert loaded.unreadable[0].reason.startswith('cannot read: ')
+
+    rendered = loader.render()
+    assert 'files="unreadable"' in rendered
+    assert 'could not be read' in rendered and '- AGENTS.md: cannot read' in rendered
+    assert 'propose writing' not in rendered      # 存在性没确认 → 连"建议创建"都不该说
+
+
+def test_instructions_treat_a_directory_named_agents_md_as_unreadable(tmp_path):
+    """同名目录（PI 踩过 EISDIR 的那种）：也算"读不到"，不算"没有"。"""
+    (tmp_path / 'AGENTS.md').mkdir()
+    loader = InstructionLoader(tmp_path)
+    loaded = loader.load()
+    assert loaded.files == ()
+    assert 'not a regular file' in loaded.unreadable[0].reason
+
+    rendered = loader.render()
+    assert 'files="unreadable"' in rendered
+    assert 'propose writing' not in rendered
+
+
+def test_instructions_list_unreadable_alongside_a_readable_file(tmp_path, monkeypatch):
+    """一份读得到 + 一份读不到：正文照常注入，同时点名读不到的那份。"""
+    (tmp_path / 'AGENTS.md').write_text('AGENTS 正文', encoding='utf-8')
+    (tmp_path / 'CLAUDE.md').write_text('CLAUDE 正文', encoding='utf-8')
+    original = Path.read_text
+
+    def deny(self, *args, **kwargs):
+        if self.name == 'CLAUDE.md':
+            raise PermissionError('denied by test')
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'read_text', deny)
+    rendered = InstructionLoader(tmp_path).render()
+    assert 'files="AGENTS.md"' in rendered and 'AGENTS 正文' in rendered
+    assert 'Unreadable candidates' in rendered and 'CLAUDE.md (cannot read' in rendered
 
 
 def test_instructions_render_is_live(tmp_path):

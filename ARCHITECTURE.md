@@ -496,6 +496,23 @@ live 段的语义（`prompt.render` 每次模型请求求值一次）正好覆�
   落地：**触发是确定的**（不依赖模型某轮想起这件事），内容则由 `discipline` 段的通用
   规则兜底（`Instructions:` 那条，每轮都生效）。
 
+**探测是三态，不是两态**（对齐 DSH `ScopeInstructionProbe` 与 opencode
+`SystemContext.unavailable`——后者的注释原话是"distinguishes confirmed absence from
+provider failure"）：
+
+| 态 | 判据 | 渲染 |
+|---|---|---|
+| **确认存在** | `stat` 成功且是普通文件，读到了 | 注入正文（含"太大未内联"：算存在） |
+| **确认不存在** | `FileNotFoundError` | `files="none"` + 创建指引 |
+| **读不到** | 权限拒绝、IO 错误、**同名目录** | `files="unreadable"` + "内容未知、不要当成没有约定、不要提议创建" |
+
+**为什么必须分开**：只有"确认不存在"才允许说"这个工作区没有项目指令文件"、才允许建议
+创建；"读不到"时提议创建可能覆盖一份已存在（只是读不到）的文件，而且模型是在假前提上
+行动。把"读不到"渲染成 `files="none"` 等于同时对用户和模型说同一句假话——这是不变式⑤
+（失败降级为结果）与"宁炸勿静默"在**探测**上的对应物：**不要把"不知道"降级成"没有"**。
+（真实案例：PI 的 CHANGELOG 记过一个叫 `AGENTS.md` 的**目录**导致 EISDIR，后来专门加了
+`statSync(...).isFile()` 判断——正是"存在但不是文件"这一态。）
+
 **边界（与 DSH 的三处裁剪，理由见 `agent.md` §9）**：只在本工作区内发现（工具被沙箱
 限制在 workspace 内，向上发现的文件模型读不到）；不做 user-global / `.local` 层级；
 不做 baseline/delta 版本账。
@@ -564,7 +581,7 @@ live 段的语义（`prompt.render` 每次模型请求求值一次）正好覆�
 | `web_app.py` | Web UI（FastAPI + SSE：会话/标题/approval/手动压缩/steer 插队；seat 化并发隔离；事件透传 turn/step + turn_start/user_message（带 message_id/rpc_id）/queue_update 帧供前端投影；队列项操作 `POST /queue/update`） |
 | `compaction.py` | 上下文压缩引擎（四步事务 + checkpoint + 会话 token 累计账） |
 | `show_memory.py` | 教学脚本：重放日志展示"记忆 = 投影" |
-| `tests/test_demo.py` | 109 个架构测试 |
+| `tests/test_demo.py` | 112 个架构测试 |
 
 ---
 

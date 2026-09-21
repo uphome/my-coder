@@ -66,6 +66,20 @@ _MISSING_HINT = (
     'user asked to keep — propose writing an AGENTS.md and let the user approve the write. '
     'Never put secrets, temporary state, or unverified guesses in it.'
 )
+# 第三态（读不到）的文案：与"缺失"分开，措辞上明确禁止两件事——
+# 当成"没有约定"、以及在没有确认的情况下提议创建（可能覆盖已存在的文件）
+_UNREADABLE_HINT = (
+    'A project instruction file could not be read, so its contents are unknown. This is '
+    'NOT the same as "this workspace has no instructions": do not assume there are no '
+    'rules here, and do not propose creating one — tell the user what could not be read '
+    'and why.'
+)
+
+
+def _unreadable_line(unreadable: tuple[UnreadableFile, ...]) -> str:
+    listed = '; '.join(f'{f.display} ({f.reason})' for f in unreadable)
+    return ('Unreadable candidates (exist but not loaded — treat as unknown, not absent): '
+            + listed)
 
 
 @dataclass(frozen=True)
@@ -82,10 +96,21 @@ class InstructionFile:
 
 
 @dataclass(frozen=True)
+class UnreadableFile:
+    """探测到但**读不到**的候选文件：存在性没能确认。
+
+    与"确认不存在"是两回事——见 `InstructionLoader._read` 的三态说明。
+    """
+    display: str
+    reason: str
+
+
+@dataclass(frozen=True)
 class WorkspaceInstructions:
-    """一次探测的结果：根目录命中的文件（含正文）+ 子目录清单（只路径）。"""
+    """一次探测的结果：根目录命中的文件（含正文）+ 子目录清单（只路径）+ 读不到的候选。"""
     files: tuple[InstructionFile, ...] = ()
     nested: tuple[str, ...] = ()
+    unreadable: tuple[UnreadableFile, ...] = ()
 
     @property
     def found(self) -> bool:
@@ -98,6 +123,9 @@ def scan_nested_instruction_files(workspace: Path) -> tuple[str, ...]:
     用 os.walk 而不是 rglob：可以**原地剪枝**，不下钻进隐藏目录/缓存/依赖——
     rglob('**/AGENTS.md') 会先遍历整棵 node_modules 才轮到过滤。隐藏目录策略
     与 glob 工具一致（`.` 开头或 `__pycache__`）。
+
+    已知简化：走不进去的子目录被 os.walk 静默跳过（只影响这一行清单提示，不影响
+    根目录约定的注入；根目录候选的"读不到"三态另有交代）。
     """
     if not workspace.is_dir():
         return ()
@@ -133,10 +161,14 @@ class InstructionLoader:
     def load(self) -> WorkspaceInstructions:
         """探测 + 读正文（按预算）→ 不可变的探测结果。"""
         files: list[InstructionFile] = []
+        unreadable: list[UnreadableFile] = []
         used = 0
         for name in INSTRUCTION_FILE_CANDIDATES:
-            text = self._read(self._workspace / name)
+            text, reason = self._read(self._workspace / name)
             if text is None:
+                if reason:
+                    # 读不到 ≠ 不存在：单独记下来，渲染时给"未确认"那一支
+                    unreadable.append(UnreadableFile(display=name, reason=reason))
                 continue
             budget = min(INSTRUCTION_MAX_FILE_CHARS, INSTRUCTION_MAX_TOTAL_CHARS - used)
             if budget <= 0:
@@ -151,40 +183,60 @@ class InstructionLoader:
                 path=self._workspace / name, display=name, content=content, truncated=truncated,
             ))
             used += len(content)
-        return WorkspaceInstructions(files=tuple(files), nested=self._nested)
+        return WorkspaceInstructions(
+            files=tuple(files), nested=self._nested, unreadable=tuple(unreadable))
 
     def render(self) -> str:
         """system 段文本（live 段 provider：每次模型请求求值一次）。"""
         return render_workspace_instructions(self.load())
 
-    def _read(self, path: Path) -> str | None:
-        """读一份候选文件；缺失/读不动 → None（探测不到不算错误）。"""
+    def _read(self, path: Path) -> tuple[str | None, str]:
+        """探测一份候选文件 → `(正文, 不可用原因)`。
+
+        **三态在这一行分开**（不要把"不知道"降级成"没有"——对齐 DSH 的
+        `ScopeInstructionProbe` 与 opencode 的 `SystemContext.unavailable`）：
+
+        - `(正文, '')`     —— **确认存在**且读到了（含"太大未内联"：那种情况正文
+          本身是一条说明，仍然算"存在"）
+        - `(None, '')`     —— **确认不存在**（目录里没有这个名字的文件）
+        - `(None, '原因')` —— **读不到**：存在性没能确认（权限 / IO / 同名目录）。
+          这一态绝不能被当成"这个工作区没有约定"，否则模型会在假前提上提议创建
+          一份可能已经存在（只是读不到）的指令文件。
+        """
         try:
             stat = path.stat()
-        except OSError:
-            return None
+        except FileNotFoundError:
+            return None, ''
+        except OSError as error:
+            return None, f'cannot stat: {error}'
         if not path.is_file():
-            return None
+            # 真实案例（PI 的 CHANGELOG）：目录里有个叫 AGENTS.md 的**目录**
+            return None, 'not a regular file (a directory with this name?)'
         if stat.st_size > INSTRUCTION_MAX_SOURCE_BYTES:
-            return _TOO_LARGE_NOTICE.format(size=stat.st_size)
+            return _TOO_LARGE_NOTICE.format(size=stat.st_size), ''
         key = (stat.st_mtime_ns, stat.st_size)
         cached = self._cache.get(path)
         if cached is not None and cached[0] == key:
-            return cached[1]
+            return cached[1], ''
         try:
             text = path.read_text(encoding='utf-8', errors='replace')
-        except OSError:
-            return None
+        except OSError as error:
+            return None, f'cannot read: {error}'
         self._cache[path] = (key, text)
-        return text
+        return text, ''
 
 
 def render_workspace_instructions(instructions: WorkspaceInstructions) -> str:
     """探测结果 → system 段文本（纯函数，便于直接断言）。
 
-    有文件：`<workspace_instructions files="…">` + 每份 `Instructions from: <路径>`
-    + 正文；没有：同一标签下给"缺失"状态 + 创建指引（模型据此提议创建，写入仍走
-    approval）。子目录清单两种情况都可能追加（根目录没有、子目录却有的仓库存在）。
+    探测结果 → system 段文本（纯函数，便于直接断言）。**三个分支，不是两个**：
+
+    - 有文件：`files="…"` + 每份 `Instructions from: <路径>` + 正文；
+    - **一个都没有、但有的读不到**：`files="unreadable"` + 明确"内容未知、不要当作
+      没有约定、不要提议创建"——存在性没确认时，连"建议创建"都是错的；
+    - 确认一个都没有：`files="none"` + 创建指引（模型据此提议创建，写入仍走 approval）。
+
+    子目录清单三种情况都可能追加（根目录没有、子目录却有的仓库存在）。
     """
     if instructions.files:
         head = (
@@ -195,6 +247,12 @@ def render_workspace_instructions(instructions: WorkspaceInstructions) -> str:
             f'Instructions from: {f.display}\n\n{f.content}' for f in instructions.files
         )
         parts = [head, body, '</workspace_instructions>']
+        if instructions.unreadable:
+            parts.append(_unreadable_line(instructions.unreadable))
+    elif instructions.unreadable:
+        listed = '\n'.join(f'- {f.display}: {f.reason}' for f in instructions.unreadable)
+        parts = [f'<workspace_instructions files="unreadable">\n{_UNREADABLE_HINT}\n{listed}\n'
+                 '</workspace_instructions>']
     else:
         parts = [f'<workspace_instructions files="none">\n{_MISSING_HINT}\n</workspace_instructions>']
     if instructions.nested:
