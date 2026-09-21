@@ -209,7 +209,7 @@ compaction.py（上下文压缩引擎）
 | `cli.py` | CLI 入口（单次任务 / 无任务参数进 REPL） |
 | `web_app.py` | Web UI（FastAPI + SSE：会话/标题/approval/手动压缩/steer 插队） |
 | `compaction.py` | 上下文压缩引擎（四步事务 + checkpoint + 会话 token 累计账） |
-| `tests/test_demo.py` | 112 个架构测试 |
+| `tests/test_demo.py` | 116 个架构测试 |
 
 > `web_search` 是唯一"读工作区之外"的工具：搜索由 **DeepSeek 官方在服务端**执行
 > （Anthropic 兼容端点 + 原生服务端工具 `web_search_20250305`），我们只发请求、

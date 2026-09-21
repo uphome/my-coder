@@ -485,8 +485,12 @@ live 段的语义（`prompt.render` 每次模型请求求值一次）正好覆�
 重算替代版本账）。
 
 **探测（确定性，不靠模型自觉）**：`InstructionLoader` 在 build 时扫一次子目录清单
-（`os.walk` 原地剪枝隐藏目录/缓存，只记相对路径），每次渲染时读根目录候选文件
-（`AGENTS.md`、`CLAUDE.md`，按候选顺序）并按 `(mtime_ns, size)` 缓存：
+（`os.walk` 原地剪枝隐藏目录/缓存，`dirnames` 排序后再走——不排的话提前 `break` 收
+前 N 条会因文件系统顺序不同而给出不同子集，段字节就不可复现），每次渲染时读根目录
+候选文件（`AGENTS.md`、`CLAUDE.md`，按候选顺序）并按 `(mtime_ns, size)` 缓存；
+候选路径先 `resolve()` 再判是否仍在工作区内——**指向工作区外的符号链接不注入**，
+按"读不到"报出来（工具层已经用 `resolve_in_workspace` 拦住同一条路，指令读取是宿主
+的另一条路径，不拦就等于开了一个把工作区外文件送进 system prompt 的口子）。
 
 - 有文件 → `<workspace_instructions files="AGENTS.md">` + `Instructions from: <路径>`
   + 正文（单文件 8k / 整段 20k 字符预算，超预算截断并提示"用 read_file 读剩下的"；
@@ -581,7 +585,7 @@ provider failure"）：
 | `web_app.py` | Web UI（FastAPI + SSE：会话/标题/approval/手动压缩/steer 插队；seat 化并发隔离；事件透传 turn/step + turn_start/user_message（带 message_id/rpc_id）/queue_update 帧供前端投影；队列项操作 `POST /queue/update`） |
 | `compaction.py` | 上下文压缩引擎（四步事务 + checkpoint + 会话 token 累计账） |
 | `show_memory.py` | 教学脚本：重放日志展示"记忆 = 投影" |
-| `tests/test_demo.py` | 112 个架构测试 |
+| `tests/test_demo.py` | 116 个架构测试 |
 
 ---
 

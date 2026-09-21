@@ -132,13 +132,14 @@ def scan_nested_instruction_files(workspace: Path) -> tuple[str, ...]:
     names = set(INSTRUCTION_FILE_CANDIDATES)
     found: list[str] = []
     for dirpath, dirnames, filenames in os.walk(workspace):
-        dirnames[:] = [d for d in dirnames if not (d.startswith('.') or d == '__pycache__')]
+        # 原地剪枝 + **排序**：os.walk 的目录顺序取决于文件系统，不排的话"提前
+        # break 收前 N 条"在不同机器上会给出不同的子集——段字节不再可复现
+        dirnames[:] = sorted(d for d in dirnames if not (d.startswith('.') or d == '__pycache__'))
         rel_dir = Path(dirpath).relative_to(workspace)
         if rel_dir.parts:                      # 根目录那份由 files 承载，不进清单
             found.extend((rel_dir / name).as_posix() for name in sorted(names & set(filenames)))
         if len(found) > INSTRUCTION_MAX_NESTED:
             break                              # 只多收一条：够判断"还有更多"
-    found.sort()
     return tuple(found[:INSTRUCTION_MAX_NESTED + 1])
 
 
@@ -146,11 +147,29 @@ class InstructionLoader:
     """带 stat 缓存的加载器：live 段每请求求值，所以文件没变就不重读。
 
     一个 agent 一个实例（`build_agent` 创建并闭包给 live 段）。缓存键是
-    `(mtime_ns, size)`——内容按路径+时间戳记忆，改过的文件自然失效。
+    `(mtime_ns, size)`：每次渲染只做 2 次 `stat` + 2 次路径归一化（越界检查），
+    文件真的变了才读一次盘——所以这点同步 I/O 不值得 offload（对比工具层：那里
+    一次要读整个文件，才有 `offload=True`）。
+
+    **边界例外**：候选文件由宿主直接读（不走 `sandbox.resolve_in_workspace`），
+    但会做同样的越界检查——`AGENTS.md` 是指向工作区**外**的符号链接时**不注入**，
+    并作为"读不到"报出来。否则一个恶意仓库就能用 `AGENTS.md -> ~/.ssh/id_rsa`
+    把工作区外的文件塞进 system prompt 发给模型，而这个仓库的 persona 明写着
+    "工作区外不可读"。（与 `sandbox.py` 同级：hardlink / TOCTOU 不设防，这是
+    "防误用保险"级别的边界，不是 OS 级沙箱。）
     """
 
     def __init__(self, workspace: Path) -> None:
+        # 预算自洽校验：候选文件按"单文件上限"都塞不下时，多出来的会被静默丢掉——
+        # 宁炸勿静默，配置改坏了要在构造时刻就暴露，而不是悄悄少注入一份约定
+        room = INSTRUCTION_MAX_FILE_CHARS * len(INSTRUCTION_FILE_CANDIDATES)
+        if INSTRUCTION_MAX_TOTAL_CHARS < room:
+            raise ValueError(
+                f'instruction budget cannot hold every candidate: total '
+                f'{INSTRUCTION_MAX_TOTAL_CHARS} < per-file {INSTRUCTION_MAX_FILE_CHARS} '
+                f'× {len(INSTRUCTION_FILE_CANDIDATES)} candidates')
         self._workspace = workspace
+        self._resolved_workspace = workspace.resolve()
         self._nested = scan_nested_instruction_files(workspace)
         self._cache: dict[Path, tuple[tuple[int, int], str]] = {}
 
@@ -212,6 +231,16 @@ class InstructionLoader:
         if not path.is_file():
             # 真实案例（PI 的 CHANGELOG）：目录里有个叫 AGENTS.md 的**目录**
             return None, 'not a regular file (a directory with this name?)'
+        try:
+            resolved = path.resolve()
+        except OSError as error:
+            return None, f'cannot resolve: {error}'
+        if not resolved.is_relative_to(self._resolved_workspace):
+            # 符号链接指向工作区外：**不注入**，但要说出来。理由是这个仓库的 persona
+            # 明写"工作区外不可读"，而工具层也已经用 resolve+relative_to 拦住了同一
+            # 条路（sandbox.resolve_in_workspace）——只有这里放行的话，一个
+            # `AGENTS.md -> ~/.ssh/id_rsa` 就能把工作区外的文件送进 system prompt。
+            return None, 'outside the workspace (symlink?) — not loaded'
         if stat.st_size > INSTRUCTION_MAX_SOURCE_BYTES:
             return _TOO_LARGE_NOTICE.format(size=stat.st_size), ''
         key = (stat.st_mtime_ns, stat.st_size)
@@ -227,9 +256,7 @@ class InstructionLoader:
 
 
 def render_workspace_instructions(instructions: WorkspaceInstructions) -> str:
-    """探测结果 → system 段文本（纯函数，便于直接断言）。
-
-    探测结果 → system 段文本（纯函数，便于直接断言）。**三个分支，不是两个**：
+    """探测结果 → system 段文本（纯函数，便于直接断言）。**三个分支，不是两个**：
 
     - 有文件：`files="…"` + 每份 `Instructions from: <路径>` + 正文；
     - **一个都没有、但有的读不到**：`files="unreadable"` + 明确"内容未知、不要当作

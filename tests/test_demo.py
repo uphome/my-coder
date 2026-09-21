@@ -1613,6 +1613,103 @@ def test_instructions_list_unreadable_alongside_a_readable_file(tmp_path, monkey
     assert 'Unreadable candidates' in rendered and 'CLAUDE.md (cannot read' in rendered
 
 
+def test_instructions_count_an_empty_file_as_present(tmp_path):
+    """空文件算"存在"：标题照常渲染——"这里有一份约定、内容为空"与"这里没有约定"不同。
+
+    对齐 DSH 的注释（heading 存活即代表"存在"）与 opencode 的同名测试
+    （keeps an empty AGENTS.md as available context）。
+    """
+    (tmp_path / 'AGENTS.md').write_text('', encoding='utf-8')
+    assert InstructionLoader(tmp_path).load().found is True
+    rendered = InstructionLoader(tmp_path).render()
+    assert 'files="AGENTS.md"' in rendered
+    assert 'Instructions from: AGENTS.md' in rendered
+    assert 'files="none"' not in rendered
+
+
+def test_instructions_cache_avoids_rereading_an_unchanged_file(tmp_path, monkeypatch):
+    """缓存：文件没变时每次渲染只 stat、不读盘；且两次渲染字节相同（前缀缓存不失效）。"""
+    (tmp_path / 'AGENTS.md').write_text('跑测试: pytest -q', encoding='utf-8')
+    reads: list[str] = []
+    original = Path.read_text
+
+    def counting(self, *args, **kwargs):
+        reads.append(self.name)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'read_text', counting)
+    loader = InstructionLoader(tmp_path)
+    first = loader.render()
+    second = loader.render()
+    assert reads == ['AGENTS.md']                 # 第二次没读盘（live 段每请求求值，读盘会变常态）
+    assert first == second                        # 字节稳定 → 缓存前缀不因"重新渲染"失效
+
+    (tmp_path / 'AGENTS.md').write_text('质量门: ruff + mypy + pytest', encoding='utf-8')
+    third = loader.render()
+    assert reads == ['AGENTS.md', 'AGENTS.md']    # 改了才重读
+    assert '质量门' in third and '跑测试' not in third
+
+
+def test_instructions_ignore_a_symlink_pointing_outside_the_workspace(tmp_path):
+    """符号链接指向工作区外：不注入，并作为"读不到"报出来。
+
+    工具层已经用 resolve+relative_to 拦住了这条（sandbox.resolve_in_workspace），
+    指令读取是宿主的另一条路径——不拦的话 `AGENTS.md -> ~/.ssh/id_rsa` 就能把工作区
+    外的文件塞进 system prompt 发给模型，与 persona 的"工作区外不可读"直接矛盾。
+    """
+    outside = tmp_path / 'outside-secret.md'
+    outside.write_text('SECRET_OUTSIDE_WORKSPACE', encoding='utf-8')
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    try:
+        (workspace / 'AGENTS.md').symlink_to(outside)
+    except (OSError, NotImplementedError):        # Windows 无权限/未开开发者模式
+        pytest.skip('symlink not permitted on this platform')
+
+    loaded = InstructionLoader(workspace).load()
+    assert loaded.files == ()
+    assert 'outside the workspace' in loaded.unreadable[0].reason
+
+    rendered = InstructionLoader(workspace).render()
+    assert 'SECRET_OUTSIDE_WORKSPACE' not in rendered
+    assert 'files="unreadable"' in rendered
+
+
+def test_instructions_reject_a_candidate_that_resolves_outside(tmp_path, monkeypatch):
+    """越界判定本身（不依赖平台能否建符号链接）：resolve 到工作区外 → 不注入。
+
+    与上一条互补：符号链接那条是平台相关的集成验证（本机 Windows 可能 skip），
+    这条直接换掉 resolve 的返回值，保证**安全分支在任何平台都被断言到**。
+    """
+    (tmp_path / 'ws').mkdir()
+    (tmp_path / 'ws' / 'AGENTS.md').write_text('INSIDE_BODY', encoding='utf-8')
+    outside = tmp_path / 'outside.md'                      # 工作区**外**（ws 的兄弟）
+    outside.write_text('OUTSIDE_BODY', encoding='utf-8')
+    original = Path.resolve
+
+    def fake(self, *args, **kwargs):
+        if self.name == 'AGENTS.md' and self.parent == tmp_path / 'ws':
+            return outside
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'resolve', fake)
+    loaded = InstructionLoader(tmp_path / 'ws').load()
+    assert loaded.files == ()
+    assert 'outside the workspace' in loaded.unreadable[0].reason
+    rendered = InstructionLoader(tmp_path / 'ws').render()
+    assert 'INSIDE_BODY' not in rendered and 'OUTSIDE_BODY' not in rendered
+    assert 'files="unreadable"' in rendered
+
+
+def test_instruction_budget_can_hold_every_candidate():
+    """预算自洽：单文件上限 × 候选数 必须塞进总预算，否则多出来的会被静默丢掉。"""
+    from agent_demo.instructions import (
+        INSTRUCTION_FILE_CANDIDATES,
+        INSTRUCTION_MAX_TOTAL_CHARS,
+    )
+    assert INSTRUCTION_MAX_TOTAL_CHARS >= INSTRUCTION_MAX_FILE_CHARS * len(INSTRUCTION_FILE_CANDIDATES)
+
+
 def test_instructions_render_is_live(tmp_path):
     """live 段语义：每次渲染重新求值——文件出现/被改，下一次渲染就看得到。"""
     loader = InstructionLoader(tmp_path)

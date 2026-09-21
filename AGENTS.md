@@ -9,7 +9,7 @@ Python 复刻 deepseek-harness 架构的教学 demo（agent 框架本身，不�
 # 质量门：ruff + mypy + pytest 三绿才可提交（pyproject.toml 已配好）
 conda run -n agent-demo python -m ruff check agent_demo tests
 conda run -n agent-demo python -m mypy agent_demo
-conda run -n agent-demo python -m pytest        # 112 个测试
+conda run -n agent-demo python -m pytest        # 116 个测试
 
 # CLI（可 pip install -e . 后直接 agent-demo；或模块方式跑）
 conda run --no-capture-output -n agent-demo python -m agent_demo.cli --workspace . --fake "read README.md and summarize"
@@ -122,6 +122,14 @@ conda run --no-capture-output -n agent-demo python -m agent_demo.web_app --works
     ——必须说"内容未知"：既不许当成"没有约定"，也不许提议创建，因为可能覆盖一份已
     存在只是读不到的文件）。**不要把"不知道"降级成"没有"**，这是不变式 5 与
     "宁炸勿静默"在探测上的对应物
+  - **符号链接不越界**：候选文件由宿主直接读（不走工具沙箱），但做**同样的**越界
+    检查——`AGENTS.md` 指向工作区外时**不注入**，并作为"读不到"报出来。否则一个
+    `AGENTS.md -> ~/.ssh/id_rsa` 就能把工作区外的文件塞进 system prompt 发给模型，
+    与 persona 的"工作区外不可读"直接矛盾。（与 `sandbox.py` 同级：hardlink /
+    TOCTOU 不设防，"防误用保险"不是 OS 级沙箱）
+  - **输出必须可复现**：子目录扫描 `dirnames.sort()` 后再走（`os.walk` 的顺序取决于
+    文件系统，排序前提前 `break` 收前 N 条会让不同机器得到不同子集 → 段字节不可复现）；
+    文件没变时两次渲染**字节相同**，缓存前缀才不因"每请求重新渲染"而失效
   - **写入一律走 approval**：指令文件归根到底是个文件，创建/修改走 `write_file`/`edit`
     的 approval 门 → 变更作为 `tool/call` + `tool/result` 进日志（不变式 1）。**不做**
     DSH 的 baseline/delta 版本账（它注入一次所以要记增量）——我们每请求重渲染，
