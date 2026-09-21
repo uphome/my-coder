@@ -16,6 +16,11 @@ from agent_demo.constants import (
 )
 from agent_demo.hooks import Hooks, PreStepContext, RequestErrorContext
 from agent_demo.inbox import Inbox
+from agent_demo.instructions import (
+    INSTRUCTION_MAX_FILE_CHARS,
+    INSTRUCTION_MAX_SOURCE_BYTES,
+    InstructionLoader,
+)
 from agent_demo.llm import (
     FakeLlm,
     LlmRequest,
@@ -1469,9 +1474,9 @@ async def test_system_prompt_carries_general_discipline(tmp_path):
 
     为什么守这条：system 是唯一"每轮都生效"的通道，文档（AGENTS.md）只有愿意读的
     agent 才看得到——反复被踩的坑如果不提成 system 里的通用规则，agent 每次都要
-    重新踩一遍。三条纪律（范围 / 成本 / 自证）与具体工具无关，所以放在通用段
-    （identity/persona/discipline）而不是某个 tool:* 段；这里断言它们真的渲染进了
-    system，且位置在工具段之前（顺序错位会让"通用性"名存实亡）。
+    重新踩一遍。四条纪律（范围 / 成本 / 自证 / 项目指令）与具体工具无关，所以放在
+    通用段（identity/persona/discipline）而不是某个 tool:* 段；这里断言它们真的
+    渲染进了 system，且位置在工具段之前（顺序错位会让"通用性"名存实亡）。
     """
     from argparse import Namespace
 
@@ -1487,11 +1492,113 @@ async def test_system_prompt_carries_general_discipline(tmp_path):
     assert headers, 'expected a request/header event'
     system = headers[0]['system']
 
-    for label in ('Scope:', 'Economy:', 'Evidence:'):
+    for label in ('Scope:', 'Economy:', 'Evidence:', 'Instructions:'):
         assert label in system, f'通用纪律缺 {label}（应提成 system 规则，而不是只写在文档里）'
     # 通用段排在工具段之前；且"验证"不再等同于"执行"（理解代码不必跑命令）
     assert system.index('Scope:') < system.index('Use bash')
     assert 'reading code needs no execution' in system
+
+
+# ---------------------------------------------------------------------------
+# 工作区项目指令文件（AGENTS.md / CLAUDE.md）：发现 + 预算 + live 注入（issue #6）
+# ---------------------------------------------------------------------------
+
+
+def test_instructions_section_reports_a_missing_file(tmp_path):
+    """全新工作区：段里给"没有指令文件"的状态 + 创建指引（issue #6 方案 C）。"""
+    rendered = InstructionLoader(tmp_path).render()
+    assert 'files="none"' in rendered
+    assert 'AGENTS.md' in rendered and 'propose writing' in rendered
+    # 指引必须同时说清两条边界：写入要用户批准；不许写密钥/临时状态/未验证猜测
+    assert 'approve' in rendered
+    assert 'secrets' in rendered and 'unverified guesses' in rendered
+
+
+def test_instructions_section_injects_an_existing_root_file(tmp_path):
+    """已有指令文件：正文进段里（不是只给路径），并注明来源路径。"""
+    (tmp_path / 'AGENTS.md').write_text('# 约定\n\n跑测试: pytest -q\n', encoding='utf-8')
+    loader = InstructionLoader(tmp_path)
+    loaded = loader.load()
+    assert [(f.display, f.truncated) for f in loaded.files] == [('AGENTS.md', False)]
+
+    rendered = loader.render()
+    assert rendered.startswith('<workspace_instructions files="AGENTS.md">')
+    assert 'Instructions from: AGENTS.md' in rendered
+    assert '跑测试: pytest -q' in rendered
+
+
+def test_instructions_injects_both_candidates_in_candidate_order(tmp_path):
+    """AGENTS.md 与 CLAUDE.md 同时存在时都注入，顺序固定（AGENTS.md 在前）。"""
+    (tmp_path / 'AGENTS.md').write_text('AGENTS 约定', encoding='utf-8')
+    (tmp_path / 'CLAUDE.md').write_text('CLAUDE 约定', encoding='utf-8')
+    rendered = InstructionLoader(tmp_path).render()
+    assert 'files="AGENTS.md, CLAUDE.md"' in rendered
+    assert rendered.index('AGENTS 约定') < rendered.index('CLAUDE 约定')
+
+
+def test_instructions_truncates_oversized_file_and_points_to_read_file(tmp_path):
+    """超预算：截断 + 明确告知"用 read_file 读剩下的"，不静默丢内容。"""
+    (tmp_path / 'AGENTS.md').write_text('x' * (INSTRUCTION_MAX_FILE_CHARS + 500), encoding='utf-8')
+    loaded = InstructionLoader(tmp_path).load()
+    assert loaded.files[0].truncated is True
+    content = loaded.files[0].content
+    assert len(content) < INSTRUCTION_MAX_FILE_CHARS + 200     # 预算 + 提示，不是原文长度
+    assert 'truncated at' in content and 'read_file' in content
+
+
+def test_instructions_skips_a_file_over_the_source_cap(tmp_path):
+    """超过读取上限（1 MiB）的文件不读进内存，只留一条指引。"""
+    (tmp_path / 'AGENTS.md').write_text('x' * (INSTRUCTION_MAX_SOURCE_BYTES + 1), encoding='utf-8')
+    loaded = InstructionLoader(tmp_path).load()
+    assert loaded.files[0].truncated is False                  # 没截断——根本没读
+    assert 'too large to inline' in loaded.files[0].content
+
+
+def test_instructions_render_is_live(tmp_path):
+    """live 段语义：每次渲染重新求值——文件出现/被改，下一次渲染就看得到。"""
+    loader = InstructionLoader(tmp_path)
+    assert 'files="none"' in loader.render()
+
+    (tmp_path / 'AGENTS.md').write_text('跑测试: pytest -q', encoding='utf-8')
+    assert '跑测试: pytest -q' in loader.render()               # 出现即生效
+
+    (tmp_path / 'AGENTS.md').write_text('质量门: ruff + mypy + pytest', encoding='utf-8')
+    assert '质量门: ruff + mypy + pytest' in loader.render()     # 改过即失效重读
+
+
+def test_nested_instruction_files_are_listed_but_not_inlined(tmp_path):
+    """子目录清单只列路径（正文按需 read_file），隐藏目录不算数。"""
+    (tmp_path / 'web').mkdir()
+    (tmp_path / 'web' / 'AGENTS.md').write_text('WEB_BODY_SHOULD_NOT_BE_INLINED', encoding='utf-8')
+    (tmp_path / '.git').mkdir()
+    (tmp_path / '.git' / 'AGENTS.md').write_text('GIT_BODY', encoding='utf-8')
+
+    loader = InstructionLoader(tmp_path)
+    assert loader.nested == ('web/AGENTS.md',)                  # .git 被剪枝
+    rendered = loader.render()
+    assert 'web/AGENTS.md' in rendered
+    assert 'WEB_BODY_SHOULD_NOT_BE_INLINED' not in rendered      # 只列路径
+    assert 'GIT_BODY' not in rendered
+
+
+async def test_build_agent_injects_workspace_instructions_before_tool_sections(tmp_path):
+    """factory 级全链路：通用规则（discipline）在前，注入的正文在后，工具段最后。"""
+    from argparse import Namespace
+
+    from agent_demo import factory
+
+    (tmp_path / 'AGENTS.md').write_text('# 项目约定\n\nRUN: pytest -q\n', encoding='utf-8')
+    args = Namespace(fake=True, model='fake-model', workspace=tmp_path, hide_reasoning=False,
+                     session='id', sessions=str(tmp_path), prompt='x', resume=False, verbose=False)
+    session = Session(id='id')
+    agent = factory.build_agent(session, args, {'reasoning_started': False, 'request_no': 0, 'tool_no': 0})
+    agent.followup('hi')
+    await agent.when_idle()
+
+    system = [e.data for e in session.events if e.type == 'request/header'][0]['system']
+    assert 'Instructions:' in system                             # 通用规则（discipline 段）
+    assert 'RUN: pytest -q' in system                            # 注入的正文（instructions 段）
+    assert system.index('Instructions:') < system.index('RUN: pytest -q') < system.index('Use bash')
 
 
 def test_todo_write_folds_and_injects_into_prompt(tmp_path):

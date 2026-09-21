@@ -12,6 +12,7 @@ from pathlib import Path
 
 from .agent import Agent
 from .constants import DEFAULT_COMPACT_TOKENS, DEMO_SCRIPT
+from .instructions import InstructionLoader
 from .llm import FakeLlm, OpenAiCompatibleLlm
 from .prompt import PromptRegistry
 from .session import Session
@@ -58,13 +59,25 @@ def build_agent(session: Session, args, ui_state: dict, hooks=None) -> Agent:
         'Evidence: make every command self-evidencing — it prints what you need or fails '
         'loudly, because silent success proves nothing; put multi-line scripts in a '
         'temporary file and print the result, since inline multi-line quoting breaks '
-        'across shells.'
+        'across shells. '
+        'Instructions: an AGENTS.md / CLAUDE.md in the workspace is a standing rule — read '
+        'it before you change anything and follow it; when stable, reusable project '
+        'knowledge shows up, propose writing it into that file instead of leaving it in '
+        'this conversation; never edit it silently, and never put secrets, temporary '
+        'state, or unverified guesses in it.'
     ))
+    # instructions：工作区项目指令文件的 live 段（内容来自磁盘，每次模型请求重新
+    # 求值）。放 system 而不是 messages 的理由：项目约定属于"每轮都该生效"的规则，
+    # 且在一个会话里字节稳定（除非 agent 自己改它）——不像 todo 状态每步都变、会把
+    # 缓存前缀打碎。order 20 = 紧跟通用纪律，先于工具段与技能目录。
+    _instructions = InstructionLoader(args.workspace)
+    prompt.section('instructions', 20, lambda ctx: _instructions.render())
     # skill:catalog：可用技能目录（静态）。build_agent 时扫一次：技能文件会话内
     # 不变 → 目录字节稳定，处于 system 的缓存稳定前缀。只放 name+description+
     # 路径，正文绝不进 system（模型按需 read_file）。
     # 注意：todo 不在这里——它是 messages 末尾的合成状态栏（loop 每轮从日志
-    # fold 现算，见 tools/todo.build_todo_status），system 保持全静态。
+    # fold 现算，见 tools/todo.build_todo_status）；system 里唯一的 live 段是
+    # 上面的 instructions（它只在文件真的变了的时候才变字节）。
     _skill_catalog = format_catalog(scan_skills(args.workspace / 'skills'), args.workspace)
     prompt.section('skill:catalog', 95, _skill_catalog)
     prompt.section('tool:todo', 110, 'Use todo_write to plan multi-step work before you start.')

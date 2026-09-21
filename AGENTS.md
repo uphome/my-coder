@@ -9,7 +9,7 @@ Python 复刻 deepseek-harness 架构的教学 demo（agent 框架本身，不�
 # 质量门：ruff + mypy + pytest 三绿才可提交（pyproject.toml 已配好）
 conda run -n agent-demo python -m ruff check agent_demo tests
 conda run -n agent-demo python -m mypy agent_demo
-conda run -n agent-demo python -m pytest        # 101 个测试
+conda run -n agent-demo python -m pytest        # 109 个测试
 
 # CLI（可 pip install -e . 后直接 agent-demo；或模块方式跑）
 conda run --no-capture-output -n agent-demo python -m agent_demo.cli --workspace . --fake "read README.md and summarize"
@@ -30,7 +30,7 @@ conda run --no-capture-output -n agent-demo python -m agent_demo.web_app --works
 > 规则提炼进本文件，agent.md 只留背景。
 
 包结构 `agent_demo/`（取代早期平铺）。依赖方向不变，仍是四层单向：
-入口（`cli.py` / `web_app.py` → `factory.py` 组装）→ 框架循环（`agent.py` 被动状态机 / `loop.py` turn-step）→ 状态（`session.py`/`inbox.py`/`prompt.py`/`registry.py`）→ 能力（`llm.py`/`hooks.py`）→ 值（`values.py` + `persistence.py`）。应用内容独立成包：工具在 `agent_demo/tools/`（file_io/search/shell/todo/web_search + build_tools 组装）、渲染在 `ui.py`、路径边界在 `sandbox.py`、常量在 `constants.py`。上层依赖下层，下层不感知上层。
+入口（`cli.py` / `web_app.py` → `factory.py` 组装）→ 框架循环（`agent.py` 被动状态机 / `loop.py` turn-step）→ 状态（`session.py`/`inbox.py`/`prompt.py`/`registry.py`）→ 能力（`llm.py`/`hooks.py`）→ 值（`values.py` + `persistence.py`）。应用内容独立成包：工具在 `agent_demo/tools/`（file_io/search/shell/todo/web_search + build_tools 组装）、渲染在 `ui.py`、路径边界在 `sandbox.py`、常量在 `constants.py`；技能与工作区指令文件的发现/渲染分别是 `skills.py` 与 `instructions.py`（技能正文在 `skills/`，按需 read_file；指令文件正文直接进 system，见约定）。上层依赖下层，下层不感知上层。
 
 **日志（`.sessions/<id>.jsonl`）是唯一事实源**：模型记忆（`derive_messages`）、inbox 队列、回合号、模型路由全部是日志的重放投影。恢复 = 重放（`adopt`）+ **自愈**（补上崩溃留下的悬空工具调用，见 `recovery.py`），没有独立的对话状态。本仓库已建 CodeGraph 索引（`.codegraph/`），理解/定位代码先 `codegraph_explore`。
 
@@ -49,10 +49,13 @@ conda run --no-capture-output -n agent-demo python -m agent_demo.web_app --works
   `discipline` 段，order 10），文档只留事故、证据与理由。分层：通用规则放
   `identity`/`persona`/`discipline`，工具专属规则放各自的 `tool:*` 段——两者不互串
   （通用段塞工具细节 = 每轮都付的噪声；工具坑写进通用段 = 换个工具就失效）。
-  当前三条通用纪律：**Scope**（"看看 / 评估 / 解释"= 只读调查，不为好奇制造真实副作用）、
+  当前四条通用纪律：**Scope**（"看看 / 评估 / 解释"= 只读调查，不为好奇制造真实副作用）、
   **Economy**（先查工作区、不重复调用、外部或昂贵操作先自问是否必要）、
   **Evidence**（命令必须自证输出——静默成功既不能证明成功也不能证明失败；多行脚本写
-  临时文件再跑，内联多行的引号/换行跨 shell 会被吃掉）
+  临时文件再跑，内联多行的引号/换行跨 shell 会被吃掉）、
+  **Instructions**（工作区里的 AGENTS.md / CLAUDE.md 是长期约定：存在就先读并遵循；
+  出现稳定可复用的项目知识时提议写进去，而不是留在这次对话里；不得静默改它，
+  也不得写密钥、临时状态、未验证的猜测）
 - **循环的 step 粒度 = 一次模型请求**（对齐 harness `core/agent-loop` 的
   `step()`：发完一次请求 + 执行完这次的工具调用就返回）：工具循环由 `run_turn`
   的外层循环驱动，**每轮开头都 claim inbox**。不要把它合并回 `_run_step` 的
@@ -96,6 +99,26 @@ conda run --no-capture-output -n agent-demo python -m agent_demo.web_app --works
   `recovery.repair_dangling_tool_calls`**；修复必须**写进日志**（补 is_error 合成
   结果 + 先落一条 `session/repaired` 痕迹），**禁止在请求构造时静默补占位消息**——
   那会把"这里断过"从唯一事实源里抹掉。函数幂等，可无条件调用
+- **工作区项目指令文件的发现与维护**（落地时遵循；DSH 对照与实测见 `agent.md` §9）：
+  - **候选与范围**：工作区根的 `AGENTS.md` / `CLAUDE.md`（对齐 DSH
+    `DEFAULT_INSTRUCTION_FILE_CANDIDATES`）；子目录里的同名文件**只列路径**
+    （正文由模型按需 read_file，和技能同一条路），隐藏目录不扫。**不向上发现**——
+    我们的工具被沙箱限制在 workspace 内，注入一份读不到的约定只会制造幻觉
+  - **注入通道 = system 的 live 段**（`instructions.py`，order 20：紧跟通用纪律、
+    先于工具段与技能目录）。正文**直接进 system**（与 DSH 一致）而不是只给路径：
+    项目约定属于"每轮都该生效"的规则。它是 system 里唯一的 live 段——内容按
+    `(mtime, size)` 缓存，文件没变就不重读、字节就不变，所以不打碎缓存前缀
+  - **预算**：单文件 8k / 整段 20k 字符；超预算**截断并明说**"用 read_file 读剩下的"，
+    超过 1 MiB 的文件不读进内存（只留指引）。缺文件时给"没有指令文件 + 建议创建"
+    的确定性提示（issue #6 的方案 C 落地）
+  - **规则与状态分离**：通用规则（存在就先读并遵循 / 稳定知识提议写进去 / 不静默改 /
+    不写密钥临时状态未验证猜测）属于**每轮都生效**的通用纪律 → 进 `discipline` 段；
+    live 段只承载**状态与内容**。内容载体是内置技能 `skills/project-instructions.md`
+    （骨架 + 该写/不该写 + 何时更新），由技能目录按需加载
+  - **写入一律走 approval**：指令文件归根到底是个文件，创建/修改走 `write_file`/`edit`
+    的 approval 门 → 变更作为 `tool/call` + `tool/result` 进日志（不变式 1）。**不做**
+    DSH 的 baseline/delta 版本账（它注入一次所以要记增量）——我们每请求重渲染，
+    重算替代版本账
 - 注释/文档全部用中文，教学式讲解设计动机——新注释保持此风格
 - 值对象必须 frozen dataclass + tuple，禁止把可变容器放进消息/事件（JSON 往返依赖）
 - 严格校验哲学：未注册 prompt 变量、重复工具名、非法执行模式、surface_op 缺失都在写入时刻抛错，宁炸勿静默

@@ -671,3 +671,79 @@ compaction 遮蔽的老调用不该被算进来）。函数幂等，所以 `web_
 （`appendSkippedToolCall`），崩溃恢复不属于它的职责面（进程没了，谁都不在）。
 所以这一节是我们自己的机制，不是抄的。
 
+## 9. 工作区项目指令文件：DSH agent-instructions 对照（2026-09 已定稿并落地，issue #6）
+
+### 9.1 问题：跨会话的项目记忆没有落脚点
+
+日志（`.sessions/*.jsonl`）保证"这次会话可重放"，但它的作用域是**一个会话**。
+agent 在首轮任务里发现的稳定知识——测试怎么跑、目录与依赖方向、用户明确要求长期
+遵守的偏好——会话结束就只剩在日志里，下个会话要重新发现一遍；而一个全新工作区里，
+它也不会主动判断"这里该有一份 `AGENTS.md`"。issue #6 把它定性为"跨会话项目记忆"，
+并给了三个候选（A 提示词规则 / B 内置技能 / C 启动时确定性探测），倾向 A+C、B 当
+内容载体——本节记录对照与落地。
+
+### 9.2 DSH 的做法（读源码实测，`packages/context/agent-instructions/src/`）
+
+- **`config.ts`**：候选 `AGENTS.md` / `CLAUDE.md`（`DEFAULT_INSTRUCTION_FILE_CANDIDATES`）
+  与 `.local` 变体；项目根标记 `.git`（`DEFAULT_PROJECT_ROOT_MARKERS`）；两档预算——
+  `maxBytes`（渲染预算）与 `maxSourceBytes`（单文件读取上限，默认 1 MiB）。
+- **`files.ts`**：**层级发现**（从 cwd 逐级向上到项目根，每层收集候选），逐文件
+  `readBounded`（先看 `size` 再决定读不读），**按目录做内容 digest 去重**
+  （`dedupInstructionFilesByDirectory`），最后在字节预算内渲染；返回
+  `RenderedInstructionSet{rendered, observed, included}`——被省略与被截断的文件都
+  留记录（`omitted` / `truncated`），不静默丢。
+- **`render.ts`**：每份渲染成 `Instructions from: <displayPath>\n\n<content>`，整体
+  包在 `<system-reminder>` 框里（帧由产出方自带，session surface 原样投影），
+  超预算时插一行"已省略/截断"的标记。
+- **`state.ts`**：渲染结果作为一条 **user 角色消息**注入，`source.kind =
+  'agent-instructions'`（`form: 'instructions'`），带 `baseline?: true` 与
+  `baselineIdentity`（发现/优先级/预算的身份，resume 时校验基线是否失效），以及
+  `changes: {action: 'set'|'replace'|'remove', scope, path, digest}[]`——会话中途文件
+  变化时追加**增量**消息；指令正文**刻意不进元数据缓存**（只缓存 digest 等事实）。
+
+一句话概括 DSH 的形状：**发现一次 → 作为 user 消息注入基线 → 之后靠 digest 记增量**。
+
+### 9.3 我们落地时的三处裁剪（都不是"少做点"，是架构约束推出来的）
+
+| DSH | 我们 | 理由 |
+|---|---|---|
+| 从 cwd 向上发现到项目根（`.git`） | **只在 workspace 内发现**（根目录注入正文 + 子目录只列路径） | 我们的工具被 `sandbox.resolve_in_workspace` 限制在 workspace 内：向上发现的文件模型**根本读不到**，注入一份读不到的约定只会制造幻觉；子目录正文全量注入则会常驻稳定前缀，且任意一份变动就打碎它后面的缓存 |
+| 注入一次基线 + `changes`/digest 增量账 | **system 的 live 段，每次模型请求重渲染** | 我们的 `prompt.section` 早就支持 `ctx -> str`（live 段），渲染在每次请求发生。**重算替代版本账**：不需要 baseline 身份、不需要 digest 比对、不需要 remove 检测——文件没了自然就不注入了。这也顺手解决了"agent 刚创建的 AGENTS.md 什么时候生效"：同一回合的下一次请求就生效 |
+| user 消息注入（`<system-reminder>` 框） | **system 段**（`<workspace_instructions>` 标签） | 项目约定属于"每轮都该生效"的**规则**，按我们的分层约定（见 AGENTS.md）规则放 system；而且 system 全文每请求都落 `request/header`，可重建（不变式 2）与 DSH 的消息注入等价 |
+| （多用户 / 本地覆盖场景） | 不做 user-global 与 `.local` 层级 | demo 没有多用户与本地覆盖需求；多两个候选只是多两行噪音 |
+
+保留下来的一致点：**候选文件名与 DSH 同名同序**、**正文直接注入**（不是只给路径）、
+**超预算截断并明说**、**单文件读取上限**（1 MiB，同样先看 size 再读）、
+**被截断/被省略要留提示**（我们给 `read_file` 指引而不是沉默）。
+
+### 9.4 落地形态（issue #6 的 A + C，B 当内容载体）
+
+```
+discipline（静态，order 10，always-on）   ← A：通用规则（"Instructions:" 那一条）
+instructions（live system 段，order 20） ← C：确定性探测 + 正文/缺失提示
+skills/project-instructions.md           ← B：内容载体（骨架、该写/不该写、何时更新）
+```
+
+- `instructions.py`：`scan_nested_instruction_files`（build 时 `os.walk` 剪枝一次）+
+  `InstructionLoader`（`(mtime_ns, size)` 缓存 + 预算 + 渲染）+ 纯函数
+  `render_workspace_instructions`（便于直接断言）
+- 缺文件时段的正文是"没有指令文件 + 建议在掌握稳定知识后创建 + 写入需要批准 +
+  不许写密钥/临时状态/未验证猜测"——**触发确定**，不依赖模型某轮想起
+- 写入走 `write_file`/`edit` 的 approval 门（不变式 1：变更作为 `tool/call` +
+  `tool/result` 进日志），不存在"静默创建"
+
+### 9.5 验证
+
+- **行为 A（全新工作区）**：真模型 + 迷你项目（`calc.py` / `test_calc.py` / `README.md`，
+  没有 AGENTS.md），任务"这个项目怎么跑测试？先真的跑一遍验证"。结果：跑通测试后
+  主动问 **"要不要我把这条测试命令写进 AGENTS.md？"**，且 AGENTS.md **没有被创建**
+  （验收标准 1、2、6）
+- **行为 B（已有指令文件）**：AGENTS.md 里写死一条不可能猜到的命令
+  （`python -m pytest -q test_calc.py -k add`）。结果：system 里有该正文，模型执行的
+  正是这条命令（只按全局 `tool:bash` 提示套了 `conda run` 外壳），并在回答里说明
+  "按 AGENTS.md 的约定只跑了 `-k add`"（验收标准 3）
+- **单元测试 8 条**：缺失提示、根文件注入、两个候选的顺序、超预算截断指引、
+  超过读取上限不读进内存、live 渲染随文件变化、子目录只列路径（隐藏目录不扫）、
+  factory 级全链路（通用规则在前、注入正文居中、工具段在后）
+- 门禁：`ruff` / `mypy` 干净、`pytest 109 passed`（101 → +8）
+
