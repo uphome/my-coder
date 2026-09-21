@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from ..constants import READ_FILE_DEFAULT_LIMIT, READ_FILE_MAX_CHARS, READ_FILE_MAX_LIMIT
 from ..registry import ToolOutcome, ToolSpec
 from ..sandbox import occurrence_lines, resolve_in_workspace
 
@@ -24,13 +25,16 @@ def register(registry, workspace: Path) -> None:
         # 行号让模型能引用"第 N 行"（edit 工具的前置）；分页防止大文件一次读爆上下文。
         try:
             offset = int(args.get('offset', 1))
-            limit = int(args.get('limit', 200))
+            limit = int(args.get('limit', READ_FILE_DEFAULT_LIMIT))
         except (TypeError, ValueError):
             return ToolOutcome(content='offset and limit must be integers', is_error=True)
         if offset < 1:
             return ToolOutcome(content=f'offset must be >= 1, got {offset}', is_error=True)
         if limit < 1:
             return ToolOutcome(content=f'limit must be >= 1, got {limit}', is_error=True)
+        if limit > READ_FILE_MAX_LIMIT:
+            return ToolOutcome(
+                content=f'limit must be <= {READ_FILE_MAX_LIMIT}, got {limit}', is_error=True)
         # line_numbers 开关：LLM 自己决定要不要行号——读代码要坐标（引用"第 N 行"），
         # 读文档/日志时行号是纯 token 浪费，传 false 拿裸行。
         raw = args.get('line_numbers', True)
@@ -51,13 +55,36 @@ def register(registry, workspace: Path) -> None:
             return ToolOutcome(
                 content=f'file has {total} lines, offset {offset} out of range', is_error=True)
         end = min(offset + limit - 1, total)
-        selected = lines[offset - 1:end]
-        if line_numbers:
-            content = '\n'.join(f'{i:>4}: {line}' for i, line in enumerate(selected, start=offset))
-        else:
-            content = '\n'.join(selected)
-        if end < total:
-            # 截断提示是关键 UX：模型必须知道"后面还有"，否则会以为文件就这些
+
+        # 按行累加并在字符预算内截断：不从代码行中间切，保证输出可继续分页。
+        body_parts: list[str] = []
+        used = 0
+        shown_end = offset - 1
+        char_truncated = False
+        for line_no in range(offset, end + 1):
+            rendered = f'{line_no:>4}: {lines[line_no - 1]}' if line_numbers else lines[line_no - 1]
+            separator = '' if not body_parts else '\n'
+            if used + len(separator) + len(rendered) > READ_FILE_MAX_CHARS:
+                if not body_parts:
+                    # 第一行就超过预算：截断该行，至少让模型看到开头
+                    room = max(0, READ_FILE_MAX_CHARS - len(separator))
+                    body_parts.append(separator + rendered[:room] + '…')
+                    shown_end = line_no
+                char_truncated = True
+                break
+            body_parts.append(separator + rendered)
+            used += len(separator) + len(rendered)
+            shown_end = line_no
+
+        content = ''.join(body_parts)
+        if char_truncated:
+            # 字符预算不足：给当前窗口 + 明确的继续方向
+            content += (
+                f'\n(file has {total} lines; output truncated at {READ_FILE_MAX_CHARS} chars; '
+                f'showing lines {offset}-{shown_end}; increase offset to continue)'
+            )
+        elif end < total:
+            # 行窗口不足：模型必须知道"后面还有"，否则会以为文件就这些
             content += (
                 f'\n(file has {total} lines; showing lines {offset}-{end}; '
                 'increase offset to continue)'
@@ -119,7 +146,11 @@ def register(registry, workspace: Path) -> None:
 
     registry.register(ToolSpec(
         name='read_file',
-        description='Read a UTF-8 text file. Line numbers on by default (pass line_numbers=false for plain text); use offset/limit to page large files.',
+        description=(
+            'Read a UTF-8 text file. Line numbers on by default (pass line_numbers=false for plain text); '
+            f'use offset/limit to page large files (limit max {READ_FILE_MAX_LIMIT} lines). '
+            f'Output is capped at {READ_FILE_MAX_CHARS} chars; if truncated, increase offset to continue paging.'
+        ),
         parameters={
             'type': 'object',
             'properties': {

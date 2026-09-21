@@ -6,6 +6,11 @@ import json
 import pytest
 
 from agent_demo.agent import Agent
+from agent_demo.constants import (
+    READ_FILE_MAX_CHARS,
+    READ_FILE_MAX_LIMIT,
+    TOOL_RESULT_MAX_CHARS,
+)
 from agent_demo.hooks import Hooks, PreStepContext, RequestErrorContext
 from agent_demo.inbox import Inbox
 from agent_demo.llm import (
@@ -358,6 +363,10 @@ async def test_read_file_errors_are_results(tmp_path):
     zero = await registry.execute('read_file', {'file_path': str(path), 'limit': 0}, None)
     assert zero.is_error and 'limit must be >= 1' in zero.content
 
+    too_many = await registry.execute(
+        'read_file', {'file_path': str(path), 'limit': READ_FILE_MAX_LIMIT + 1}, None)
+    assert too_many.is_error and f'limit must be <= {READ_FILE_MAX_LIMIT}' in too_many.content
+
     weird = await registry.execute(
         'read_file', {'file_path': str(path), 'line_numbers': 'maybe'}, None)
     assert weird.is_error and 'line_numbers must be a boolean' in weird.content
@@ -366,6 +375,42 @@ async def test_read_file_errors_are_results(tmp_path):
     empty.write_text('', encoding='utf-8')
     result = await registry.execute('read_file', {'file_path': str(empty)}, None)
     assert result.is_error is False and result.content == '(empty file)'
+
+
+@pytest.mark.asyncio
+async def test_registry_caps_long_tool_result():
+    registry = ToolRegistry()
+
+    async def long_tool(args, agent, signal):
+        return ToolOutcome(content='x' * (TOOL_RESULT_MAX_CHARS + 1000), is_error=True)
+
+    registry.register(ToolSpec(
+        name='long_tool',
+        description='returns a very long result',
+        parameters={'type': 'object', 'properties': {}},
+        execute=long_tool,
+    ))
+    out = await registry.execute('long_tool', {}, None)
+    assert out.is_error is True
+    assert len(out.content) <= TOOL_RESULT_MAX_CHARS
+    assert 'output truncated at' in out.content
+
+
+@pytest.mark.asyncio
+async def test_read_file_caps_chars_with_paging_hint(tmp_path):
+    registry = build_tools(workspace=tmp_path)
+    path = tmp_path / 'big.txt'
+    line = 'x' * 200
+    path.write_text('\n'.join(line for _ in range(100)), encoding='utf-8')
+
+    out = await registry.execute(
+        'read_file', {'file_path': str(path), 'line_numbers': False}, None)
+    assert out.is_error is False
+    # 正文（不含提示行）必须落在字符预算内
+    body = out.content.split('\n(file has ', 1)[0]
+    assert len(body) <= READ_FILE_MAX_CHARS
+    assert 'output truncated at' in out.content
+    assert 'increase offset to continue' in out.content
 
 
 def test_delta_reasoning_unifies_common_fields():

@@ -10,6 +10,8 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
+from .constants import TOOL_RESULT_MAX_CHARS
+
 
 @dataclass(frozen=True)
 class ToolOutcome:
@@ -93,9 +95,10 @@ class ToolRegistry:
         spec = self.get(name)
         _validate_arguments(name, spec.parameters, arguments)
         try:
-            return await asyncio.wait_for(spec.execute(arguments, agent, signal), timeout=spec.timeout_s)
+            outcome = await asyncio.wait_for(spec.execute(arguments, agent, signal), timeout=spec.timeout_s)
         except TimeoutError:
             return ToolOutcome(content=f'tool {name!r} timed out after {spec.timeout_s}s', is_error=True)
+        return _truncate_outcome(outcome)
 
 
 def _validate_arguments(name: str, parameters: dict, arguments: dict) -> None:
@@ -112,3 +115,20 @@ def _validate_arguments(name: str, parameters: dict, arguments: dict) -> None:
     for key in arguments:
         if properties and key not in properties:
             raise ValueError(f'tool {name!r} got unexpected argument {key!r}')
+
+
+def _truncate_outcome(outcome: ToolOutcome) -> ToolOutcome:
+    """registry 层统一兜底：超长工具结果截断并附导航提示。
+
+    提示文本也算进总预算，保证最终 content 长度不超过 TOOL_RESULT_MAX_CHARS；
+    is_error 原样保留——截断只是内容预算，不改变成功/失败语义。
+    """
+    content = outcome.content or ''
+    if len(content) <= TOOL_RESULT_MAX_CHARS:
+        return outcome
+    notice = (
+        f'\n(output truncated at {TOOL_RESULT_MAX_CHARS} chars; '
+        'narrow the request or page the result)'
+    )
+    keep = max(0, TOOL_RESULT_MAX_CHARS - len(notice))
+    return ToolOutcome(content=content[:keep] + notice, is_error=outcome.is_error)
