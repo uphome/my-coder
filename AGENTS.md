@@ -9,7 +9,7 @@ Python 复刻 deepseek-harness 架构的教学 demo（agent 框架本身，不�
 # 质量门：ruff + mypy + pytest 三绿才可提交（pyproject.toml 已配好）
 conda run -n agent-demo python -m ruff check agent_demo tests
 conda run -n agent-demo python -m mypy agent_demo
-conda run -n agent-demo python -m pytest        # 85 个测试
+conda run -n agent-demo python -m pytest        # 94 个测试
 
 # CLI（可 pip install -e . 后直接 agent-demo；或模块方式跑）
 conda run --no-capture-output -n agent-demo python -m agent_demo.cli --workspace . --fake "read README.md and summarize"
@@ -60,9 +60,33 @@ conda run --no-capture-output -n agent-demo python -m agent_demo.web_app --works
   全依赖这一点（旧实现把整段工具循环当一个 step，实测插队消息在 next-step 里
   躺了 2 分 40 秒后被 cancel 清掉，模型从没见过它）。细节见
   `ARCHITECTURE.md` §3.6
+- **工具并发调度的规则**（落地时遵循；DSH 源码对照与实测证据见 `agent.md`）：
+  - **并发许可是声明出来的（fail-closed）**：`ToolSpec.execution_mode` 默认
+    `'sequential'`，只有"不写共享状态"的工具才显式声明 `'parallel'`。判据是工具的
+    **副作用**而不是它快不快：读文件/搜索并发安全；`todo_write` 改日志投影，
+    `bash`/`edit`/`write_file` 要人工把关——都是独占。漏声明的代价是不确定的交错
+    （并发读-改-写丢更新），多声明一次的代价只是慢一点：方向反过来代价不对称。
+    非法模式值在注册时刻抛错（宁炸勿静默）
+  - **"能不能并发"与"阻不阻塞事件循环"是两根正交的轴**：后者用 `offload=True`
+    单独表达（executor 体内全是同步 I/O、没有任何 await 才声明）。不卸载的后果是
+    `asyncio.wait_for` 的定时器根本没机会触发（超时保护形同虚设）+ 同进程的
+    SSE/审批被那次同步读盘卡住。**卸载只给纯 I/O**：换了线程，`session`/`agent`
+    的内存状态就没人在循环线程上守了
+  - **分组按"连续段"，不是"整批跟第一个"**：并行段里一旦冒出独占调用就停手，
+    把它和后面的留给外层**在同一步内**重新分类（`_run_group` 回传 `consumed`，
+    对齐 harness `runGroup`）。池上限 `MAX_PARALLEL_TOOL_CALLS` 防止模型一次吐
+    十几个调用全放出去
+  - **结果按模型顺序落盘**：能并发 ≠ 能乱序记账。谁先跑完不一定谁先 append——
+    结果先进槽位，队首连续就绪才提交（harness `commitReady` 的 contiguous slots），
+    日志顺序因此恒等于调用顺序：模型记忆确定、前缀缓存可复用、前端按 call_id
+    配对不必处理乱序
+  - **取消也要补记账**：取消时"已请求但没有结果"的调用必须补一条 is_error 合成
+    结果，否则模型记忆里会留下"带了 tool_calls 却没有结果"的 assistant 消息——
+    wire 格式非法，下一轮请求直接 400。`tool/skipped` 这类痕迹事件不算数：
+    它进不了 `derive_messages`
 - 注释/文档全部用中文，教学式讲解设计动机——新注释保持此风格
 - 值对象必须 frozen dataclass + tuple，禁止把可变容器放进消息/事件（JSON 往返依赖）
-- 严格校验哲学：未注册 prompt 变量、重复工具名、surface_op 缺失都在写入时刻抛错，宁炸勿静默
+- 严格校验哲学：未注册 prompt 变量、重复工具名、非法执行模式、surface_op 缺失都在写入时刻抛错，宁炸勿静默
 - 每个文件顶部有 `from __future__ import annotations`
 - **按需技能（skill）机制的设计决策**（落地时遵循；三家对照与取舍背景见
   `agent.md` §3，那里只留动机不作规范）：
@@ -106,6 +130,6 @@ conda run --no-capture-output -n agent-demo python -m agent_demo.web_app --works
 - `agent_demo/cli.py`：CLI 入口；`--fake` 用脚本化假模型离线跑通全流程（不需要 API key）；`--resume` 演示日志重放恢复
 - `agent_demo/web_app.py`：Web UI（FastAPI + SSE，会话管理/标题/approval）；`factory.py` 的 `build_agent`/`load_env` 被 CLI 与 Web 共用
 - `show_memory.py`：教学脚本，重放日志展示"记忆 = 日志投影"
-- 工具在 `agent_demo/tools/`：`build_tools(workspace)` 组装（read_file 行号分页 / list_files / grep / glob / edit / write_file / bash / todo_write / web_search），工具类型（`ToolSpec`：schema + executor + 模式 + 超时 + requires_approval）在 `registry.py`；`--workspace` 必填（路径边界，`sandbox.py` 实现）；bash/write_file/edit 执行前需人工确认；阶段一实施进度见 `NEXT_STEPS.md`
+- 工具在 `agent_demo/tools/`：`build_tools(workspace)` 组装（read_file 行号分页 / list_files / grep / glob / edit / write_file / bash / todo_write / web_search），工具类型（`ToolSpec`：schema + executor + 并发模式 + 卸载声明 + 超时 + requires_approval）在 `registry.py`；`--workspace` 必填（路径边界，`sandbox.py` 实现）；bash/write_file/edit 执行前需人工确认；阶段一实施进度见 `NEXT_STEPS.md`
 - `web_search` 是唯一"读工作区之外"的工具：**搜索能力由 DeepSeek 官方在服务端提供**（Anthropic 兼容 `.../anthropic/v1/messages` + 原生服务端工具 `web_search_20250305`），我们只做"发请求 + 解析结构化块"——绝不自己抓网页、绝不从模型正文里抠 URL；没有结果块要**响亮报错**而不是退化成"没找到"。它不读文件、无副作用，所以**不走 workspace 沙箱、也不需要 approval**（与 DSH 一致，见 `agent.md` §6）
 - `.env` 存 `DEEPSEEK_API_KEY`/`DEEPSEEK_BASE_URL`；`.sessions/`、`.codegraph/`、`.env` 均不入库

@@ -164,4 +164,8 @@ def register(registry) -> None:
             'required': ['todos'],
         },
         execute=todo_write,
+        # 不声明 execution_mode：它写共享状态（agent.session.append 改写日志投影），
+        # 并发语义上就不成立——两个调用会基于同一份旧清单各算一份新清单，后落的
+        # 那条吃掉前一条的意图。所以它靠默认值（fail-closed）归位 sequential。
+        # 也不声明 offload：它没有任何 I/O，卸载只会把状态突变挪出循环线程。
     ))

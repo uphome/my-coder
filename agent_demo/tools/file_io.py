@@ -131,6 +131,9 @@ def register(registry, workspace: Path) -> None:
             'required': ['file_path'],
         },
         execute=read_file,
+        # 只读：可与其他调用并发；体内是同步读盘（path.read_text），故卸载到线程
+        execution_mode='parallel',
+        offload=True,
     ))
     registry.register(ToolSpec(
         name='list_files',
@@ -140,6 +143,8 @@ def register(registry, workspace: Path) -> None:
             'properties': {'dir_path': {'type': 'string'}},
         },
         execute=list_files,
+        execution_mode='parallel',
+        offload=True,
     ))
     registry.register(ToolSpec(
         name='edit',

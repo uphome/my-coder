@@ -522,6 +522,10 @@ def register(
             'required': ['queries'],
         },
         execute=web_search,
+        # 并发安全：纯网络只读，多个 query 并发只是各自发请求。
+        # 不声明 offload——它内部是真的 await（httpx 流式读），本身就有挂起点，
+        # 事件循环不会被它卡住（这也是"卸载"与"并发"是两根轴的最好例子）。
+        execution_mode='parallel',
         # 一次搜索 = 一个完整模型轮次：工具超时必须比网络超时宽，否则内部超时
         # 还没到就被 wait_for 掐掉，模型只看到一句干巴巴的 timed out。
         timeout_s=WEB_SEARCH_TIMEOUT_S + 5.0,

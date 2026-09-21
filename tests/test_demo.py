@@ -2,10 +2,12 @@
 
 import asyncio
 import json
+import time
 
 import httpx
 import pytest
 
+from agent_demo import loop as loop_module
 from agent_demo.agent import Agent
 from agent_demo.hooks import Hooks, PreStepContext, RequestErrorContext
 from agent_demo.inbox import Inbox
@@ -24,6 +26,7 @@ from agent_demo.tools import build_tools
 from agent_demo.values import (
     TextBlock,
     ToolCallBlock,
+    ToolResultBlock,
     create_assistant_message,
     create_tool_result_message,
     create_user_message,
@@ -273,6 +276,247 @@ async def test_cancel_aborts_turn():
     assert session.events[-1].data['reason'] == 'aborted'
     assert agent.status == 'idle'
     assert not agent.inbox.has_pending
+
+
+# ---------------------------------------------------------------------------
+# 工具并发调度：fail-closed 默认 / 连续段屏障 / 有序提交 / 池上限 / 卸载 / 取消补记账
+# 对齐 harness core/agent-loop/src/tool-calls.ts（普通说明见 loop._run_group 的注释）
+# ---------------------------------------------------------------------------
+
+
+def _spec(name, execute, *, execution_mode='sequential', offload=False,
+          requires_approval=False, timeout_s=60.0) -> ToolSpec:
+    """测试用最小注册：properties 留空 → 参数校验只兜底 required（这里没有）。"""
+    return ToolSpec(
+        name=name, description=f'{name} tool.', parameters={'type': 'object'},
+        execute=execute, execution_mode=execution_mode, offload=offload,
+        requires_approval=requires_approval, timeout_s=timeout_s,
+    )
+
+
+def _tool_agent(script, tools, session=None, hooks=None):
+    """带自定义工具表的 agent（make_agent 固定用空 ToolRegistry，这里要注册工具）。"""
+    session = session if session is not None else Session(id='s')
+    return Agent(
+        session=session, llm=FakeLlm(script=script), prompt=PromptRegistry(), tools=tools,
+        options={'provider': 'fake', 'model': 'fake-model'}, hooks=hooks,
+    ), session
+
+
+def _result_call_ids(session) -> list[str]:
+    """tool/result 事件的落盘顺序（按 call_id）。"""
+    return [event.data.source.call_id for event in session.events if event.type == 'tool/result']
+
+
+def test_execution_mode_is_fail_closed_by_default():
+    """没声明执行模式 = 不许并发；拼错的模式值当场炸（宁炸勿静默）。"""
+    async def noop(args, agent, signal):
+        return ToolOutcome(content='ok')
+
+    registry = ToolRegistry()
+    registry.register(_spec('undeclared', noop))
+    assert registry.mode('undeclared') == 'sequential'
+
+    registry.register(_spec('declared', noop, execution_mode='parallel'))
+    assert registry.mode('declared') == 'parallel'
+
+    with pytest.raises(ValueError):
+        registry.register(_spec('typo', noop, execution_mode='paralell'))
+
+
+async def test_parallel_group_stops_at_a_sequential_barrier():
+    """[parallel, sequential] 不共池：独占工具必须等并发段排空，且仍在同一步里跑完。"""
+    timeline = []
+
+    async def slow(args, agent, signal):
+        timeline.append('slow:start')
+        await asyncio.sleep(0.05)
+        timeline.append('slow:end')
+        return ToolOutcome(content='slow')
+
+    async def exclusive(args, agent, signal):
+        timeline.append('exclusive:start')
+        await asyncio.sleep(0.01)
+        timeline.append('exclusive:end')
+        return ToolOutcome(content='exclusive')
+
+    tools = ToolRegistry()
+    tools.register(_spec('slow', slow, execution_mode='parallel'))
+    tools.register(_spec('exclusive', exclusive))
+    agent, session = _tool_agent([
+        {'tool_calls': [
+            {'id': 'c1', 'name': 'slow', 'arguments': '{}'},
+            {'id': 'c2', 'name': 'exclusive', 'arguments': '{}'},
+        ], 'finish_reason': 'tool_calls'},
+        {'text': 'done', 'finish_reason': 'stop'},
+    ], tools)
+    agent.followup('go')
+    await agent.when_idle()
+
+    assert timeline == ['slow:start', 'slow:end', 'exclusive:start', 'exclusive:end']
+    assert _result_call_ids(session) == ['c1', 'c2']
+    assert [m.role for m in session.derive_messages()] == ['user', 'assistant', 'user', 'user', 'assistant']
+
+
+async def test_parallel_pool_overlaps_and_commits_in_model_order():
+    """两个并发工具真的重叠（总耗时 ≈ max 而不是 sum），但结果按模型顺序落盘。"""
+    timeline = []
+
+    async def first(args, agent, signal):
+        timeline.append('first:start')
+        await asyncio.sleep(0.08)
+        timeline.append('first:end')
+        return ToolOutcome(content='first')
+
+    async def second(args, agent, signal):
+        timeline.append('second:start')
+        await asyncio.sleep(0.01)
+        timeline.append('second:end')
+        return ToolOutcome(content='second')
+
+    tools = ToolRegistry()
+    tools.register(_spec('first', first, execution_mode='parallel'))
+    tools.register(_spec('second', second, execution_mode='parallel'))
+    agent, session = _tool_agent([
+        {'tool_calls': [
+            {'id': 'c1', 'name': 'first', 'arguments': '{}'},
+            {'id': 'c2', 'name': 'second', 'arguments': '{}'},
+        ], 'finish_reason': 'tool_calls'},
+        {'text': 'done', 'finish_reason': 'stop'},
+    ], tools)
+
+    started = time.perf_counter()
+    agent.followup('go')
+    await agent.when_idle()
+    elapsed = time.perf_counter() - started
+
+    assert timeline == ['first:start', 'second:start', 'second:end', 'first:end']  # 真并发
+    assert elapsed < 0.15                                                        # 不是 0.08+0.01 串行
+    assert _result_call_ids(session) == ['c1', 'c2']                             # 后完成的先落盘？不——按调用顺序
+
+
+async def test_parallel_pool_is_bounded(monkeypatch):
+    """池上限：模型一次吐 4 个并发调用，实际同时在跑的不超过 MAX_PARALLEL_TOOL_CALLS。"""
+    monkeypatch.setattr(loop_module, 'MAX_PARALLEL_TOOL_CALLS', 2)
+    active = 0
+    peak = 0
+
+    async def slow(args, agent, signal):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        await asyncio.sleep(0.02)
+        active -= 1
+        return ToolOutcome(content='ok')
+
+    tools = ToolRegistry()
+    tools.register(_spec('slow', slow, execution_mode='parallel'))
+    agent, session = _tool_agent([
+        {'tool_calls': [
+            {'id': f'c{index}', 'name': 'slow', 'arguments': '{}'} for index in range(4)
+        ], 'finish_reason': 'tool_calls'},
+        {'text': 'done', 'finish_reason': 'stop'},
+    ], tools)
+    agent.followup('go')
+    await agent.when_idle()
+
+    assert peak == 2
+    assert _result_call_ids(session) == ['c0', 'c1', 'c2', 'c3']
+
+
+async def test_offload_keeps_the_loop_responsive_and_times_out():
+    """offload 的两重收益：同步阻塞不再卡住事件循环；wait_for 的超时真的能到点。"""
+    ticks = []
+
+    async def blocking(args, agent, signal):
+        time.sleep(0.3)          # 同步阻塞：不卸载的话整个事件循环停在这里
+        return ToolOutcome(content='too late')
+
+    registry = ToolRegistry()
+    registry.register(_spec('blocking', blocking, execution_mode='parallel',
+                            offload=True, timeout_s=0.05))
+
+    async def heartbeat():
+        while True:
+            ticks.append(1)
+            await asyncio.sleep(0.01)
+
+    beat = asyncio.create_task(heartbeat())
+    outcome = await registry.execute('blocking', {}, None)
+    beat.cancel()
+
+    assert outcome.is_error and 'timed out' in outcome.content
+    assert len(ticks) >= 3       # 循环没被卡住（未卸载时这里会是 0 次心跳）
+
+
+async def test_approval_tools_never_run_concurrently():
+    """sequential + requires_approval 严格逐个：审批提示不会并发弹出。"""
+    active = 0
+    peak = 0
+    prompts = []
+
+    async def guarded(args, agent, signal):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        await asyncio.sleep(0.02)
+        active -= 1
+        return ToolOutcome(content='done')
+
+    async def approve(name, arguments):
+        prompts.append(name)
+        return True
+
+    hooks = Hooks()
+    hooks.approval = approve
+    tools = ToolRegistry()
+    tools.register(_spec('guarded', guarded, requires_approval=True))
+    agent, session = _tool_agent([
+        {'tool_calls': [
+            {'id': 'c1', 'name': 'guarded', 'arguments': '{}'},
+            {'id': 'c2', 'name': 'guarded', 'arguments': '{}'},
+        ], 'finish_reason': 'tool_calls'},
+        {'text': 'done', 'finish_reason': 'stop'},
+    ], tools, hooks=hooks)
+    agent.followup('go')
+    await agent.when_idle()
+
+    assert peak == 1
+    assert prompts == ['guarded', 'guarded']
+    assert _result_call_ids(session) == ['c1', 'c2']
+
+
+async def test_cancel_mid_group_leaves_no_dangling_tool_call():
+    """取消时已起跑的调用要补合成结果：模型记忆里不能留下没有结果的 tool_call。"""
+    async def slow(args, agent, signal):
+        await asyncio.sleep(5)
+        return ToolOutcome(content='never')
+
+    tools = ToolRegistry()
+    tools.register(_spec('slow', slow, execution_mode='parallel'))
+    agent, session = _tool_agent([
+        {'tool_calls': [
+            {'id': 'c1', 'name': 'slow', 'arguments': '{}'},
+            {'id': 'c2', 'name': 'slow', 'arguments': '{}'},
+        ], 'finish_reason': 'tool_calls'},
+    ], tools)
+    agent.followup('go')
+    await asyncio.sleep(0.05)
+    agent.cancel()
+    await agent.when_idle()
+
+    assert session.events[-1].data['reason'] == 'aborted'
+    calls, results = set(), set()
+    for message in session.derive_messages():
+        for block in message.content:
+            if isinstance(block, ToolCallBlock):
+                calls.add(block.id)
+            elif isinstance(block, ToolResultBlock):
+                results.add(block.tool_call_id)
+                assert block.is_error
+    assert calls == {'c1', 'c2'}
+    assert results == calls                                   # 不留悬空
+    assert [e.type for e in session.events].count('tool/result') == 2   # 也没有重复补记
 
 
 def test_wire_payload_uses_openai_function_wrapper():

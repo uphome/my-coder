@@ -522,3 +522,84 @@ snippet 永远空；② 摘要无法做"句句有据"的引用；③ 摘要正�
 模型让它写摘要）/ `output_tokens` 0.5k~1.2k，摘要再以 ~2.4k 字符进会话上下文。
 所以超时给 60s（工具 65s），`max_uses`/`max_results`/`max_queries` 都压在 4~5。
 
+## 7. 工具并发调度：DSH 的 tool-calls 调度器（2026-09 已定稿并落地，issue #9）
+
+### 7.1 问题：issue #9 的两条指控
+
+1. 被声明为 `parallel` 的 executor（read_file / list_files / grep / glob /
+   todo_write）体内**没有 await**，`asyncio.gather` 拿不到真实并发；连带后果是
+   `asyncio.wait_for` 的超时对这些工具**永不触发**；
+2. 分组"只看批次第一个工具"：`[read_file, bash]` 会把 `bash`（声明 sequential +
+   requires_approval）一起塞进同一个并发池。
+
+### 7.2 DSH 的做法（读源码实测，`packages/core/agent-loop/src/tool-calls.ts`）
+
+- `executeToolCalls`（:60-102）：`group = mode === 'parallel' ? planned.slice(next) : [first]`
+  ——**外层确实也是"只看队首"**；真正的重分类靠返回值 `next += outcome.consumed`：
+  注册表变化、遇到独占调用，外层都从"实际消费到哪"重新开始。
+- `runGroup`（:122-247）是这个调度器的内脏：
+  - **自限池** `fillPool()`（:199-214）：`nextToStart > 0 && mode === 'parallel' &&
+    ctx.tools.executionMode(nextCall.exec).kind !== 'parallel'` → `break`——
+    撞上独占调用就停在它前面，池排空后返回 `{consumed: started}`（:246）；
+  - **起跑才落痕迹** `startCall`（:165-168）：`appendToolCall` 返回 seq，结果事件
+    用 `sourceEventSeqs: [callSeq]` 回指（:289）；
+  - **按模型顺序提交** `commitReady()`（:147-161）：*"`committed` advances only
+    across contiguous model-order slots"*——并发跑完的先后不影响落盘顺序；
+  - **池上限** `maxParallelToolCalls`（:132）；
+  - **取消补记**：abort 时先 drain 已派发的调用，再给剩下的补
+    `appendSkippedToolCall()`（:250-260，一条 `tool/call` + 一条 is_error 的
+    `tool/result`，`TOOL_ABORTED_BEFORE_DISPATCH`）。
+- `packages/core/tools/src/index.ts:1267` 的 `executionMode()`：**fail-closed**，
+  *"Only an exact `true` is parallel; unknown, hidden, undeclared, invalid, or
+  throwing classifiers are exclusive"*，且 `isConcurrencySafe` 是**看参数的谓词**。
+
+### 7.3 我们当时抄了哪一半
+
+`loop.py` 的分组外壳与 DSH 逐行同形（`group, pending = pending, []`），但**丢了
+`consumed` 回传、`commitReady` 有序提交、`appendSkippedToolCall` 取消补记**；
+`ToolSpec.execution_mode` 的默认值还取了**反方向**（默认 `'parallel'`，而 DSH 是
+未声明即独占）。连带后果：`_execute_tool_calls` 里那个 `if aborted:` 分支是死代码
+（`_run_group` 永远返回 `False`），给剩余调用补 `tool/skipped` 的逻辑从没跑过。
+
+### 7.4 本仓库落地（与 DSH 的对应与差异）
+
+| DSH | 我们 |
+|---|---|
+| `executionMode()` fail-closed + `isConcurrencySafe(args)` 谓词 | `execution_mode` 默认 `'sequential'`（fail-closed）+ 静态声明；非法值注册时抛错。**暂不做谓词**——没有任何工具需要按参数判定 |
+| `fillPool()` 的 break + `{consumed: started}` | `_run_group.fill()` 的屏障 + 回传 `consumed`，`_execute_tool_calls` 用它推进并重新分类 |
+| `maxParallelToolCalls` 配置 | `loop.MAX_PARALLEL_TOOL_CALLS = 4` 模块常量 |
+| `commitReady()` 连续槽位提交 | `slots` + `commit_ready()`，语义相同 |
+| `appendSkippedToolCall()`（先 drain 再补记，统一文案 `aborted before dispatch`） | `_run_group` 的 `except CancelledError` + `_record_aborted_calls`（差集**直接读日志**求，不跨层传累加器）；**不 drain**，文案按是否已派发分成 `before dispatch` / `while running`（我们给不了"已派发调用"的真结果，就不撒谎说"还没派发"） |
+| （Node 侧天然 async，无此轴） | **`offload=True`**：体内全是同步 I/O 的 executor 丢工作线程跑。只给纯 I/O——换线程后 `session`/`agent` 的内存状态就没人在循环线程上守了 |
+
+**`todo_write` 的归位**：它不是"慢"，是"写共享状态"（两个调用会基于同一份旧清单
+各算一份新清单，后落的吃掉前一条），所以正确的档位是 `sequential`，且**不能**
+`offload`（状态突变必须留在循环线程）。它此前声明成 `parallel` 纯粹是吃了默认值——
+这正是把默认值翻过来的理由：并发许可要自己挣，不是白拿。
+
+### 7.5 实测证据
+
+- **危险批次真实存在**：扫全部会话日志，带工具调用的 assistant 消息里，
+  多调用批次 69 个中有 **7 个**是 `[parallel…, sequential…]` 形状
+  （`[read_file, bash]`×5、`[todo_write, bash]`、`[todo_write, edit]`），
+  旧实现会把它们整批并发调度。
+- **取消悬空可复现**：把 `loop.py` 退回旧实现跑新测试，
+  `test_cancel_mid_group_leaves_no_dangling_tool_call` 报
+  `assert set() == {'c1', 'c2'}`——模型请求了 2 个工具、记忆里 0 条结果。
+- **但生产日志的 5 次 abort 一次都没撞上**：逐回合看现场，取消全部落在
+  "await 模型流"的长杆上（工具执行窗口是毫秒级）。结论：这是**低概率、高后果**
+  （wire 格式非法 → 下一轮请求 400）的结构性缺口，不能靠概率兜底。
+- **超时保护失效已由测试钉住**：`test_offload_keeps_the_loop_responsive_and_times_out`
+  用一个 `time.sleep(0.3)` 的 executor + `timeout_s=0.05`，断言按时返回 is_error
+  且期间心跳协程仍在跑（未卸载时心跳次数为 0）。
+
+### 7.6 对 issue 两条指控的裁决
+
+- **指控 1 成立，但修法不是"让这些工具真并发"**：本地 read/grep/glob 是毫秒级，
+  唯一真慢的 `web_search` 本来就是真异步（httpx，有挂起点）——真实收益是
+  **超时可中断**（保护机制从失效变有效）和**事件循环不被卡**（SSE/审批/别的会话），
+  性能只是搭车。所以方向是 `offload` 这根新轴，而不是把同步读盘伪装成并发。
+- **指控 2 描述成立，根因判断要修正**：不是"忘了看后面的工具"，而是**漏了 DSH
+  的 `consumed` 回传**——外层"只看队首"本身没问题，前提是内层能把"我停在哪"
+  交回去。
+

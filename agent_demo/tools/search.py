@@ -118,6 +118,9 @@ def register(registry, workspace: Path) -> None:
             'required': ['pattern'],
         },
         execute=grep,
+        # 只读：并发安全；遍历+读文件是同步阻塞调用，故卸载到线程
+        execution_mode='parallel',
+        offload=True,
     ))
     registry.register(ToolSpec(
         name='glob',
@@ -131,4 +134,6 @@ def register(registry, workspace: Path) -> None:
             'required': ['pattern'],
         },
         execute=glob_tool,
+        execution_mode='parallel',
+        offload=True,
     ))
