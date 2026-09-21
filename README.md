@@ -69,6 +69,11 @@ conda run -n agent-demo python -m agent_demo.web_app --workspace .           # �
 - **运行中可插队（steer）**：agent 干活时输入框仍可打字，回车 = 插队当前
   回合（下一步即时处理，事件沿原 SSE 流推回）；idle 时回车 = 开新回合。
   两会话并行跑互不干扰（每会话独立 agent/事件流/审批，seat 化隔离）
+- **待处理消息分区显示（对齐 DSH）**：已发出但还没轮到的消息，按它"为什么在
+  等"分区——普通排队（next-turn）进输入框上方的**队列区**（可折叠；行内编辑 /
+  撤回 / 提升为插队；Ctrl+Enter 整队插队）；插队（next-step）画在**消息流尾部**
+  的待处理气泡（它马上就要进对话，用户必须立刻看见）。两者都恒定贴尾、不猜
+  位置；claim 之后靠提交身份（rpc_id）原子交接成正式消息——不重复也不留空档
 - 输入行旁一枚**上下文占用圆环**（dsh ContextMeter 同款）：常态只有 20px+
   SVG 环不占布局，点击展开悬浮面板——当前占用 %、**全会话累计消耗 token**、
   **全会话缓存命中率**（真实 usage 才显示）；面板底部有**压缩旧对话**按钮
@@ -129,15 +134,19 @@ compaction.py（上下文压缩引擎）
   → send → inbox.append → 先落 agent/inbox/spliced 日志，再改内存（入队即记账）
   → wake → turn/start → claim（认领也落一条 spliced 删除事件）
   → pre_step 钩子（可改写消息或拒绝）→ user/message 落日志
-  → step 内层 while：
+  → step（**一次模型请求**）：
       request/header 落日志（含 system 全文，resume 时恢复路由）
       → 流式：有内容的 chunk 落 assistant/chunk；有思维链时另落 assistant/reasoning/chunk
       → 结束时落完整 assistant/reasoning（痕迹数据，不进模型记忆）
       → assistant/message 落日志（usage、finish_reason）
       → 有工具调用：按 parallel/sequential 分组执行，每结果落 tool/result 表面日志
-      → 回到 while 顶部，derive_messages 自动带上工具结果
+      → step/end；**下一轮外层循环重新 claim**，插队消息在这里被吸收，
+        再由下一次请求把工具结果和插队文本一起带给模型
   → turn/end{reason: completed|max-tokens|blocked|aborted|error} → 回 idle
 ```
+
+> step 的粒度是"一次请求"而不是"整段工具循环"——这样插队消息能在**一次模型
+> 往返内**生效（见 `ARCHITECTURE.md` §3.6 的实测教训）。
 
 所有事件追加写入 `.sessions/<id>.jsonl`；恢复 = 重放，零额外代码。
 
@@ -188,21 +197,26 @@ compaction.py（上下文压缩引擎）
 | `loop.py` | turn/step 两级循环 + 流组装 + 工具分组执行 + 思维链痕迹落盘 |
 | `agent.py` | 被动状态机：wake / kick / when_idle / cancel |
 | `persistence.py` | JSONL 追加写 + 重放读 |
-| `tools/` | 应用工具（file_io.py 读写/编辑、search.py grep/glob、shell.py bash、todo.py）+ `build_tools(workspace)` 组装 |
+| `tools/` | 应用工具（file_io.py 读/写/编辑、search.py grep/glob、shell.py bash、todo.py、**web_search.py 联网搜索**）+ `build_tools(workspace)` 组装 |
 | `sandbox.py` | workspace 路径边界（归一化 + 前缀匹配的轻量沙箱） |
 | `ui.py` | 终端渲染（_render_event / _paint，UI 是日志投影） |
 | `factory.py` | build_agent / load_env（CLI 与 Web 共用组装） |
 | `cli.py` | CLI 入口（单次任务 / 无任务参数进 REPL） |
 | `web_app.py` | Web UI（FastAPI + SSE：会话/标题/approval/手动压缩/steer 插队） |
 | `compaction.py` | 上下文压缩引擎（四步事务 + checkpoint + 会话 token 累计账） |
-| `tests/test_demo.py` | 65 个架构测试 |
+| `tests/test_demo.py` | 85 个架构测试 |
+
+> `web_search` 是唯一"读工作区之外"的工具：搜索由 **DeepSeek 官方在服务端**执行
+> （Anthropic 兼容端点 + 原生服务端工具 `web_search_20250305`），我们只发请求、
+> 解析结构化结果块——不自己抓网页、不从模型正文里抠 URL。它不读文件、无副作用，
+> 所以不走 workspace 沙箱、也不需要 approval；代价是一次搜索 = 一个完整模型轮次。
 
 ## 与 harness 的保真度对照
 
 | 学到并实现 | 简化/未实现（harness 的生产级增量） |
 |---|---|
 | surface 事件标记 + 纯函数折叠投影；**replace 区间遮蔽（位置语义，compaction 用）** | 遮蔽区间溯源校验 |
-| Inbox 双队列 + claim 语义 + 持久化重放；**steer 插队（同回合 next-step）** | 多宿主并发仲裁、steer 中断"当前正在跑的 step" |
+| Inbox 双队列 + claim 语义 + 持久化重放；**steer 插队（同回合 next-step）；step = 一次模型请求（插队一次往返内被吸收）** | 多宿主并发仲裁、turn-stopping 钩子、`concludesTurn` 提前收尾 |
 | sections + 严格 `{{var}}` 插值 | 作用域链 shadow（子 agent 换 persona）、complete 段 |
 | 工具分组执行（parallel/sequential）+ 坏 JSON 兜底；**approval/权限桥 + `[exit code: N]` 跨调用准则** | OS 级沙箱（landlock/bwrap/seatbelt）、事件瀑布审批 |
 | request/header 落日志 + resume 恢复路由；**checkpoint 策略（四步事务 + 结构化摘要）** | 持久化后端抽象、token 预算选段 |

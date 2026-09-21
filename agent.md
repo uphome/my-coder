@@ -221,28 +221,100 @@ agent-demo 现状：Python 四层单向架构、日志唯一事实源、已有 r
 实施顺序（待落地时走）：先在 NEXT_STEPS.md 记设计 → 落地 skills 扫描 + 注入 +
 gh-issue 技能 → Web/CLI 实测“处理 issue #N” → 质量门三绿提交。
 
-## 4. 待讨论：todo 的两个开放问题（2026-09 记录，未决）
+## 4. 待讨论：todo 与"运行时状态栏"（2026-09 记录，未决）
 
-> 背景：讨论「模型每步是否知道自己在做什么、进行到哪一步」时发现的两点，
-> 先记录成文，设计确定后再回填结论。
+> 背景：讨论「模型每步是否知道自己在做什么、进行到哪一步」时，演化成
+> 「todo 是否该成为通用 agent 状态栏的一个贡献者」。本节记录问题与对照。
 
-### 问题 1：todo_write 的完整结果到底该放哪？
+### 4.0 关键调研：DSH / opencode 的"运行时状态注入"机制（2026-09 实测源码）
+
+讨论中发现的直接参照——两家都有**把动态状态注入模型**的成熟机制，且形态
+惊人地相似（user 消息快照 + 变化才更新 + 注册贡献者）：
+
+**DSH：runtime context（`packages/core/agent-loop/src/runtime-context.ts`）**
+- 位置：**不在 system**，作为 **user 角色消息** append 进 messages 尾部
+  （`preStep`：`messages: [...claimed, context]`）
+- 形态：`Current runtime context. This snapshot supersedes earlier…` + 各贡献
+  者内容（policy / todo / time-context / approval 状态等——全是注册制贡献者）
+- 核心：`RuntimeContextProjection.project(current)`——**内容变化才 append 新
+  快照**（`retained.text === snapshot` 则跳过）；compaction 遮蔽旧快照时置
+  retained=null，下轮重新投影
+- 贡献者注册：system prompt 的 contexts 桶（`systemPrompt.context(...)`），
+  persona 可 `includeRuntimeContext: false` 整体关掉
+
+**opencode：SystemContext（`packages/core/src/system-context/`）**
+- 同思路但更"事件化"：每个 context 有 `baseline`（首见）+ `update`（变化时），
+  SystemContextRegistry 注册；builtins 就有 **environment + date**（即那五种
+  里的"系统状态"与"时间戳"的工程版）
+- 注意：**todo 不走 SystemContext**——todowrite 的 `toModelOutput` 直接返回
+  完整清单 JSON 作为 tool/result（模型从历史读最新），这是另一条路
+
+**共同结论**（对 agent-demo 的启示）：
+1. "运行时状态" = user 消息快照放 messages 尾部（不是 system）→ 前缀缓存稳定
+2. **变化才更新**（去重）而非每轮合成——避免"状态没变也重复附加"
+3. 注册制贡献者（每个插件/模块注册自己那块状态）——与 agent-demo 的
+   `prompt.section`/`ToolRegistry` 同哲学
+4. 快照作为 user/plugin 消息**落日志** → 完全可重建（agent-demo 若做需扩展
+   source 类型 + compaction 联动，中型改动）
+
+### 问题 1：todo_write 的完整结果到底该放哪？（已收敛到"状态栏"方向）
 
 现状（agent-demo）：`todo_write` 执行时把完整清单写进 `todo/write` **痕迹事件**
 （不进 derive_messages），返回给模型的 tool/result 只有**计数摘要**
 （"Updated todo list: 3 pending, 1 in progress…"）。完整清单靠
 `fold_todos()` 折叠 + system 里 `todo:state` live section 注入模型。
 
-对照三家（详见第 2 节）：
+对照三家（详见第 2 节与 4.0）：
 - opencode：todowrite 的 `toModelOutput` 返回**完整清单 JSON** → 作为 tool/result
   进消息历史，模型从历史读最新清单；无 system 注入、无独立 section
 - PI：无 todo 机制
-- DSH：动态 context 渲染成 user 角色快照消息进历史（durable snapshot）
+- DSH：todo 作为 **runtime-context 的贡献者**——动态上下文渲染成 user 角色
+  快照消息进历史（durable snapshot + 变化才更新 + compaction 联动）
 
-**未决点**：完整清单走「痕迹 + system live 注入」（现状）还是「tool/result 完整
-返回、随历史自走」（opencode 式）？牵涉：缓存（system 动态段 vs 全静态）、
-日志语义（痕迹 vs surface）、resume 可重建、历史体积、compaction 对旧 todo 的
-折叠。
+**讨论方向（2026-09 已多次往返）**：用户提出"todo 状态栏以 XML 框住、放每轮
+消息末尾（每轮替换、不破坏前缀缓存）"——这与 DSH runtime-context / opencode
+SystemContext 的形态一致，todo 只是通用状态栏的第一个贡献者。DSH 的
+"变化才 append + 落日志 + 注册贡献者"是完整工程参考；简化版可不落日志、
+每轮 fold 现算合成。
+
+### 问题 1 结论：方案 A（2026-09 已定稿，待实现）
+
+**关键讨论澄清**：状态栏**不进日志**——每轮模型请求的 messages 从日志
+`derive_messages()` 重建，瞬态合成消息不在日志里 → 下一轮重建后不存在。
+因此"模型看之前的"不成立（对比 DSH：快照是日志消息，模型能从历史 derive
+读到，去重才安全）。**结论：不物化路线必须每轮都叠**（状态栏是 todo 唯一
+可见通道），不能做"不变就不加"的跨轮去重。
+
+**方案 A 规格**：
+- 状态栏只存在「模型调用过 todo_write 且清单未全部 completed」时的每轮
+  组请求中；普通对话（无 todo）、清单全 completed（任务收尾）→ 不叠
+- 形态：role=user 合成消息，XML 包裹，叠在 messages 末尾
+  ```xml
+  <todo_status>
+  1. [completed] 加载技能
+  2. [in_progress] 验证根因
+  </todo_status>
+  ```
+- 改动清单：
+  - `agent_demo/tools/todo.py`：新增 `build_todo_status(session)`——fold 出
+    清单 → XML `<todo_status>` 块；无清单或 `all_completed` 返回 None
+  - `agent_demo/loop.py _run_step`：组 messages 时若 `build_todo_status` 非
+    None 则 append 一条 `create_user_message([TextBlock(text=status)])`
+  - `agent_demo/factory.py`：删 `todo:state` live section + `_todo_context`
+    （todo 离开 system；注释同步）
+  - `web/index.html`：不改——前端 dock 由 todo_update 帧驱动，状态栏只影响
+    模型上下文
+  - 测试：system 含 todo 的断言改 messages 含状态栏；补 XML 格式/全
+    completed 不叠/无 todo 不叠测试
+- 不变式对照：状态栏 = fold_todos(日志) 现算 → 同一日志同一状态栏 →
+  resume 可重建 ✓；完整清单已由 todo/write 痕迹记录（审计可重建）✓；
+  不进 derive_messages → 历史零污染 ✓
+- 缓存：状态栏在 messages 尾部 → 前缀（system+历史）稳定命中，只有尾部
+  新内容 ✓（对比 system 动态段一变断全前缀）
+- **未来扩展**（已共识方向、非本期）：状态栏容器可含多块
+  （`<agent_status>` 内 `<todo_status>` + `<goal>` + 未来贡献者）；
+  goal 语义与机制待单独讨论（DSH 参照：`<goal_round>` XML + objective/phase
+  生命周期 + 独立 driver，与 runtime-context 是两套机制）
 
 ### 问题 2：长任务中 LLM 是否知道自己进行到 todo 的哪一步？
 
@@ -277,3 +349,176 @@ turn/step 序号、step/start、todo 痕迹都是**模型不可见的痕迹事�
 要求给结论）；或提示词/技能正文加收敛纪律（"验证核心事实后即汇报，把后续
 验证留给用户决定"）。DSH/opencode/PI 是否有对应的收敛机制待查（可作下一轮
 讨论的 codegraph 调研目标）。
+
+## 5. 待处理消息怎么显示：分区渲染 + 提交回显——2026-09 已定稿并落地
+
+### 5.1 问题：插队消息没有"位置"
+
+`steer` 消息进 `next-step` 队列后，要等当前 step 结束、下一次 `claim()` 才落
+`user/message`（surface）。这段"半开窗口"里它在日志里**没有 seq 位置**（实测
+延迟 890~1698 个事件）。上一版前端为了"用户必须立刻看到发出去了"，把它当
+乐观气泡插进消息流，靠 `(turn, step)` 锚点猜顺序——结果位置反复出错
+（气泡被后续输出挤到中间/下方），见 `mountPendingUser`/`pendingAnchor` 两次
+修 bug 的记录（提交 `8b17c24`、`00533de`）。
+
+### 5.2 DSH 的做法（2026-09 读源码实测）
+
+**⚠️ 先纠正一个流传过的错误结论**："DSH 从不把待处理消息画进消息流"——**只对
+`queued` 成立**。真实的三分法（`placement` 决定渲染面）：
+
+| placement | 渲染在哪 | 证据 |
+|---|---|---|
+| `transcript`（idle 发送的回显） | 消息流尾部（普通气泡） | `ChatView.tsx` 的 `visibleSubmissions` |
+| `steering`（next-step 插队） | **消息流尾部** + `data-pending-steering` 标记 | `ChatView.tsx:284,802`（`pendingSteering = inbox.filter(placement==='steering')` → `PendingSteeringBubble`）、`MessageItem.tsx:174,200` |
+| `queued`（next-turn 排队） | QueueDock（composer 上方 `conversation.input.dock` slot，`order: 20`） | `QueueDock.tsx:66,70`（只取 `placement==='queued'`） |
+
+所以"位置 bug"的正解不是"不画"，而是**恒定贴尾**：插队消息马上要进对话，
+它就该是一条贴尾的 pending 气泡；claim 之后 durable 节点落到自己真正的 seq
+位置，交接时旧的那条消失。
+
+### 5.3 三个配套机制（DSH 源码对照）
+
+1. **`SessionQueuedItem{id, placement, rpcId?, message}`**——队列项是会话层
+   快照（`SessionSnapshot['queue']`）的一部分，不是渲染层算出来的。
+2. **`PendingSubmission`（本地提交回显）**——`session.beginSubmission({mode,
+   text, images})` 在序列化/发请求**之前**同步登记：铸 `requestId =
+   randomUUID()`，placement 当场定（`running` 为假 → `transcript`；为真且
+   `mode==='steer'` → `steering`；否则 `queued`）。`prompt(content, mode,
+   signal, requestId)` 把身份带上；Host 回显进 durable `user source.rpcId`，
+   队列 occurrence 也投影成 `SessionQueuedItem.rpcId`。
+   **退休**走单一出口 `finishSubmission`：`observed`（看到 durable 事件/队列项）
+   → **延后一个动画帧**退休（保证替代内容就绪前回显仍可渲染）；`failed`
+   （被拒/放弃/销毁）→ 立即退休；`onRetire` 恰好触发一次。
+   `observedRpcIds()`（durable 节点 source.rpcId + 队列项 rpcId）让回显在
+   **同一次渲染**里消失——交接原子，不重复也不留空档。回显只活在客户端内存，
+   刷新/重连只从 durable 事件重建。
+3. **`QueueAction`**（`packages/api/session-controller/src/types.ts:148`）：
+   `{kind:'edit', content} | {kind:'remove'} | {kind:'steer'}`，入口
+   `session.updateQueue(itemId, action)`。UI 三件：行内编辑、删除、
+   "提升为插队"。另有 `steerQueue()`（`input/hub.ts:198`，绑 Cmd/Ctrl+Enter
+   "插话发送全部排队消息"）把整队 `queued` 逐条 `{kind:'steer'}`；
+   `session/queue-item-not-found` 静默收敛（行可能已被 host 处理），
+   `session/steer-unavailable` 直接返回。
+
+### 5.4 本仓库落地方案（已实现）
+
+- **分区渲染**：`placement='queued'` → 输入框上方 `#queue-dock`；
+  `placement='steering'` → 消息流尾部 `#messages > .flow-tail` 的 pending
+  气泡（`.msg.user.pending-steering` + "插队 · 待处理"标记）。尾部容器在
+  每次挂载节点后 `renderFlowTail()` 重新 append，永远保持最后一个子节点。
+- **队列是状态层投影**：`Inbox.queued_items()` 折重放结果产出
+  `QueuedItem(placement, message)`（next-turn→`queued`、next-step→`steering`），
+  和 `Session.derive_messages()` 并列——都是"日志 → 不可变投影"。和 todo 一样
+  "不物化"：日志里没有独立队列状态，投影是纯函数。
+  - **分层教训**：投影一度写在 `web_app._queue_rows()` 里自己重放
+    `agent/inbox/spliced`——后果有两个：① 同一事件类型出现**两份折叠实现**
+    （`Inbox._apply` 一份、web 一份），语义一变就分叉；② 投影绑死在 Web
+    宿主上（CLI、测试都拿不到，测试要绕过 web 模块才测得到）。现在折叠只有
+    一份，web 层只把值对象摊平成 JSON。
+  - `QueuedItem.rpc_id` 取自 `message.source`（不另存副本）：同一条消息在
+    "队列项"与"durable 消息"两个形态下带的是**同一个提交身份**。
+- **提交身份 `rpc_id`**：前端 `beginSubmission()` 铸 uuid（`crypto.randomUUID`
+  缺失时退化计数器）→ `/chat`、`/steer` 带 `request_id` → `UserSource.rpc_id`
+  落进 durable 消息（JSONL 里 `{'$user': '<rpc_id>'}`，旧格式 `true` 兼容读）
+  → 队列项与 `user_message` 帧都带出来。前端 `visibleSubmissions()` 用
+  `observedRpcIds()` 过滤，`finishSubmission(id, 'observed')` 延后一帧真删，
+  `'failed'` 立即删。
+- **三条推送通道**（幂等，互为兜底）：
+  1. SSE `queue_update` 帧（`agent/inbox/spliced` → 全量快照）
+  2. `POST /steer` 响应带 `queue`
+  3. `/history` 与 `/sessions/*/switch`、`/sessions/new` 带 `queue`
+- **队列动作**：`POST /queue/update {item_id, action}` → `Agent.update_queue`，
+  返回状态码与 DSH 的错误码同名：`ok` / `queue-item-not-found`（并发收敛，
+  HTTP 仍 200）/ `steer-unavailable`（空闲时不能提升，没有"下一步"）/
+  `unknown-action`。状态层原语是 `Inbox.edit`（同 id 原地换文案，一次原子
+  splice）/ `Inbox.promote`（two-splice 搬家，摘除那步 `discard=False`——
+  搬家不是丢弃）/ `Inbox.remove`（`outcome='canceled'`）。
+  前端行内：✎ 编辑（就地输入框，Enter 保存 / Esc 取消 / 失焦保存）、
+  × 撤回、↥ 提升（仅运行中）；多条时头部有"全部插队"按钮，草稿为空 +
+  运行中 + 有排队项时 `Ctrl/Cmd+Enter` 也能整队插队。
+- **两处有意的差异**（本仓库多给的，记在这里免得当成漏做）：
+  1. DSH 的 `edit` 带 `content: ContentBlock[]`，我们只有文本框，收 `text`；
+  2. DSH 的 pending-steering 气泡只有复制类图标动作，我们额外给了 × 撤回。
+- **兜底对账**：回合收尾（正常结束/停止/断开）后 `refreshQueue()` 拉一次
+  `/history` 快照——取消时服务端清空 inbox 的 spliced 事件推给了已关闭的流，
+  没人读。
+- **渲染合并**：同一事件批次里可能连推多条 `queue_update`（普通发送是
+  「入队 queued → 第一步立刻 claim 空」），合并到微任务末尾只画最终态，
+  所以"发出即被认领"的消息不会闪一下。
+
+## 6. web_search：联网搜索走官方原生能力（2026-09 已定稿并落地）
+
+### 6.1 问题：第一版自己抓网页
+
+工具集里 `web_search` 要"读工作区之外"，第一版实现抓 DuckDuckGo 的 HTML
+页面、正则抠结果、还原 `uddg=` 跳转参数。问题不在于能不能跑，而在于**收集
+能力建立在猜页面结构上**：对方改一次模板就全废，而且只能拿到标题+链接。
+
+### 6.2 DSH 的做法（读源码实测）
+
+DSH 把"搜索"这一能力**完全交给提供方**，自己只做协议与解析：
+
+- `packages/web/web-search-deepseek/src/provider.ts`：搜索 = 向 DeepSeek 的
+  **Anthropic 兼容**端点 `https://api.deepseek.com/anthropic/v1` + `/messages`
+  发一次 Messages 请求，body 里挂**服务端工具**
+  `{type:'web_search_20250305', name:'web_search', max_uses:N}`。注释写明
+  **这不是 chat-completions 的 base**（`https://api.deepseek.com`），
+  **只共享 API key**。DeepSeek 没有专用搜索端点，所以一次搜索 = 一个完整
+  模型轮次（延迟 + token 都按模型算）。
+- 结果只从**结构化块**取：`content[]` 里的 `web_search_tool_result` →
+  `web_search_result{url,title,page_age}`；snippet 来自 text 块的
+  `citations[].cited_text`（按 url 拼）。**绝不从模型正文里抓 URL**。
+  没有结果块 = `WEB_PROVIDER_ERROR` **响亮失败**，不降级。
+- `packages/web/tool-web/src/search.ts`：模型可见的工具形状——
+  `queries: string[]`（`WEB_SEARCH_MAX_QUERIES = 4`）、结果格式
+  `formatSearchOutput`（外部内容提示 → `Sources:` 列表 → 截断提示 →
+  引用纪律）；`trust.ts` 的 `EXTERNAL_WEB_CONTENT_NOTICE` 提醒模型
+  搜索结果**是不可信数据**。
+- 另有 `web-search-exa` / `web-search-perplexity` 两个 provider 与 `web_fetch`：
+  provider 是可替换的接缝（我们这个 demo 不需要，一个够）。
+
+### 6.3 本仓库落地（与 DSH 的对应与差异）
+
+| DSH | 我们 |
+|---|---|
+| `web-search-deepseek` provider | `agent_demo/tools/web_search.py` 的 `deepseek_search_backend`（默认后端，可注入） |
+| `tool-web` 的 `web_search` 工具 | 同名工具，schema/输出格式照抄 |
+| `web/deepseek-search-llm-request` 痕迹 | **`web/search`** 痕迹事件（query/endpoint/model/max_uses，无 key） |
+| `WebError(code)` 抛给调用方 | `WebSearchError(code)` → 工具层降级为 `is_error` 结果（不变式⑤） |
+| provider 按次投影 Settings（凭证/端点/上限） | `SearchConfig` 值对象：工具层解析一次，**trace 与真实请求共用** |
+| `content` 槽留空（deepseek provider 刻意不填） | **填**（+ 标注 + 上限 + `include_summary` 开关，见 §6.4） |
+| 多 provider + `web_fetch` | 未做（单 provider；`web_fetch` 明确暂缓，见 §6.4） |
+
+**实测形状差异**（对着真响应验的，别照抄 DSH 注释里的字段假设）：
+`page_age` 实测多为 `null`；`text` 块实测**没有** `citations`；`web_search_result`
+还带一个 `encrypted_content`（我们不用）；`usage.server_tool_use.web_search_requests`
+是本次服务端搜索次数（可留作审计，未用）。
+
+**不做 approval 门**：判据是"不可逆/会执行/会改磁盘"，它不沾；而且搜索请求打的是
+**同一家厂商**的另一个端点——会话里读过的文件本来就随每次聊天请求发给它了，
+增量外泄面只是"这句 query 会到搜索索引/第三方去"。DSH 也不给 web 工具审批门。
+
+### 6.4 我们与 DSH 相反的一处选择：**返回那段摘要**
+
+DSH 的 deepseek provider 刻意丢掉 `text` 块（"provider prose is not trusted as an
+answer"）；**我们留着**，并加了三道约束：
+
+- 摘要前贴 `SUMMARY_NOTICE`：明说它是"搜索模型生成的转述、没有结构化引用"，要
+  当线索用、以 Sources 为准——因为它**句句无据**（见下）；
+- 每条按 `WEB_SEARCH_SUMMARY_MAX_CHARS = 3000` 截断（实测一条 ≈2.4k 字符，
+  4 条 query 最坏 ~10k）；多条 query 才加 `### <query>` 标题（DSH 总是加）；
+- `SearchConfig.include_summary=False` 可一键退回 DSH 的策略。
+
+**为什么敢跟 DSH 不一样**：DSH 有 `web_fetch` + 三家 provider，模型能读原文、也能
+换 Exa/Perplexity，所以 deepseek 那条路只当"找链接"用就够；我们**没有 fetch**，
+摘要是不读原文时唯一的内容线索。**将来补上 `web_fetch` 就该把这个开关关掉。**
+
+**实测关键结论：DeepSeek 不返回结构化 `citations`**（两次探针，连 system 里明确
+要求"每句都标来源 URL"也没有）。后果三条：① `citationSnippets()` 恒为空映射 →
+snippet 永远空；② 摘要无法做"句句有据"的引用；③ 摘要正文里的 markdown 链接是
+**那个模型自己写的**，可能漏、可能挂错——所以才有上面那条标注。
+
+**真实成本**（实测）：`input_tokens` **10.6k~22.4k**（服务端把搜索结果原文喂回那个
+模型让它写摘要）/ `output_tokens` 0.5k~1.2k，摘要再以 ~2.4k 字符进会话上下文。
+所以超时给 60s（工具 65s），`max_uses`/`max_results`/`max_queries` 都压在 4~5。
+

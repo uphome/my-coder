@@ -3,6 +3,7 @@
 import asyncio
 import json
 
+import httpx
 import pytest
 
 from agent_demo.agent import Agent
@@ -99,6 +100,36 @@ def test_inbox_rejects_duplicate_identity():
     inbox.append('next-turn', message)
     with pytest.raises(ValueError, match='already pending'):
         inbox.append('next-step', message)
+
+
+def test_inbox_remove_is_durable_and_replays():
+    """撤回（队列区 × 按钮）：撤回同样先落 spliced 事件——重放不会复活它。
+
+    未 claim 的消息没有 surface，撤回后日志里只剩 spliced（outcome=canceled）
+    这一条痕迹；它不进模型记忆（surface 才进），所以撤回是干净的。
+    """
+    session = Session(id='s')
+    inbox = Inbox(session)
+    keep = create_user_message([TextBlock(text='keep')])
+    drop = create_user_message([TextBlock(text='drop')])
+    inbox.append('next-turn', keep)
+    inbox.append('next-step', drop)
+
+    assert inbox.remove(drop.id) is True
+    assert [m.id for m in inbox.next_step] == []
+    assert [m.id for m in inbox.next_turn] == [keep.id]
+    last = session.events[-1]
+    assert last.type == 'agent/inbox/spliced'
+    assert last.data['removed_count'] == 1 and last.data['outcome'] == 'canceled'
+    # 认领过的（不存在于任何队列）撤不回来：返回 False，不改日志
+    assert inbox.remove(drop.id) is False
+    splices = [e for e in session.events if e.type == 'agent/inbox/spliced']
+    assert len(splices) == 3      # 2 次入队 + 1 次撤回；失败的撤回不落事件
+
+    # 重放：队列原地复活成撤回后的样子（撤回不是"内存里删掉"）
+    replayed = Inbox(session)
+    assert [m.id for m in replayed.next_turn] == [keep.id]
+    assert [m.id for m in replayed.next_step] == []
 
 
 def test_interpolation_strict():
@@ -780,11 +811,18 @@ def test_web_chat_streams_events(tmp_path):
     assert '"type": "chunk"' in resp.text
     assert '"type": "tool_call"' in resp.text
     assert '"type": "turn_end"' in resp.text
-    # 统一投影模型的协议：回合开始帧、真人发言帧（带 turn）、内容帧带 turn/step
+    # 统一投影模型的协议：回合开始帧、真人发言帧（带 turn+message_id）、
+    # 请求边界帧（issue #4 ③）、内容帧带 turn/step
     assert '"type": "turn_start"' in resp.text
     assert '"type": "user_message"' in resp.text
     assert '"type": "chunk", "turn": 1' in resp.text      # chunk 带 turn（前端按节点分块）
-    assert '"type": "user_message", "text": "hi", "turn": 1' in resp.text
+    assert '"type": "request_start", "turn": 1' in resp.text  # 请求边界（按请求分块）
+    user_frame = [f for f in resp.text.split('data: ') if '"user_message"' in f]
+    assert user_frame, 'user_message frame missing'
+    frame = json.loads(user_frame[0].split('\n\n')[0])
+    assert frame['text'] == 'hi'
+    assert frame['turn'] == 1
+    assert frame['message_id'], 'user_message frame must carry message_id (乐观气泡认领用)'
 
     # 对话后历史可查（记忆 = 日志投影，Web 视角同样成立）
     payload = client.get('/history').json()
@@ -792,6 +830,58 @@ def test_web_chat_streams_events(tmp_path):
     history = payload['history']
     assert history[0]['role'] == 'user'
     assert any(m['role'] == 'assistant' and m['text'] for m in history)
+
+
+def test_history_projects_reasoning_per_request(tmp_path):
+    """issue #4：/history 把思维链（痕迹）投影到对应 assistant 消息上。
+
+    UI 是日志的投影——思维链虽不回灌模型，但历史/刷新后深度思考块必须能
+    重建。配对规则：assistant/reasoning 紧跟在它的 assistant/message 之前，
+    按 seq 顺序 buffer 配对；同一步工具循环的多次请求各配一份（不合并）。
+    """
+    from fastapi.testclient import TestClient
+
+    from agent_demo import web_app
+
+    web_app.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
+    client = TestClient(web_app.app)
+    session = web_app._session
+
+    # 手工落一轮：两次请求（同 turn/step，模拟工具循环），各带思维链
+    session.append('turn/start', {'turn': 1})
+    session.append('user/message', create_user_message([TextBlock(text='调查一下')]),
+                   surface_op='append')
+    session.append('step/start', {'turn': 1, 'step': 1})
+    # 第一次请求：reasoning + assistant/message（带 tool_call）
+    session.append('assistant/reasoning', {'turn': 1, 'step': 1, 'reasoning': '先读文件'})
+    session.append('assistant/message', {
+        'turn': 1, 'step': 1,
+        'message': create_assistant_message(
+            [ToolCallBlock(id='c1', name='read_file', arguments='{}')],
+            provider='fake', model='m'),
+    }, surface_op='append')
+    session.append('tool/call', {'turn': 1, 'step': 1, 'call_id': 'c1',
+                                 'name': 'read_file', 'arguments': '{}'})
+    session.append('tool/result', create_tool_result_message('c1', '内容', False), surface_op='append')
+    # 第二次请求：另一份 reasoning + 纯文本回答
+    session.append('assistant/reasoning', {'turn': 1, 'step': 1, 'reasoning': '看完了，可以总结'})
+    session.append('assistant/message', {
+        'turn': 1, 'step': 1,
+        'message': create_assistant_message([TextBlock(text='总结如下')],
+                                            provider='fake', model='m'),
+    }, surface_op='append')
+    session.append('step/end', {'turn': 1, 'step': 1})
+    session.append('turn/end', {'turn': 1, 'reason': 'completed'})
+
+    history = client.get('/history').json()['history']
+    assistants = [m for m in history if m['role'] == 'assistant']
+    assert len(assistants) == 2
+    # 每条 assistant 各自带自己那次的思维链（同一步两次请求不合并）
+    assert assistants[0]['reasoning'] == '先读文件'
+    assert assistants[1]['reasoning'] == '看完了，可以总结'
+    # 无思维链的消息不出现该字段
+    user_msgs = [m for m in history if m['role'] == 'user']
+    assert all('reasoning' not in m for m in user_msgs)
 
 
 def test_web_session_management(tmp_path):
@@ -962,6 +1052,37 @@ async def test_identity_prompt_is_neutral(tmp_path):
                    'Claude', 'Anthropic', 'GPT', 'OpenAI'):
         assert banned not in system, f'identity must not mention {banned!r}'
 
+@pytest.mark.asyncio
+async def test_system_prompt_carries_general_discipline(tmp_path):
+    """通用行为纪律必须在 system 里，且**排在工具专属规则之前**。
+
+    为什么守这条：system 是唯一"每轮都生效"的通道，文档（AGENTS.md）只有愿意读的
+    agent 才看得到——反复被踩的坑如果不提成 system 里的通用规则，agent 每次都要
+    重新踩一遍。三条纪律（范围 / 成本 / 自证）与具体工具无关，所以放在通用段
+    （identity/persona/discipline）而不是某个 tool:* 段；这里断言它们真的渲染进了
+    system，且位置在工具段之前（顺序错位会让"通用性"名存实亡）。
+    """
+    from argparse import Namespace
+
+    from agent_demo import factory
+
+    args = Namespace(fake=True, model='fake-model', workspace=tmp_path, hide_reasoning=False,
+                     session='id', sessions=str(tmp_path), prompt='x', resume=False, verbose=False)
+    session = Session(id='id')
+    agent = factory.build_agent(session, args, {'reasoning_started': False, 'request_no': 0, 'tool_no': 0})
+    agent.followup('hi')
+    await agent.when_idle()
+    headers = [e.data for e in session.events if e.type == 'request/header']
+    assert headers, 'expected a request/header event'
+    system = headers[0]['system']
+
+    for label in ('Scope:', 'Economy:', 'Evidence:'):
+        assert label in system, f'通用纪律缺 {label}（应提成 system 规则，而不是只写在文档里）'
+    # 通用段排在工具段之前；且"验证"不再等同于"执行"（理解代码不必跑命令）
+    assert system.index('Scope:') < system.index('Use bash')
+    assert 'reading code needs no execution' in system
+
+
 def test_todo_write_folds_and_injects_into_prompt(tmp_path):
     """todo_write 全链路：写整表 → 折叠读回 → 作为 live 段注入下次请求的 system。"""
     import asyncio
@@ -1040,12 +1161,14 @@ def test_todo_write_rejects_bad_inputs(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_todo_live_injection_across_steps(tmp_path):
-    """todo 的 live 注入在真实 loop 生效：第一步规划 → 第二步请求的 system 含清单。
+async def test_todo_status_bar_in_messages(tmp_path):
+    """方案 A：todo 状态栏从 system 迁到 messages 末尾（合成 user 消息）。
 
-    FakeLlm 两步：第一步 todo_write（规划 2 项），第二步纯文本。两步是两次
-    模型请求（loop 的 while：工具执行后回到顶部再请求）——第二步的
-    request/header system 必须含第一步写的 todo（live 段每次 render 重新折叠）。
+    FakeLlm 两步：第一步 todo_write 规划 2 项，第二步纯文本。断言：
+    - 第一步请求（规划前）：无状态栏（fold 无清单）
+    - 第二步请求（规划后）：request/header 记了 todo_status（审计字段），
+      且 system **不含** todo 清单（system 全静态）
+    - 状态栏 XML 含两项与状态
     """
     from argparse import Namespace
 
@@ -1053,7 +1176,7 @@ async def test_todo_live_injection_across_steps(tmp_path):
     from agent_demo.llm import FakeLlm
     from agent_demo.session import Session
 
-    session = Session(id='todo-live')
+    session = Session(id='todo-status')
     args = Namespace(fake=True, model='fake-model', workspace=tmp_path, hide_reasoning=False,
                      session='id', sessions=str(tmp_path), prompt='x', resume=False, verbose=False)
     llm = FakeLlm(script=[
@@ -1068,17 +1191,62 @@ async def test_todo_live_injection_across_steps(tmp_path):
         {'text': 'planned done', 'finish_reason': 'stop'},
     ])
     agent = build_agent(session, args, {'reasoning_started': False, 'request_no': 0, 'tool_no': 0})
-    agent.llm = llm  # 替换成两步脚本
+    agent.llm = llm
     agent.followup('do the multi-step work')
     await agent.when_idle()
 
-    # 两次模型请求，system 各异：第二次必须带第一次规划的 todo 清单
-    systems = [e.data['system'] for e in session.events if e.type == 'request/header']
-    assert len(systems) == 2, f'expected 2 model requests, got {len(systems)}'
-    assert 'step one' not in systems[0]          # 规划前：无清单
-    assert 'Current todo list' in systems[1]      # 规划后：live 段注入
-    assert 'step one=in_progress' in systems[1] or 'step one' in systems[1]
-    assert 'step two' in systems[1]
+    headers = [e.data for e in session.events if e.type == 'request/header']
+    assert len(headers) == 2, f'expected 2 model requests, got {len(headers)}'
+
+    # 规划前：无状态栏
+    assert 'todo_status' not in headers[0]
+    # system 里不再有 todo 清单（方案 A：system 全静态）
+    assert 'step one' not in headers[0]['system']
+    assert 'todo:state' not in headers[0]['system']
+
+    # 规划后：audit 字段带 XML 状态栏；system 仍不含清单
+    status = headers[1].get('todo_status')
+    assert status is not None, 'second request must carry todo_status audit field'
+    assert status.startswith('<todo_status>') and status.endswith('</todo_status>')
+    assert '[in_progress] step one' in status
+    assert '[pending] step two' in status
+    assert 'step one' not in headers[1]['system']      # system 保持静态
+
+    # 每轮都叠（第二轮也带了）；且 derive_messages 里没有状态栏（历史零污染）
+    derived_texts = []
+    for message in session.derive_messages():
+        for block in message.content:
+            if getattr(block, 'type', '') == 'text':
+                derived_texts.append(block.text)
+    assert not any('todo_status' in text for text in derived_texts)
+
+
+def test_todo_status_bar_absent_cases(tmp_path):
+    """build_todo_status 的不叠条件：无清单 / 全 completed → None。"""
+    from agent_demo.session import Session
+    from agent_demo.tools.todo import build_todo_status
+
+    session = Session(id='status-absent')
+    assert build_todo_status(session) is None          # 从未写过
+
+    session.append('todo/write', {'todos': [
+        {'content': 'a', 'status': 'pending'},
+        {'content': 'b', 'status': 'in_progress'},
+    ]})
+    status = build_todo_status(session)
+    assert status is not None
+    assert '<todo_status>' in status and '1. [pending] a' in status
+
+    # 全部 completed → 收尾，状态栏关闭
+    session.append('todo/write', {'todos': [
+        {'content': 'a', 'status': 'completed'},
+        {'content': 'b', 'status': 'completed'},
+    ]})
+    assert build_todo_status(session) is None
+
+    # 空清单 → 也不叠
+    session.append('todo/write', {'todos': []})
+    assert build_todo_status(session) is None
 
 
 def test_skill_catalog_scan_and_format(tmp_path, capsys):
@@ -1181,7 +1349,7 @@ async def test_skill_catalog_injected_into_system(tmp_path):
     assert '秘密技能正文' not in system              # 正文始终不进 system
 
     # 目录段在工具提示段之前（todo 为空时无 todo 段，取 bash 提示为序界）
-    assert system.index('可用技能') < system.index('Use bash to verify')
+    assert system.index('可用技能') < system.index('Use bash')
 
 
 def test_web_skill_catalog_survives_reload(tmp_path):
@@ -2116,6 +2284,253 @@ async def test_steer_while_running_becomes_next_step_of_same_turn():
     assert agent.status == 'idle'
 
 
+@pytest.mark.asyncio
+async def test_steer_absorbed_at_next_request_inside_tool_loop():
+    """插队在**下一次模型请求**就被吸收——step 粒度 = 一次请求。
+
+    回归（真实日志实测）：step 曾是"整段工具循环"，`_run_step` 内部反复
+    模型↔工具，只有模型最终给出纯文本才回到外层 claim。于是插队消息在
+    next-step 里躺了 2 分 40 秒（50+ 次工具调用），最后被 cancel 清掉
+    （outcome='canceled'）——模型从头到尾没见过它，用户看到的就是
+    "插入信息不起作用"。
+
+    现在一步只发一次请求，claim 发生在每次请求**之前**，所以断言：
+    - 第 1 次请求的 messages 里没有插队文本（那时还没插队）
+    - 第 2 次请求（工具循环仍在继续）的 messages 里**已经有**它
+    - 日志里 step 数与请求数一一对应
+    """
+    from agent_demo.llm import ToolCallDelta
+
+    calls = []
+
+    async def read_file(args, agent, signal):  # noqa: ARG001
+        calls.append(args)
+        return ToolOutcome(content='line 1')
+
+    tools = ToolRegistry()
+    tools.register(ToolSpec(
+        name='read_file',
+        description='Read a file.',
+        parameters={'type': 'object', 'properties': {'file_path': {'type': 'string'}},
+                    'required': ['file_path']},
+        execute=read_file,
+    ))
+
+    class LoopLlm:
+        """前三轮都要求调用工具；每轮记下它这次请求收到的 user 文本。"""
+
+        def __init__(self):
+            self.seen: list[list[str]] = []
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def stream(self, request, signal=None):  # noqa: ARG002
+            self.seen.append([m.content[0].text for m in request.messages
+                              if m.role == 'user' and m.content
+                              and getattr(m.content[0], 'type', '') == 'text'])
+            index = len(self.seen)
+            if index == 1:
+                self.entered.set()
+                await self.release.wait()   # 卡住第 1 轮：给测试留插队窗口
+            if index <= 3:                  # 三轮工具循环，回合一直没收尾
+                yield StreamChunk(tool_calls=(ToolCallDelta(
+                    index=0, id=f'c{index}', name='read_file',
+                    arguments=json.dumps({'file_path': 'a.txt'})),))
+                yield StreamChunk(finish_reason='tool_calls')
+            else:
+                yield StreamChunk(text='done', finish_reason='stop')
+
+    session = Session(id='s')
+    llm = LoopLlm()
+    agent = Agent(session=session, llm=llm, prompt=PromptRegistry(), tools=tools,
+                  options={'provider': 'fake', 'model': 'fake-model'})
+    agent.followup('做一个长任务')
+    driver = asyncio.create_task(agent.when_idle())
+    await llm.entered.wait()
+    agent.steer('插队：改方向')          # 工具循环还在第 1 轮里
+    llm.release.set()
+    await asyncio.wait_for(driver, timeout=5)
+
+    assert len(llm.seen) == 4, llm.seen
+    assert not any('插队' in text for text in llm.seen[0])
+    assert any('插队：改方向' in text for text in llm.seen[1]), llm.seen
+    # 它不是等工具循环跑完才被看到的：第 2、3 轮仍在调用工具
+    assert len(calls) == 3
+    # 一步 = 一次请求：step/start 与模型请求数一一对应
+    assert len([e for e in session.events if e.type == 'step/start']) == len(llm.seen)
+    # durable 落地：插队的 user/message 排在第 2 次请求的 header 之前
+    claimed_seq = next(e.seq for e in session.events
+                       if e.type == 'user/message' and e.data.content[0].text == '插队：改方向')
+    headers = [e.seq for e in session.events if e.type == 'request/header']
+    assert claimed_seq < headers[1], (claimed_seq, headers)
+    assert session.events[-1].type == 'turn/end'
+    assert session.events[-1].data['reason'] == 'completed'
+
+
+def test_web_queue_actions_endpoint(tmp_path):
+    """POST /queue/update：队列项操作（对齐 DSH 的 updateQueue(itemId, action)）。
+
+    三种动作与两个语义要守住：
+    - remove：队列区快照为空，且日志里没有产生 user/message surface——
+      这条消息从未成为模型可见的输入（"没有状态不进日志"的逆向：撤回
+      只留 spliced 痕迹）
+    - edit：就地改写还没 claim 的消息（同 id 换文案），同样不产生 surface
+    - steer：next-turn → next-step 的搬家（空闲时拒绝：没有"下一步"）
+    - 已 claim（已进消息流）的操作返回 ok=False + queue-item-not-found，
+      这是并发下的**正常收敛**而不是错误（HTTP 仍 200）
+    """
+    from fastapi.testclient import TestClient
+
+    from agent_demo import web_app
+
+    web_app.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
+    client = TestClient(web_app.app)
+    seat = web_app._seats['web']
+
+    def update(item_id, action):
+        resp = client.post('/queue/update',
+                           json={'item_id': item_id, 'action': action, 'sid': 'web'})
+        assert resp.status_code == 200, resp.text
+        return resp.json()
+
+    # 直接入队一条（wakeup=False：不真跑回合）：模拟"已发出、还没轮到"
+    message = create_user_message([TextBlock(text='这条还没轮到')])
+    seat.agent.send(message, 'next-step', wakeup=False)
+    queued_id = message.id
+    assert [r['id'] for r in web_app._queue_rows(seat.agent)] == [queued_id]
+
+    # /history 与 /steer 一样带 queue（刷新页面也能恢复队列区）
+    hist = client.get('/history').json()
+    assert [(r['id'], r['placement']) for r in hist['queue']] == [(queued_id, 'steering')]
+    # 会话切换也带 queue
+    client.post('/sessions/new')
+    switched = client.post('/sessions/web/switch').json()
+    assert [r['id'] for r in switched['queue']] == [queued_id]
+
+    resp = client.post('/queue/update',
+                       json={'item_id': queued_id, 'action': {'kind': 'remove'}, 'sid': 'web'})
+    assert resp.json() == {'ok': True, 'code': 'ok', 'sid': 'web', 'queue': []}
+    assert not seat.agent.inbox.has_pending
+    assert not [e for e in seat.session.events if e.type == 'user/message']
+
+    # 已认领/已消失的项：ok=False + 并发收敛码（HTTP 仍 200）
+    gone = update(queued_id, {'kind': 'remove'})
+    assert gone['ok'] is False and gone['code'] == 'queue-item-not-found'
+    # 校验：缺 item_id / 动作词表外 / 空编辑 / 会话不存在
+    assert client.post('/queue/update', json={'action': {'kind': 'remove'}}).status_code == 400
+    assert client.post('/queue/update',
+                       json={'item_id': 'x', 'action': {'kind': 'nope'}}).status_code == 400
+    assert client.post('/queue/update',
+                       json={'item_id': 'x', 'action': {'kind': 'edit', 'text': ' '}}).status_code == 400
+    assert client.post('/queue/update',
+                       json={'item_id': 'x', 'action': {'kind': 'remove'},
+                             'sid': 'nope'}).status_code == 404
+
+
+def test_inbox_queue_actions_edit_and_promote():
+    """状态层的三个队列动作：edit（同 id 换文案）/ promote（搬家）/ remove。
+
+    edit 的安全性来自"还没 claim 就没有 surface"：改的只是将要成为模型输入的
+    内容，日志里只有 spliced 痕迹。promote 是 next-turn → next-step 的搬家，
+    两步各自落账、可重放。
+    """
+    session = Session(id='s')
+    inbox = Inbox(session)
+    queued = create_user_message([TextBlock(text='先写个草稿')])
+    inbox.append('next-turn', queued)
+
+    assert inbox.edit(queued.id, '改成：直接给结论') is True
+    items = inbox.queued_items()
+    assert items[0].id == queued.id                      # 身份不变（前端那行不闪）
+    assert items[0].message.content[0].text == '改成：直接给结论'
+    # 一次原子改动（replace 而不是"删+插"两条事件）
+    splices = [e for e in session.events if e.type == 'agent/inbox/spliced']
+    assert len(splices) == 2 and splices[-1].data['removed_count'] == 1
+    assert splices[-1].data['inserted'][0].id == queued.id
+
+    assert inbox.promote(queued.id) is True              # queued → steering
+    assert [i.placement for i in inbox.queued_items()] == ['steering']
+    assert inbox.promote(queued.id) is False             # 已经在 next-step：幂等无变化
+    # 搬家 = 两次 splice（先摘后插）；摘除那步 discard=False：这不是丢弃，
+    # 不该标 outcome='canceled'（那个标记专给撤回）
+    moves = [e for e in session.events if e.type == 'agent/inbox/spliced'][2:]
+    assert len(moves) == 2
+    assert moves[0].data['target'] == 'next-turn' and moves[0].data['removed_count'] == 1
+    assert moves[0].data.get('outcome') is None
+    assert moves[1].data['target'] == 'next-step' and moves[1].data['inserted'][0].id == queued.id
+
+    replayed = Inbox(session).queued_items()             # 重放：编辑与搬家都在
+    assert replayed == inbox.queued_items()
+    assert replayed[0].message.content[0].text == '改成：直接给结论'
+
+    assert inbox.edit('nope', 'x') is False
+    assert inbox.promote('nope') is False
+
+
+def test_inbox_queued_items_is_a_session_projection():
+    """队列投影在**状态层**：Inbox.queued_items() 与 derive_messages() 并列。
+
+    为什么这条要单独测（架构回归）：投影曾被放在 web_app 里自己重放
+    agent/inbox/spliced——同一事件类型两份折叠（Inbox._apply 一份、web 一份）
+    必然分叉，而且投影绑死在 Web 宿主上（CLI/测试拿不到）。现在只有一份：
+    _state 本身就是重放结果，queued_items() 只是给它贴上 placement 语义。
+
+    断言三件事：
+    - placement 映射：next-turn→queued、next-step→steering，顺序固定
+    - 撤回/拼接后投影跟着变（走的是同一份折叠）
+    - **换个 Inbox 重放同一段日志，投影逐字段相同**（可重建 ⟺ 模型可见的
+      同款保证；resume 后队列区不会变形）
+    """
+    session = Session(id='s')
+    inbox = Inbox(session)
+    steer_one = create_user_message([TextBlock(text='插队一')])
+    queued_two = create_user_message([TextBlock(text='排队二')])
+    steer_three = create_user_message([TextBlock(text='插队三')])
+    inbox.append('next-step', steer_one)
+    inbox.append('next-turn', queued_two)
+    inbox.append('next-step', steer_three)
+
+    items = inbox.queued_items()
+    assert [(i.placement, i.id) for i in items] == [
+        ('queued', queued_two.id), ('steering', steer_one.id), ('steering', steer_three.id)]
+    assert items[0].message is queued_two          # 值对象持有本体，不是副本
+    assert items[1].id == steer_one.id             # id 直接取自 message
+
+    inbox.remove(steer_one.id)
+    assert [i.id for i in inbox.queued_items()] == [queued_two.id, steer_three.id]
+
+    replayed = Inbox(session).queued_items()       # 日志重放 → 同一投影
+    assert replayed == inbox.queued_items()        # frozen dataclass：逐字段相等
+
+
+def test_web_queue_rows_serialize_state_projection(tmp_path):
+    """web 层只做序列化：_queue_rows 把状态层的投影摊平成前端 JSON。
+
+    注意入队走 wakeup=False：这里只测投影，不真跑回合（sync 测试里
+    没有事件循环，_wake 会拉不起 driver）。
+    """
+    from agent_demo import web_app
+
+    web_app.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
+    session, agent = web_app._session, web_app._agent
+    assert session is not None and agent is not None
+
+    first = create_user_message([TextBlock(text='插队一')])
+    agent.send(first, 'next-step', wakeup=False)
+    second = create_user_message([TextBlock(text='排队二')])
+    agent.send(second, 'next-turn', wakeup=False)      # next-turn = 'queued'
+    rows = web_app._queue_rows(agent)
+    assert [(r['text'], r['placement']) for r in rows] == [
+        ('排队二', 'queued'), ('插队一', 'steering')]
+
+    agent.unqueue(first.id)
+    assert [(r['text'], r['placement']) for r in web_app._queue_rows(agent)] == [
+        ('排队二', 'queued')]
+    # 序列化 = 投影的镜像（id 集合一致，一一对应）
+    assert [r['id'] for r in web_app._queue_rows(agent)] == [
+        item.id for item in agent.inbox.queued_items()]
+
+
 def test_web_steer_requires_active_stream(tmp_path):
     """POST /steer：无活跃对话流（idle）时 409 拒绝；提示用 /chat 开回合。"""
     from fastapi.testclient import TestClient
@@ -2180,7 +2595,8 @@ async def test_web_steer_interrupts_open_sse_stream(tmp_path):
         async def read_sse() -> str:
             parts = []
             async with client.stream('POST', '/chat',
-                                     json={'message': '首问', 'sid': 'web'}) as resp:
+                                     json={'message': '首问', 'sid': 'web',
+                                           'request_id': 'rpc-first'}) as resp:
                 assert resp.status_code == 200
                 async for chunk in resp.aiter_text():
                     parts.append(chunk)
@@ -2188,9 +2604,18 @@ async def test_web_steer_interrupts_open_sse_stream(tmp_path):
 
         reader = asyncio.create_task(read_sse())
         await llm.started.wait()                      # 回合真的挂起在 LLM 里
-        steer_resp = await client.post('/steer', json={'message': '停一下改方向', 'sid': 'web'})
+        steer_resp = await client.post(
+            '/steer', json={'message': '停一下改方向', 'sid': 'web',
+                            'request_id': 'rpc-steer'})
         assert steer_resp.status_code == 200
         assert steer_resp.json()['queued'] == 'next-step'
+        # 返回 message_id + 队列快照：前端据此在消息流尾部画"待处理插队"气泡
+        steer_id = steer_resp.json().get('message_id')
+        assert steer_id, 'steer must return the queued message id'
+        queued = steer_resp.json()['queue']
+        # rpc_id 随消息 source 一起投影出来：前端靠它把本地回显原子换成真身
+        assert [(r['id'], r['text'], r['placement'], r['rpc_id']) for r in queued] == [
+            (steer_id, '停一下改方向', 'steering', 'rpc-steer')]
         llm.release.set()                             # 放行：第一步完成，下一步轮到插队
         sse = await asyncio.wait_for(reader, timeout=10)
 
@@ -2198,6 +2623,29 @@ async def test_web_steer_interrupts_open_sse_stream(tmp_path):
     assert '首轮回答' in sse
     assert '插队后回答' in sse
     assert sse.count('"type": "turn_end"') == 1       # 一个回合结束 = 插队没开新回合
+    # 认领链路：插队消息的 user_message 帧带 /steer 返回的同一个 message_id
+    # 与提交身份 rpc_id（前端据此在**同一次渲染**里把本地回显换成真身）
+    steer_frames = [f for f in sse.split('data: ')
+                    if '"user_message"' in f and '停一下改方向' in f]
+    assert steer_frames, 'steer message must be pushed as a user_message frame'
+    steer_frame = json.loads(steer_frames[0].split('\n\n')[0])
+    assert steer_frame['message_id'] == steer_id
+    assert steer_frame['rpc_id'] == 'rpc-steer'
+    # 首问那条也带自己的提交身份（idle 发送的回显同样要能交接）
+    first_frames = [f for f in sse.split('data: ')
+                    if '"user_message"' in f and '首问' in f]
+    assert json.loads(first_frames[0].split('\n\n')[0])['rpc_id'] == 'rpc-first'
+    # durable 消息 source 上落了提交身份（重放/历史都能认出来）
+    sources = {e.data.content[0].text: e.data.source
+               for e in seat.session.events if e.type == 'user/message'}
+    assert sources['首问'].rpc_id == 'rpc-first'
+    assert sources['停一下改方向'].rpc_id == 'rpc-steer'
+    # 队列区通道：入队（spliced）推一条含插队消息的快照，claim 后再推一条空快照
+    queue_frames = [json.loads(f.split('\n\n')[0]) for f in sse.split('data: ')
+                    if '"queue_update"' in f]
+    assert queue_frames, 'inbox splice must be pushed as queue_update frames'
+    assert any(f['queue'] and f['queue'][0]['id'] == steer_id for f in queue_frames)
+    assert queue_frames[-1]['queue'] == []            # 认领后队列区清空
     # 事件日志：全程只有一次 turn/start，两条 user 消息都在
     turns = [e for e in seat.session.events if e.type == 'turn/start']
     assert len(turns) == 1
@@ -2355,3 +2803,359 @@ def test_web_history_marks_same_turn_steer(tmp_path):
     # 同回合两条 user 的 turn 相同（前端据此不画分隔线）；新回合不同
     turns = [t for _, t in users]
     assert turns[0] == turns[1] and turns[1] != turns[2]
+
+
+# ============================================================
+# web_search —— DeepSeek 官方原生搜索（Anthropic 兼容 Messages 端点）
+#
+# 搜索由服务端 `web_search_20250305` 工具执行，我们只解析结构化块
+# （web_search_tool_result → web_search_result），绝不抓网页、绝不去
+# text 正文里抠 URL。夹具剪裁自真实响应（page_age 实测为 null）。
+# ============================================================
+
+# 夹具：含重复 URL（验证去重）、空 title（验证 label 退化到 hostname）、
+# 一条非 web_search_result 项（验证被跳过）。
+_WEB_SEARCH_FIXTURE = {
+    'type': 'message',
+    'model': 'deepseek-v4-flash',
+    'stop_reason': 'end_turn',
+    'content': [
+        {'type': 'thinking', 'thinking': '先搜一下', 'signature': 'sig'},
+        {'type': 'server_tool_use', 'id': 'call_1', 'name': 'web_search',
+         'input': {'query': 'deepseek-harness 架构'}},
+        {'type': 'web_search_tool_result', 'tool_use_id': 'call_1', 'content': [
+            {'type': 'web_search_result', 'title': 'Harness 架构（中文）',
+             'url': 'https://example.com/a', 'page_age': None, 'encrypted_content': 'xxx'},
+            {'type': 'web_search_result', 'title': '',
+             'url': 'https://example.com/b', 'page_age': None, 'encrypted_content': 'yyy'},
+            {'type': 'web_search_result', 'title': '重复 URL 应被丢弃',
+             'url': 'https://example.com/a', 'page_age': None},
+            {'type': 'web_search_result', 'title': '空 url 应被丢弃',
+             'url': '', 'page_age': None},
+        ]},
+        {'type': 'text', 'text': '以下是整理后的答复，参考 [架构文档](https://example.com/a)。'},
+    ],
+    'usage': {'server_tool_use': {'web_search_requests': 1}},
+}
+
+
+def _web_search_backend(monkey_env='test-key'):
+    """造一个 httpx.MockTransport 后端（喂夹具，记录请求体），不碰网络。"""
+    from agent_demo.tools import web_search as ws
+
+    requests: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append({
+            'url': str(request.url),
+            'headers': dict(request.headers),
+            'body': json.loads(request.content),
+        })
+        return httpx.Response(200, json=_WEB_SEARCH_FIXTURE)
+
+    async def backend(query: str, max_results: int, config):
+        return await ws.deepseek_search_backend(
+            query, max_results, config,
+            transport=httpx.MockTransport(handler), api_key=monkey_env,
+        )
+
+    return backend, requests
+
+
+def test_web_search_parses_structured_blocks_only():
+    """只认结构化块：去重 / 空 url 丢弃 / title 缺失 / page_age=null 都不炸。"""
+    from agent_demo.tools import web_search as ws
+
+    outcome = ws.parse_search_response(_WEB_SEARCH_FIXTURE)
+    results = list(outcome.results)
+    assert [r.url for r in results] == ['https://example.com/a', 'https://example.com/b']
+    assert results[0].title == 'Harness 架构（中文）'
+    assert results[1].title == ''            # 缺 title 不是错误
+    assert results[0].published_at == ''     # page_age 实测为 null → 空
+    assert results[0].snippet == ''          # 实测 text 块没有 citations → snippet 空
+    # 摘要来自 text 块（那个辅助模型的转述）
+    assert outcome.summary == '以下是整理后的答复，参考 [架构文档](https://example.com/a)。'
+
+    # 摘要必须带"转述、无结构化引用"的标注，且排在 Sources 之前
+    output = ws.format_search_output(results, summary=outcome.summary)
+    assert output.startswith(ws.EXTERNAL_WEB_CONTENT_NOTICE)
+    assert ws.SUMMARY_NOTICE in output
+    assert output.index(ws.SUMMARY_NOTICE) < output.index('Sources:')
+    assert '- [Harness 架构（中文）](https://example.com/a)' in output
+    assert '- [example.com](https://example.com/b)' in output
+    assert output.endswith(ws.CITE_INSTRUCTION)
+    assert 'No results found.' not in output
+
+    # 没来源但有摘要：不打 "No results found."（否则自相矛盾）
+    only_summary = ws.format_search_output([], summary='一段转述')
+    assert 'No results found.' not in only_summary and ws.SUMMARY_NOTICE in only_summary
+
+    # 两者都没有：才说"没找到"
+    empty = ws.format_search_output([])
+    assert 'No results found.' in empty and 'Sources:' not in empty
+    assert ws.SUMMARY_NOTICE not in empty
+
+
+def test_web_search_summary_merge_and_truncation():
+    """多 query 的摘要分段拼接（>1 条才加 ### 标题）、超长截断、可整体关掉。"""
+    from agent_demo.tools import web_search as ws
+
+    def outcome(summary: str, url: str) -> ws.SearchOutcome:
+        return ws.SearchOutcome(
+            summary=summary,
+            results=(ws.SearchResult(title='T', url=url),),
+        )
+
+    # 单 query：不加多余的 ### 标题
+    summary, results, truncated = ws.merge_outcomes(
+        ['q1'], [outcome('答话一', 'https://a.test')], 5)
+    assert summary == '答话一'
+    assert [r.url for r in results] == ['https://a.test'] and truncated is False
+
+    # 多 query：按 DSH 的分段形状，各自带 query 标题
+    summary, results, _ = ws.merge_outcomes(
+        ['q1', 'q2'],
+        [outcome('答话一', 'https://a.test'),
+         outcome('答话二', 'https://a.test'),    # 重复 URL → 只留一条
+         ],
+        5)
+    assert summary == '### q1\n\n答话一\n\n### q2\n\n答话二'
+    assert [r.url for r in results] == ['https://a.test']
+
+    # 超长截断 + 标记
+    long_summary, _, _ = ws.merge_outcomes(['q'], [outcome('x' * 100, 'https://a.test')], 5,
+                                           max_summary_chars=40)
+    assert long_summary.startswith('x' * 40)
+    assert 'Summary truncated at 40 chars.' in long_summary
+
+    # 某条 query 没写答话（text 块缺失）→ 那一段跳过，不产生空标题
+    summary, _, _ = ws.merge_outcomes(
+        ['q1', 'q2'], [outcome('', 'https://a.test'), outcome('只有二', 'https://b.test')], 5)
+    assert summary == '### q2\n\n只有二'
+
+
+def test_web_search_citation_snippet_when_present():
+    """text 块的 citations 提供 snippet（DSH 的 citationSnippets 语义；首次出现者胜）。
+
+    注意：这是**防御性**覆盖——DeepSeek 实测从不返回 citations（探针两次确认，
+    连 system 里明确要求标注来源也没有），但协议支持，所以解析层照 DSH 实现。
+    """
+    from agent_demo.tools import web_search as ws
+
+    payload = {
+        'content': [
+            {'type': 'web_search_tool_result', 'content': [
+                {'type': 'web_search_result', 'title': 'T', 'url': 'https://x.test/1', 'page_age': '2026-08-13'},
+            ]},
+            {'type': 'text', 'text': '正文', 'citations': [
+                {'url': 'https://x.test/1', 'cited_text': '第一次的摘录'},
+                {'url': 'https://x.test/1', 'cited_text': '应被忽略'},
+            ]},
+        ],
+    }
+    outcome = ws.parse_search_response(payload)
+    assert outcome.results[0].snippet == '第一次的摘录'
+    assert outcome.results[0].published_at == '2026-08-13'
+    assert outcome.summary == '正文'
+    assert '(2026-08-13)' in ws.format_search_output(list(outcome.results))
+
+
+def test_web_search_no_result_block_is_error_not_empty():
+    """没触发原生搜索 → 响亮失败（WEB_PROVIDER_ERROR），不退化成"没找到"。"""
+    from agent_demo.tools import web_search as ws
+
+    for payload in (
+        {'content': [{'type': 'text', 'text': '我直接回答了，没搜索'}]},
+        {'content': []},
+        {},
+    ):
+        with pytest.raises(ws.WebSearchError) as excinfo:
+            ws.parse_search_response(payload)
+        assert excinfo.value.code == 'WEB_PROVIDER_ERROR'
+        assert 'web_search_tool_result' in excinfo.value.message
+
+
+@pytest.mark.asyncio
+async def test_web_search_backend_request_shape_and_failures(monkeypatch):
+    """默认后端：请求体/头照 DSH；缺 key / HTTP 非 200 / 响应不可解析都结构化失败。"""
+    from agent_demo.tools import web_search as ws
+
+    backend, requests = _web_search_backend()
+    outcome = await backend('deepseek-harness 架构', 3, ws.default_config())
+    # 夹具里只有 a / b 是唯一且非空的 URL（重复项与空 url 被丢弃）
+    assert [r.url for r in outcome.results] == ['https://example.com/a', 'https://example.com/b']
+    assert outcome.summary.startswith('以下是整理后的答复')
+
+    sent = requests[0]
+    assert sent['url'] == 'https://api.deepseek.com/anthropic/v1/messages'
+    assert sent['headers']['x-api-key'] == 'test-key'
+    assert sent['headers']['anthropic-version'] == '2023-06-01'
+    assert sent['body']['model'] == 'deepseek-v4-flash'
+    assert sent['body']['max_tokens'] == 4096
+    assert sent['body']['tools'] == [
+        {'type': 'web_search_20250305', 'name': 'web_search', 'max_uses': 5}]
+    assert sent['body']['messages'][0]['content'][0]['text'] == (
+        'Perform a web search for the query: deepseek-harness 架构')
+
+    # 缺 key → WEB_PROVIDER_CREDENTIAL_MISSING（不抛穿，交给包装层降级）
+    monkeypatch.delenv('DEEPSEEK_API_KEY', raising=False)
+    with pytest.raises(ws.WebSearchError) as excinfo:
+        await ws.deepseek_search_backend('q', 3, transport=httpx.MockTransport(lambda r: httpx.Response(200, json={})))
+    assert excinfo.value.code == 'WEB_PROVIDER_CREDENTIAL_MISSING'
+
+    # HTTP 非 200 → 带上状态码与 detail
+    def http_error(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, json={'error': {'message': 'rate limited'}})
+
+    with pytest.raises(ws.WebSearchError) as excinfo:
+        await ws.deepseek_search_backend('q', 3, transport=httpx.MockTransport(http_error), api_key='k')
+    assert excinfo.value.code == 'WEB_PROVIDER_HTTP_ERROR'
+    assert '429' in excinfo.value.message and 'rate limited' in excinfo.value.message
+
+    # 响应体不是 JSON → WEB_PROVIDER_ERROR（不炸）
+    with pytest.raises(ws.WebSearchError) as excinfo:
+        await ws.deepseek_search_backend(
+            'q', 3, transport=httpx.MockTransport(lambda r: httpx.Response(200, text='not json')), api_key='k')
+    assert excinfo.value.code == 'WEB_PROVIDER_ERROR'
+
+
+def test_web_search_query_validation():
+    """queries 校验：空数组 / 超限 / 空白项 → is_error；重复项折叠。"""
+    from agent_demo.tools import web_search as ws
+
+    assert ws.parse_query_args(['a', ' b ', 'a'], 4) == ['a', 'b']   # 折叠 + strip
+    for bad in ([], ['  '], ['a'] * 5, 'a', [1]):
+        with pytest.raises(ws.WebSearchError) as excinfo:
+            ws.parse_query_args(bad, 4)
+        assert excinfo.value.code == 'INVALID_QUERIES'
+
+
+@pytest.mark.asyncio
+async def test_web_search_tool_multi_query_merge_and_trace(tmp_path):
+    """工具层：多 query 逐条搜索、按 url 去重合并、派发前落 web/search 痕迹（无 key）。
+
+    DSH 的 mergeSearchResults 是 round-robin；这里按 query 顺序拼接（先到先得），
+    超上限截断。痕迹事件对齐 DSH 的 web/deepseek-search-llm-request：
+    记 query/endpoint/model/max_uses，**绝不含 key**。
+    """
+    from agent_demo.registry import ToolRegistry
+    from agent_demo.session import Session
+    from agent_demo.tools import web_search as ws
+
+    backend, requests = _web_search_backend()
+    registry = ToolRegistry()
+    ws.register(registry, backend=backend, max_results=3)
+    spec = registry._tools['web_search']
+
+    session = Session(id='web-search-test')
+    agent = type('A', (), {'session': session})()
+
+    first = await spec.execute({'queries': ['q1', 'q2']}, agent, None)
+    assert first.is_error is False
+    # 两条 query 各发一次请求；结果按 url 去重（夹具里 a 重复）→ 只剩 a/b，未到上限
+    assert len(requests) == 2
+    assert first.content.count('- [') == 2
+    assert 'https://example.com/a' in first.content and 'https://example.com/b' in first.content
+
+    # 痕迹事件：派发前落、不含 key
+    traces = [e for e in session.events if e.type == 'web/search']
+    assert [t.data['query'] for t in traces] == ['q1', 'q2']
+    assert traces[0].data['endpoint'] == 'https://api.deepseek.com/anthropic/v1/messages'
+    assert traces[0].data['model'] == 'deepseek-v4-flash'
+    assert traces[0].data['max_uses'] == 5
+    assert 'key' not in json.dumps(traces[0].data, ensure_ascii=False).lower()
+    # 痕迹不是 surface：不进模型记忆（不变式②）
+    assert session.derive_messages() == []
+    # 请求顺序：痕迹先落，再发请求（派发前记账）
+    assert session.events.index(traces[0]) < session.events.index(traces[1])
+
+
+@pytest.mark.asyncio
+async def test_web_search_trace_matches_the_real_request(tmp_path):
+    """痕迹事件记的必须是**那次真实请求**用的配置（回归：两份默认值会脱节）。
+
+    旧实现的 endpoint/model/max_uses 来自 register() 的闭包参数，而真正发请求的
+    后端用自己的默认值——于是 ① 日志可能记一个端点、请求打到另一个；
+    ② register(endpoint=...) 这类覆盖对真实请求**完全无效**（静默失效）。
+    现在配置是一个值对象，由工具层解析一次、trace 与请求共用。
+    """
+    from agent_demo.registry import ToolRegistry
+    from agent_demo.session import Session
+    from agent_demo.tools import web_search as ws
+
+    backend, requests = _web_search_backend()
+    custom = ws.SearchConfig(endpoint='http://mock.local/v1/messages',
+                             model='custom-search-model', max_uses=2)
+    registry = ToolRegistry()
+    ws.register(registry, backend=backend, max_results=3, config=custom)
+
+    session = Session(id='web-search-config')
+    agent = type('A', (), {'session': session})()
+    outcome = await registry.execute('web_search', {'queries': ['q']}, agent)
+    assert outcome.is_error is False
+
+    trace = next(e for e in session.events if e.type == 'web/search')
+    assert trace.data == {
+        'query': 'q',
+        'endpoint': 'http://mock.local/v1/messages',
+        'model': 'custom-search-model',
+        'max_uses': 2,
+    }
+    # 真实请求与痕迹逐字段一致（这才是"日志 = 请求"）
+    sent = requests[0]
+    assert sent['url'] == trace.data['endpoint']
+    assert sent['body']['model'] == trace.data['model']
+    assert sent['body']['tools'][0]['max_uses'] == trace.data['max_uses']
+
+    # include_summary=False：模型可见文本里不留那段转述（将来有 web_fetch 时退回
+    # DSH 的 deepseek 策略），但结构化来源照旧
+    no_summary = ws.SearchConfig(endpoint=custom.endpoint, model=custom.model,
+                                 max_uses=custom.max_uses, include_summary=False)
+    registry2 = ToolRegistry()
+    ws.register(registry2, backend=_web_search_backend()[0], max_results=3, config=no_summary)
+    plain = await registry2.execute('web_search', {'queries': ['q']}, agent)
+    assert plain.is_error is False
+    assert ws.SUMMARY_NOTICE not in plain.content
+    assert 'Sources:' in plain.content
+
+
+@pytest.mark.asyncio
+async def test_web_search_tool_degrades_to_is_error(tmp_path):
+    """工具包装层：坏入参 / 后端失败都返回 is_error 的 ToolOutcome，绝不抛异常。"""
+    from agent_demo.registry import ToolRegistry
+    from agent_demo.session import Session
+    from agent_demo.tools import web_search as ws
+
+    # 坏参数：空 queries（schema 外的话直接拒绝）
+    registry = ToolRegistry()
+    ws.register(registry, backend=_web_search_backend()[0])
+    spec = registry._tools['web_search']
+    session = Session(id='degrade')
+    agent = type('A', (), {'session': session})()
+
+    out = await spec.execute({'queries': []}, agent, None)
+    assert out.is_error is True and 'at least one query' in out.content
+
+    out = await spec.execute({'queries': ['a', 'b', 'c', 'd', 'e']}, agent, None)
+    assert out.is_error is True and 'at most 4' in out.content
+
+    out = await spec.execute({'queries': ['ok', '   ']}, agent, None)
+    assert out.is_error is True
+
+    # 后端结构化失败（缺 key）→ is_error，且带上 code 供模型/诊断识别
+    async def no_key_backend(query, max_results, config):
+        raise ws.WebSearchError('WEB_PROVIDER_CREDENTIAL_MISSING', 'no key')
+
+    registry2 = ToolRegistry()
+    ws.register(registry2, backend=no_key_backend)
+    out = await registry2._tools['web_search'].execute({'queries': ['q']}, None, None)
+    assert out.is_error is True and 'WEB_PROVIDER_CREDENTIAL_MISSING' in out.content
+
+    # 后端抛别的异常也不穿：一律降级为 is_error 结果（不变式⑤）
+    async def boom(query, max_results, config):
+        raise RuntimeError('boom')
+
+    registry3 = ToolRegistry()
+    ws.register(registry3, backend=boom)
+    out = await registry3._tools['web_search'].execute({'queries': ['q']}, None, None)
+    assert out.is_error is True and 'boom' in out.content

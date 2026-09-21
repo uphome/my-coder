@@ -93,6 +93,28 @@ def all_completed(todos: list | None) -> bool:
     return all(t.get('status') == 'completed' for t in todos)
 
 
+def build_todo_status(session) -> str | None:
+    """当前清单 → 状态栏 XML（模型上下文用）；无清单/已收尾返回 None。
+
+    方案 A（agent.md §4 问题 1 结论）：todo 不进日志，而是每轮组请求时从
+    日志 fold 现算，作为一条 user 合成消息叠在 messages 末尾——模型每轮都
+    看到最新状态，且不污染历史（不进 derive_messages）。
+
+    两个"不叠"条件：
+    - 从未写过 todo / 清单为空 → 无状态可报
+    - 全部 completed → 任务收尾，状态栏关闭（与前端 dock 自动隐藏同一语义）
+
+    可重建性：fold_todos 是日志纯函数 → 同一段日志永远算出同一状态栏；
+    resume 重放后每轮重新合成，模型看到的内容一致（符合"模型可见 ⟺ 可重建"）。
+    """
+    todos = fold_todos(session)
+    if not todos or all_completed(todos):
+        return None
+    lines = [f'{i}. [{t.get("status", "pending")}] {t.get("content", "")}'
+             for i, t in enumerate(todos, start=1)]
+    return '<todo_status>\n' + '\n'.join(lines) + '\n</todo_status>'
+
+
 def _counts(todos: list) -> dict:
     def count(status: str) -> int:
         return sum(1 for t in todos if t.get('status') == status)

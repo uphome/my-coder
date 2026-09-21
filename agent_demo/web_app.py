@@ -357,20 +357,76 @@ def _user_message_turns(session) -> dict[int, int]:
     return mapping
 
 
+def _reasoning_by_assistant_seq(session) -> dict[int, str]:
+    """assistant/message 事件的 seq → 该次模型请求的完整思维链（痕迹投影）。
+
+    UI 是日志的投影——思维链虽是痕迹（不回灌模型），但**要给人看**：
+    历史/刷新后深度思考块必须能重建（issue #4）。
+
+    配对规则（依赖日志顺序）：每次请求的 `assistant/reasoning`（完整思维链，
+    痕迹）紧跟在它的 `assistant/message`（surface）之前落盘 → 按 seq 顺序用
+    buffer 配对即可。同一 (turn, step) 内工具循环的多次请求也天然一次一份
+    ——这正好回答了"同一步多次请求的思维链合并"问题：历史里按请求分开。
+    """
+    out: dict[int, str] = {}
+    buffer: str | None = None
+    for event in session.events:
+        if event.type == 'assistant/reasoning':
+            data = event.data if isinstance(event.data, dict) else {}
+            text = data.get('reasoning')
+            buffer = text if isinstance(text, str) and text else None
+        elif event.type == 'assistant/message':
+            if buffer:
+                out[event.seq] = buffer
+            buffer = None
+    return out
+
+
 def _history_payloads(session) -> list[dict]:
     """会话历史消息载荷（页面加载/刷新用），user 消息附带其回合归属。
 
     message_to_payload 是纯消息 → dict，不知道回合；这里在构造处补上
     'turn' 字段，前端据此区分"新回合首条"与"同回合插队（steer）"。
+    user 消息再补 'rpc_id'（提交身份）：前端全量重建投影后，仍能认出
+    "这条 durable 消息就是我刚才那条回显的落地"。
+    assistant 消息补 'reasoning'（该次请求的思维链，痕迹投影给人看）。
     """
     turns = _user_message_turns(session)
+    reasoning = _reasoning_by_assistant_seq(session)
     payloads = []
     for seq, message in _surface_with_seq(session):
         payload = message_to_payload(message)
-        if payload['role'] == 'user' and seq in turns:
-            payload['turn'] = turns[seq]
+        if payload['role'] == 'user':
+            if seq in turns:
+                payload['turn'] = turns[seq]
+            source = getattr(message, 'source', None)
+            payload['rpc_id'] = getattr(source, 'rpc_id', '')
+        elif payload['role'] == 'assistant' and seq in reasoning:
+            payload['reasoning'] = reasoning[seq]
         payloads.append(payload)
     return payloads
+
+
+def _queue_rows(agent) -> list[dict]:
+    """待处理队列 → 前端队列区的行（web 层只做序列化）。
+
+    投影本身在状态层：`Inbox.queued_items()` 折 agent/inbox/spliced 得到
+    `QueuedItem(placement, message)`——和 `Session.derive_messages()` 一样是
+    "日志 → 不可变投影"。为什么不在这一层自己重放日志：web 层重放会造成
+    **同一事件类型两份折叠**（Inbox._apply 一份、这里一份）必然分叉，而且
+    投影被绑死在 Web 宿主上（CLI / 测试都拿不到）。所以这里只把值对象摊平成
+    JSON：id 给前端去重与操作、text 给显示、placement 给分区渲染、
+    rpc_id 给本地回显做原子交接。
+
+    分区渲染（对齐 DSH）：placement='queued' 进输入框上方的队列区；
+    placement='steering' 画在**消息流尾部**（pending 气泡 + 待处理标记）——
+    未 claim 的消息都没有 seq 位置，所以既不能插进流中间，也不能靠锚点猜。
+    """
+    return [
+        {'id': item.id, 'text': _first_text_of(item.message),
+         'placement': item.placement, 'rpc_id': item.rpc_id}
+        for item in agent.inbox.queued_items()
+    ]
 
 
 def _open_session(sid: str, *, allow_missing: bool) -> dict:
@@ -385,6 +441,7 @@ def _open_session(sid: str, *, allow_missing: bool) -> dict:
         'id': sid,
         'history': _history_payloads(seat.session),
         'todos': fold_todos(seat.session) or [],  # 当前 todo 投影：切换会话时恢复 dock
+        'queue': _queue_rows(seat.agent),          # 待处理队列投影：切换会话时恢复队列区
         'context': _context_payload(seat.session),  # 上下文占用：切换会话时恢复圆环
     }
 
@@ -464,11 +521,12 @@ def init_web(workspace: Path, fake: bool = False, model: str = 'deepseek-v4-flas
     _open_session(sid, allow_missing=True)
 
 
-def event_to_payload(event, session: Session | None = None) -> dict | None:
+def event_to_payload(event, session: Session | None = None, agent=None) -> dict | None:
     """会话事件 → 前端最小协议（只挑前端关心的；其余事件前端不渲染）。
 
-    session 参数：turn/end 附带的 context 属于"这个事件的会话"（并发下
-    多个会话各自跑，不能读全局焦点会话的占用）——SSE 循环按 seat 传入。
+    session / agent 参数都是"这个事件属于哪个会话"的定位：turn/end 附带的
+    context 读 session，agent/inbox/spliced 的队列快照读 agent.inbox——并发下
+    多个会话各自跑，绝不能读全局焦点会话的状态。SSE 循环按 seat 传入。
 
     统一投影模型的协议：chunk/reasoning/tool_call 都带 turn/step，前端
     据此把事件挂到对应 assistant 节点（不再靠"当前块"猜）。turn/start
@@ -476,14 +534,28 @@ def event_to_payload(event, session: Session | None = None) -> dict | None:
     """
     if event.type == 'turn/start':
         return {'type': 'turn_start', 'turn': int(event.data['turn'])}
+    if event.type == 'request/header':
+        # 请求边界帧（issue #4 ③）：同一步内工具循环会有多次模型请求，前端
+        # 据此在节点内开新的"请求块"（关闭上一个 assistant 节点再建新的），
+        # 让思维链/文本/工具按"每次请求"分开——与历史路径（每条
+        # assistant/message = 一次请求）对齐。
+        data = event.data if isinstance(event.data, dict) else {}
+        return {'type': 'request_start',
+                'turn': int(data.get('turn', 0)),
+                'step': int(data.get('step', 0))}
     if event.type == 'user/message' and event.surface_op == 'append':
         # 真人发言帧（surface replace 的 checkpoint 除外——它独立成卡）。
         # 文本取第一条 text block；纯工具结果的 user 消息没有 text，不发帧
         # （工具结果显示由 tool/result 事件驱动）。turn 由前端用最近一次
         # turn_start 推导（user/message 事件本身不带 turn）。
+        # 带 message_id + rpc_id：前端据此把这个提交从"待处理"换成真身
+        # （steering 气泡在流尾就地转正、本地回显在同一次渲染里消失）。
         text = _first_text_of(event.data)
         if text:
-            return {'type': 'user_message', 'text': text}
+            source = getattr(event.data, 'source', None)
+            return {'type': 'user_message', 'text': text,
+                    'message_id': event.data.id,
+                    'rpc_id': getattr(source, 'rpc_id', '')}
         return None
     if event.type == 'assistant/chunk':
         text = event.data['chunk']['text']
@@ -509,6 +581,10 @@ def event_to_payload(event, session: Session | None = None) -> dict | None:
         # 常驻 dock 的实时更新：模型每次重写清单，前端面板跟着变
         todos = event.data.get('todos') if isinstance(event.data, dict) else None
         return {'type': 'todo_update', 'todos': todos or []}
+    if event.type == 'agent/inbox/spliced' and agent is not None:
+        # 队列区实时更新（对齐 DSH QueueDock）：入队/认领/撤回都落 spliced，
+        # 前端据此显示"待处理消息"（未 claim 不进消息流）。
+        return {'type': 'queue_update', 'queue': _queue_rows(agent)}
     if event.type == 'turn/end':
         # 回合结束附带上下文占用（圆环数据）：真实 usage 估算 / 1M 窗口。
         # 用事件所属会话的占用（并发隔离：不要读全局焦点会话的）
@@ -663,6 +739,7 @@ def history(sid: str | None = None) -> dict:
     return {
         'history': _history_payloads(seat.session),
         'todos': fold_todos(seat.session) or [],
+        'queue': _queue_rows(seat.agent),
         'context': _context_payload(seat.session),
     }
 
@@ -683,6 +760,9 @@ async def chat(request: Request) -> StreamingResponse:
     sid = body.get('sid') or _current_sid
     seat = _seats.get(sid) or _open_session_seat(sid, allow_missing=True)
     session, agent = seat.session, seat.agent
+    # 提交身份（对齐 dsh 的 prompt requestId）：前端铸的 uuid，落到 durable
+    # 消息 source 上；前端据此把"本地回显"原子换成真身。
+    request_id = (body.get('request_id') or '').strip()
 
     queue: asyncio.Queue = asyncio.Queue()
     unsubscribe = session.on_event(lambda event: queue.put_nowait(event))
@@ -703,7 +783,7 @@ async def chat(request: Request) -> StreamingResponse:
 
     async def run_agent() -> None:
         try:
-            agent.followup(message)
+            agent.followup(message, rpc_id=request_id)
             await agent.when_idle()
         finally:
             await queue.put(DONE_MARKER)
@@ -724,7 +804,7 @@ async def chat(request: Request) -> StreamingResponse:
                     # Web approval 请求（钩子直接放的自定义载荷，非 session 事件）
                     yield f'data: {json.dumps(item, ensure_ascii=False)}\n\n'
                     continue
-                payload = event_to_payload(item, session)
+                payload = event_to_payload(item, session, agent)
                 if payload is None:
                     continue
                 if payload['type'] == 'turn_start':
@@ -780,8 +860,51 @@ async def steer(request: Request) -> dict:
         # 但 agent 已 idle——插队入队后事件会没人读（流即将关闭）。拒绝，
         # 前端会把输入放回，等回合真正结束后走 /chat。
         raise HTTPException(409, 'agent 已空闲——回合即将结束，请稍后用普通消息')
-    seat.agent.steer(message)
-    return {'ok': True, 'sid': sid, 'queued': 'next-step'}
+    message_id = seat.agent.steer(message, rpc_id=(body.get('request_id') or '').strip())
+    # 返回消息 id + 队列投影：前端把消息画在**消息流尾部**（pending 气泡 +
+    # 待处理标记，对齐 DSH 的 pending-steering）——未 claim 的消息还没有 seq
+    # 位置，所以恒定贴尾、绝不往流中间插锚点；claim 后 user_message 帧带同
+    # 一个 id/rpc_id，气泡就地转正、本地回显在同一次渲染里消失。
+    return {
+        'ok': True,
+        'sid': sid,
+        'queued': 'next-step',
+        'message_id': message_id,
+        'queue': _queue_rows(seat.agent),
+    }
+
+
+@app.post('/queue/update')
+async def queue_update(request: Request) -> dict:
+    """队列项操作（对齐 DSH 的 `session.updateQueue(itemId, QueueAction)`）。
+
+    body: {sid?, item_id, action: {'kind': 'edit'|'remove'|'steer', 'text'?}}
+    DSH 的 edit 带 `content: ContentBlock[]`；我们只有文本框，所以收 `text`
+    （差异记在 AGENTS.md，语义一致：改的是还没进模型记忆的那条消息）。
+
+    返回 HTTP 200 + `ok`：并发下"那条已经不在了"是**正常收敛**而不是错误
+    （它可能刚好被 claim 掉了），与 dsh 的 `session/queue-item-not-found`
+    静默收敛一致——前端据此不弹错、只按最新快照重画。
+    """
+    _check_init()
+    body = await request.json()
+    item_id = (body.get('item_id') or '').strip()
+    action = body.get('action') or {}
+    kind = action.get('kind') if isinstance(action, dict) else None
+    if not item_id:
+        raise HTTPException(400, 'item_id must not be empty')
+    if kind not in ('edit', 'remove', 'steer'):
+        raise HTTPException(400, f'unknown queue action: {kind!r}')
+    text = (action.get('text') or '') if kind == 'edit' else ''
+    if kind == 'edit' and not text.strip():
+        raise HTTPException(400, 'edit requires non-empty text')
+    sid = body.get('sid') or _current_sid
+    seat = _seats.get(sid)
+    if seat is None:
+        raise HTTPException(404, f'session {sid!r} not open — switch to it first')
+    code = seat.agent.update_queue(item_id, kind, text)
+    return {'ok': code == 'ok', 'code': code, 'sid': sid,
+            'queue': _queue_rows(seat.agent)}
 
 
 @app.post('/compact')

@@ -3,18 +3,27 @@
 先记账后投影：每次改动先把 spliced 事件落日志，再改内存列表。
 进程重启后，构造时重放日志里的 spliced 事件即可恢复队列——
 队列不是状态，日志才是，队列只是重放结果。
+
+队列投影（queued_items）也在这里，和 session.derive_messages 并列：
+两者都是"日志 → 不可变投影"的纯函数，只是一个折 surface（模型可见的
+记忆），一个折 _state（还没浮上水面的待处理输入）。**折叠实现只有一份**
+（_apply / _splice 共用同一套 splice 语义），上层（web/cli）只做序列化。
 """
 from __future__ import annotations
 
 from typing import cast
 
 from .session import Session
-from .values import Message
+from .values import Message, QueuedItem, QueuedPlacement, with_text
 
 # 两个队列：
 # next-turn=普通输入（等本轮干完再处理），
 # next-step=插队输入（打断当前步，下一步立刻处理，steer 用）。
 TARGETS = ('next-turn', 'next-step')
+
+# 队列（存在形式）→ placement（语义标签）：语义在前端与日志里都用这个词。
+# 顺序即投影顺序：先普通排队，再插队（前端队列区按此从上到下显示）。
+PLACEMENTS: dict[str, QueuedPlacement] = {'next-turn': 'queued', 'next-step': 'steering'}
 
 
 class InboxNotifications:
@@ -63,6 +72,23 @@ class Inbox:
         """还有没有待处理消息——循环层靠它决定是否继续下一回合。"""
         return bool(self._state['next-turn'] or self._state['next-step'])
 
+    def queued_items(self) -> tuple[QueuedItem, ...]:
+        """待处理消息投影（前端队列区 / 任何宿主的唯一数据源）。
+
+        纯函数式投影：_state 本身就是重放 agent/inbox/spliced 的结果
+        （构造时 _apply 过；_splice 也是"先落日志再同一套语义改内存"），
+        所以这里直接读它——**不再有第二份折叠实现**。此前 web_app 自己
+        重放过一遍 spliced，同一事件类型两份折叠会分叉，且投影落在 web
+        层（CLI 看不到、测试要绕过 web 模块才测得到）。
+
+        顺序：TARGETS 顺序 = 先 next-turn（queued）后 next-step（steering）。
+        """
+        return tuple(
+            QueuedItem(placement=PLACEMENTS[target], message=message)
+            for target in TARGETS
+            for message in self._state[target]
+        )
+
     def append(self, target: str, message: Message) -> None:
         """入队（队尾）。"""
         if target not in TARGETS:
@@ -83,6 +109,58 @@ class Inbox:
         self._splice('next-step', 0, len(self._state['next-step']), [])
         self._splice('next-turn', 0, len(self._state['next-turn']), [])
 
+    def remove(self, message_id: str) -> bool:
+        """按 id 撤回一条尚未认领的消息（队列区 × 按钮）。
+
+        撤回 = 从队列里 splice 掉：走的仍是 _splice 这条唯一通道，
+        所以 spliced 事件（带 outcome='canceled'）照样先落日志——
+        "入队即记账"对撤回同样成立，重放日志不会复活已撤回的消息。
+        返回 False = 没找到（多半已经被 claim 落成 surface 了）。
+        """
+        located = self._locate(message_id)
+        if located is None:
+            return False
+        target, index = located
+        self._splice(target, index, 1, [])
+        return True
+
+    def edit(self, message_id: str, text: str) -> bool:
+        """就地改写一条尚未认领的消息（对齐 dsh QueueAction 的 edit）。
+
+        为什么改是安全的：这条消息还没 claim、没有 surface，改的是"将要
+        成为模型输入的内容"——日志里只有 spliced 痕迹，模型记忆从未见过它。
+        替换保 id（见 values.with_text）：队列项的身份不变，前端那一行不闪。
+
+        实现上是"原地 splice 掉旧的、插入新的"（一次事件，原子），
+        不是两次改动——重放时不会出现"短暂消失"的中间态。
+        """
+        located = self._locate(message_id)
+        if located is None:
+            return False
+        target, index = located
+        message = self._state[target][index]
+        self._splice(target, index, 1, [with_text(message, text)])
+        return True
+
+    def promote(self, message_id: str) -> bool:
+        """把一条排队消息提升为插队（对齐 dsh QueueAction 的 steer）。
+
+        语义：next-turn（等本轮干完）→ next-step（本轮下一步就做）。
+        两次 splice 各自落账（先从 next-turn 摘掉、再追加到 next-step），
+        顺序即因果；摘除那步 discard=False——这不是"丢弃"，是搬家，
+        不该触发 discarded 通知、也不该标 outcome='canceled'。
+        返回 False = 没找到，或它本来就在 next-step（幂等：无变化）。
+        """
+        located = self._locate(message_id)
+        if located is None:
+            return False
+        target, index = located
+        if target != 'next-turn':
+            return False
+        message = self._splice(target, index, 1, [], discard=False)[0]
+        self._splice('next-step', len(self._state['next-step']), 0, [message])
+        return True
+
     def claim(self, target: str, turn: int) -> list[Message]:
         """认领一步的完整批次：先取空整个 next-step，再从 next-turn 取一条。
 
@@ -95,6 +173,17 @@ class Inbox:
         for message in claimed:
             self._notifications.claimed(message, turn)
         return claimed
+
+    def _locate(self, message_id: str) -> tuple[str, int] | None:
+        """按 id 在两条队列里找位置（撤回/改写/提升共用）。
+
+        返回 (target, index)，找不到返回 None（多半已被 claim 落成 surface）。
+        """
+        for target in TARGETS:
+            for index, message in enumerate(self._state[target]):
+                if message.id == message_id:
+                    return target, index
+        return None
 
     def _splice(
         self,

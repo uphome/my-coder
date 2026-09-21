@@ -29,7 +29,7 @@ harness 的四个核心设计：
         loop.py       turn/step 两级循环 + 三个钩子
         │
 状态层  session.py    追加式事件日志（唯一事实源）+ derive_messages 投影
-        inbox.py      双队列 pending 消息（spliced 事件的持久化投影）
+        inbox.py      双队列 pending 消息（spliced 事件的持久化投影 + queued_items 队列投影）
         prompt.py     sections 按 order 拼接 + {{变量}} 严格插值
         registry.py   工具类型：ToolSpec（schema + executor + 模式）
         │
@@ -118,6 +118,30 @@ adopt ：旧事件重放 → 只重建日志与投影，不触发监听、不重
 claim 的批次语义：先取空整个 next-step，再从 next-turn 取一条；
 `discard=False` 表示认领不是丢弃，不触发 discarded 通知。
 
+**队列投影和记忆投影并列，都住状态层**：`Inbox.queued_items()` 折 `_state`
+（重放 spliced 的结果）产出 `QueuedItem(placement, message)`——
+`placement='queued'`（next-turn）/ `'steering'`（next-step）。这和
+`Session.derive_messages()` 是同一种东西：**日志 → 不可变投影的纯函数**，
+只是对象一个是"还没浮上水面的待处理输入"，一个是"模型可见的记忆"。
+
+分层要求：**折叠实现只有一份**（`_apply`/`_splice` 共用同一套 splice 语义），
+上层宿主（web/cli）只做序列化。投影一度被写在 `web_app` 里自己重放
+spliced——同一事件类型两份折叠必然分叉，而且投影绑死在 Web 宿主上
+（CLI/测试拿不到）。
+
+队列项的三个动作也归状态层（`Inbox.edit` / `promote` / `remove`，都走
+`_splice` 先记账后改内存）：`edit` 原地换文案但**保住消息 id**（队列项身份
+不变），`promote` 是 next-turn→next-step 的两步搬家（摘除那步 `discard=False`
+——搬家不是丢弃），`remove` 带 `outcome='canceled'`。`Agent.update_queue`
+把它们包成 DSH 同名的状态码（`ok` / `queue-item-not-found` /
+`steer-unavailable` / `unknown-action`），web 层只做 HTTP 映射。
+
+**提交身份（`rpc_id`）**：前端提交时铸 uuid 随请求上来，落进
+`UserSource.rpc_id`（durable 消息的 source）——于是同一条消息在"队列项"和
+"durable 消息"两个形态下带的是同一个身份，前端靠它把本地回显原子地换成
+真身。它跟着消息走，不需要额外的旁路状态（`QueuedItem.rpc_id` 也只是从
+`message.source` 读出来）。
+
 ### 3.5 被动状态机：wake / 补拉 / when_idle
 
 agent 从不主动干活：谁要跟它说话谁就拍它一下（`_wake`）。
@@ -139,26 +163,44 @@ idle --wake(拍一下)--> running --跑空 inbox--> idle
 
 ```
 turn 循环（外层，run_turn）     完成条件：inbox 没货 / blocked / 取消 / 出错
-   每循环一次：claim 一批消息 → 开一个 step → 干完
-step 循环（内层，_run_step）    完成条件：模型给出纯文本 / max-tokens
-   每循环一次：组请求 → 流式 → 有工具调用就执行 → 回来再调
+   每循环一次：claim 一批消息 → 开一个 step → 干完，再转一圈
+step（_run_step）               **只发一次模型请求**（+ 它发起的工具调用）
+                                返回 None = 有工具调用、回合还没收尾
 ```
 
-> 外层循环回答"还有没有任务"，内层循环回答"这次应答完没完"。
+> 外层循环回答"还有没有任务"，step 回答"这一次请求得到什么"。
+> **工具循环本身由外层循环驱动**——这是 harness 的粒度
+> （`core/agent-loop/src/agent.ts` 的 `step()` 发完一次请求就 `return`）。
+
+**为什么 step 必须是一次请求**（2026-09 实测教训）：插队消息进 next-step 后
+要等下一次 `claim` 才浮上水面，而 claim 就在外层循环每次循环的开头。若把
+**整段工具循环**算作一个 step（旧实现：`_run_step` 内部反复模型↔工具），插队
+就得等整段自主运行结束——长任务里是几分钟甚至永不。真实日志：一条插队消息在
+next-step 里躺了 2 分 40 秒（期间 50+ 次工具调用、`step` 恒为 1），最后被
+`cancel` 清掉（`outcome='canceled'`），模型从头到尾没见过它——用户看到的现象
+就是"插入信息不起作用"。
 
 关键点：
 - 第 1 步认领 next-turn，后续步认领 next-step
 - 认领到的消息在循环里落成 `user/message` surface 事件——从"水下"队列
   载荷变成模型记忆
-- 工具结果**只落日志**，没有"把结果发给模型"的代码——回到 while 顶部，
+- `end_reason is None` = 上一步发起了工具调用、回合还没收尾：即使这一步
+  claim 为空也要继续发请求，把工具结果送回模型
+- 工具结果**只落日志**，没有"把结果发给模型"的代码——下一个 step 组请求时
   下一次 `derive_messages()` 自动带上。循环不保存对话状态，只写日志，
   记忆自己浮现
 - 日志顺序就是因果顺序：step/start → user/message → request/header →
   chunks → assistant/message → tool/call → tool/result → step/end
+  （`step/start` 与 `request/header` 现在 1:1，除非 `request_error` 钩子重试）
+- max-tokens 有粘性：某步被截断后，后续步正常完成也不降级
 - turn/end 五种结局：completed / blocked / aborted / error / max-tokens；
   aborted 和 error 记完账后必须重新抛
 - config 三级 fallback：request 钩子 > agent.options > 上次 request/header
   （resume 恢复模型路由）
+
+> 代价与收益：step 变细后日志事件更多（一次请求一组 step/start…step/end），
+> 换来的是**插队延迟从一个工具循环降到一次模型往返**、停止更及时，以及将来
+> guard（重复工具提醒 / 单次调用超时）有了天然的"每请求卡点"。
 
 ### 3.7 决策走钩子：循环是骨架，钩子是关节
 
@@ -261,10 +303,23 @@ JSON 没有类型信息，用 `$xxx` 前缀 key 做类型标记：`$text`/`$tool
 - **工具注册的两份用途**：ToolSpec 把"给模型看的 schema"和"给自己跑的
   executor"绑在一个对象里，漂移在结构上不可能——模型看到的和系统执行
   的是同一个东西的两面
+- **出站辅助请求也要记账**：`web_search` 会向 DeepSeek 的搜索端点发一条
+  **独立**的模型请求（不属于会话上下文）。派发前先落一条痕迹事件
+  `web/search`（query / endpoint / model / max_uses），**绝不含 key**——
+  对齐 DSH 的 `web/deepseek-search-llm-request`（"模型可见的辅助输入不能
+  逃出日志"）。配置是一个 `SearchConfig` 值对象、由工具层解析一次后
+  **trace 与真实请求共用**：否则日志可能记一个端点、请求打到另一个
+  （而且 `register(endpoint=...)` 这类覆盖会静默失效）
 - **每次请求都带全部工具 schema**：模型在请求间无状态，工具描述是每轮
   的固定 token 成本——进化时加工具要算 token 账
 - **提示词每回合快照一次**：`assemble` 在 turn 开头求值，整个 turn 内
   system 恒定，可预期、可调试
+- **提示词分三层，别互串**：通用规则（`identity`/`persona`/`discipline`）、
+  工具专属规则（`tool:*`）、技能目录（`skill:*`）。通用规则的作用域是"任何工具、
+  任何任务"——换工具仍然成立；工具规则换个工具就该失效。混起来两种坏结果：通用段
+  塞工具细节 = 每轮都付的噪声；工具坑写进通用段 = 失去作用域、换个工具还挂着。
+  维护动作是单向的：**反复被踩的坑从文档上移到通用段**（文档只有愿意读的 agent
+  才看得到，system 才是每轮都生效的通道）
 - **prompt sections 用 order 数值排序**：主序按 order 升序、平局按名字；
   factory.py 用 -100/0/110 间隔留插队空间。排序本身是架构性的（插件插队），
   长提示词下首因/近因效应才变成真实的调优手段
@@ -291,9 +346,21 @@ JSON 没有类型信息，用 `$xxx` 前缀 key 做类型标记：`$text`/`$tool
   assistant 文本块如何平滑更新"，`_raw/_seg` 状态只活在 DOM 上，不再是
   会话事实的一部分——任何时刻全量重画都一致。
 - 后端配合：`event_to_payload` 透传 turn/step、SSE 补 `turn_start` /
-  `user_message`（带 turn）帧；设计注记见 `web/PROJECTION_DESIGN.md`。
-- todo dock / context 面板 / approval 卡片**不进**本投影（独立订阅、即时
-  UI），保持现状。
+  `user_message`（带 turn + message_id + 提交身份 rpc_id）/ `queue_update` 帧；
+  设计注记见 `web/PROJECTION_DESIGN.md`。
+- **待处理消息按 placement 分区，恒定贴尾**（都不进 `nodes` 投影）：
+  `queued`（next-turn）画在输入框上方的 `#queue-dock`；`steering`（next-step）
+  画在消息流尾部 `#messages > .flow-tail` 的 pending 气泡。未 claim 的消息没有
+  seq 位置，**往流中间插只能靠 `(turn,step)` 锚点猜顺序（上一版的位置 bug 就
+  是这么来的）**；贴尾 + claim 后 durable 节点落到真实 seq 位置，位置语义天然
+  正确。对齐 DSH（`agent.md` §5 有源码对照与勘误：DSH 的 steering **也是**
+  画在流尾，只有 queued 进 QueueDock）。
+- **本地提交回显**（`pendingSubmissions`，对齐 DSH `PendingSubmission`）：提交
+  当帧就在尾部画出来，durable 内容出现（带同一个提交身份 `rpc_id`）时在同一次
+  渲染里被隐藏、随后退休——所以"发出去没反应"和"重复画两条"都不会发生。
+  回显只活在客户端内存：刷新/重连只从 durable 事件重建。
+- todo dock / context 面板 / 队列区 / **尾部待处理气泡** / approval 卡片
+  **不进**本投影（独立订阅、即时 UI）。
 
 ---
 
@@ -334,7 +401,7 @@ JSON 没有类型信息，用 `$xxx` 前缀 key 做类型标记：`$text`/`$tool
 |---|---|
 | `values.py` | 值层：不可变 Message/SessionEvent + tagged dict 编解码 |
 | `session.py` | 日志 + surface 折叠投影（append / derive_messages / adopt / request_header） |
-| `inbox.py` | 双队列（next-turn / next-step）+ claim 语义 + 持久化重放 |
+| `inbox.py` | 双队列（next-turn / next-step）+ claim 语义 + 持久化重放 + `queued_items()` 队列投影 |
 | `prompt.py` | sections 按 order 拼接 + `{{var}}` 严格插值 |
 | `registry.py` | 工具类型（ToolSpec：schema + executor + 模式 + 超时 + requires_approval） |
 | `llm.py` | 能力层：SSE 流式客户端 + FakeLlm + wire 双向翻译（含思维链字段解析） |
@@ -342,15 +409,15 @@ JSON 没有类型信息，用 `$xxx` 前缀 key 做类型标记：`$text`/`$tool
 | `loop.py` | turn/step 两级循环 + 流组装 + 工具分组执行 + 思维链痕迹落盘 + 四层兜底 |
 | `agent.py` | 被动状态机：wake / kick / when_idle / cancel |
 | `persistence.py` | JSONL 追加写 + 重放读 |
-| `tools/` | 应用工具（file_io 读写/编辑、search grep/glob、shell bash、todo）+ `build_tools(workspace)` |
+| `tools/` | 应用工具（file_io 读写/编辑、search grep/glob、shell bash、todo、**web_search 联网搜索**）+ `build_tools(workspace)` |
 | `sandbox.py` | workspace 路径边界（轻量沙箱：归一化 + 前缀匹配） |
 | `ui.py` | 终端渲染（_render_event / _paint，UI 是日志投影） |
 | `factory.py` | build_agent / load_env（CLI 与 Web 共用组装） |
 | `cli.py` | CLI 入口（单次任务 / 无任务参数进 REPL） |
-| `web_app.py` | Web UI（FastAPI + SSE：会话/标题/approval/手动压缩/steer 插队；seat 化并发隔离；事件透传 turn/step + turn_start/user_message 帧供前端投影） |
+| `web_app.py` | Web UI（FastAPI + SSE：会话/标题/approval/手动压缩/steer 插队；seat 化并发隔离；事件透传 turn/step + turn_start/user_message（带 message_id/rpc_id）/queue_update 帧供前端投影；队列项操作 `POST /queue/update`） |
 | `compaction.py` | 上下文压缩引擎（四步事务 + checkpoint + 会话 token 累计账） |
 | `show_memory.py` | 教学脚本：重放日志展示"记忆 = 投影" |
-| `tests/test_demo.py` | 65 个架构测试 |
+| `tests/test_demo.py` | 77 个架构测试 |
 
 ---
 
@@ -428,7 +495,7 @@ JSON 没有类型信息，用 `$xxx` 前缀 key 做类型标记：`$text`/`$tool
 | 学到并实现 | 简化/未实现（进化时的候选增量） |
 |---|---|
 | surface 事件标记 + 纯函数折叠投影；**replace 区间遮蔽（位置语义，compaction 用）** | 遮蔽区间溯源校验 |
-| Inbox 双队列 + claim 语义 + 持久化重放；**steer 插队（同回合 next-step）** | 多宿主并发仲裁、steer 中断"当前正在跑的 step" |
+| Inbox 双队列 + claim 语义 + 持久化重放；**steer 插队（同回合 next-step）；step = 一次模型请求（工具循环由 turn 循环驱动，插队一次往返内被吸收）** | 多宿主并发仲裁、turn-stopping 钩子（`agent/turn-stopping`）、`concludesTurn` 工具结果提前收尾 |
 | sections + 严格 `{{var}}` 插值 | 作用域链 shadow、complete 段 |
 | 工具分组执行 + 坏 JSON 兜底；**approval/权限桥 + `[exit code: N]` 跨调用准则** | OS 级沙箱、事件瀑布审批 |
 | request/header 落日志 + resume 恢复路由；**checkpoint 策略（四步事务 + 结构化摘要）** | 持久化后端抽象、token 预算选段 |

@@ -33,6 +33,25 @@ READ_FILE_MAX_CHARS = 16000
 # 这是最后的安全网；具体工具（read_file/bash 等）可以有更早、更精确的预算。
 TOOL_RESULT_MAX_CHARS = 20000
 
+# web_search 预算与端点（对齐 DSH packages/web/web-search-deepseek）：
+# 搜索能力由 DeepSeek 官方在服务端提供（原生 web_search_20250305 服务端工具），
+# 我们只做"发请求 + 解析结构化结果"——绝不自己抓网页、绝不从正文抠 URL。
+#
+# 注意端点：这是 DeepSeek 的 **Anthropic 兼容** Messages 端点（不是
+# chat-completions 的 DEEPSEEK_BASE_URL），只共享 DEEPSEEK_API_KEY，
+# 不复用那个环境变量当 base（DSH provider.ts 原话如此）。
+WEB_SEARCH_BASE_URL = 'https://api.deepseek.com/anthropic/v1'
+WEB_SEARCH_MODEL = 'deepseek-v4-flash'
+WEB_SEARCH_MAX_USES = 5       # 服务端工具每次请求最多搜索几次（进请求体，不是 schema）
+WEB_SEARCH_MAX_RESULTS = 5    # 合并去重后返回给模型的结果条数上限
+WEB_SEARCH_MAX_QUERIES = 4    # 一次工具调用允许的 query 条数上限（DSH WEB_SEARCH_MAX_QUERIES）
+# 摘要上限：那段摘要是搜索请求里的**辅助模型**写的转述（实测一条 ≈2.4k 字符），
+# queries 拉满 4 条最坏 ~10k 字符；截断保上下文（超出会附一句截断标记）。
+WEB_SEARCH_SUMMARY_MAX_CHARS = 3000
+# 一次搜索 = 一个完整模型轮次（服务端工具要真去搜、还要生成答复），
+# 别按普通 HTTP 给 10s——60s 量级才够（DSH 也把预算交给调用方 timeoutMs）。
+WEB_SEARCH_TIMEOUT_S = 60.0
+
 # 上下文压缩默认阈值：deepseek-v4 窗口 1M token，过半（0.5M）就自动压
 # 旧回合，给后续回合留足空间（摘要请求本身也吃窗口）。显式 0 可关闭。
 DEFAULT_COMPACT_TOKENS = 524288  # 1M 窗口的一半
