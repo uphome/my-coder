@@ -149,7 +149,8 @@ compaction.py（上下文压缩引擎）
 > step 的粒度是"一次请求"而不是"整段工具循环"——这样插队消息能在**一次模型
 > 往返内**生效（见 `ARCHITECTURE.md` §3.6 的实测教训）。
 
-所有事件追加写入 `.sessions/<id>.jsonl`；恢复 = 重放，零额外代码。
+所有事件追加写入 `.sessions/<id>.jsonl`；恢复 = 重放（+ 自愈：补上崩溃留下的悬空
+工具调用，见 `recovery.py`），零额外状态代码。
 
 ## 五条不变式
 
@@ -192,12 +193,13 @@ compaction.py（上下文压缩引擎）
 | `session.py` | 日志 + surface 折叠投影（append / derive_messages / adopt / request_header） |
 | `inbox.py` | 双队列（next-turn / next-step）+ claim 语义 + 持久化重放 |
 | `prompt.py` | sections 按 order 拼接 + `{{var}}` 严格插值（未注册/无值抛错） |
-| `registry.py` | 工具类型（ToolSpec：schema + executor + 模式 + 超时 + requires_approval） |
+| `registry.py` | 工具类型（ToolSpec：schema + executor + 并发模式 + 卸载声明 + 超时 + requires_approval） |
 | `llm.py` | OpenAI 兼容 SSE 流式客户端 + 可脚本化 FakeLlm + wire 格式纯函数（含思维链字段解析） |
 | `hooks.py` | pre_step / request / request_error 三钩子 + approval 钩子的类型 |
 | `loop.py` | turn/step 两级循环 + 流组装 + 工具分组执行 + 思维链痕迹落盘 |
 | `agent.py` | 被动状态机：wake / kick / when_idle / cancel |
 | `persistence.py` | JSONL 追加写 + 重放读 |
+| `recovery.py` | 会话自愈：恢复时给崩溃留下的悬空工具调用补 is_error 合成结果 + 修复痕迹 |
 | `tools/` | 应用工具（file_io.py 读/写/编辑、search.py grep/glob、shell.py bash、todo.py、**web_search.py 联网搜索**）+ `build_tools(workspace)` 组装 |
 | `sandbox.py` | workspace 路径边界（归一化 + 前缀匹配的轻量沙箱） |
 | `ui.py` | 终端渲染（_render_event / _paint，UI 是日志投影） |
