@@ -22,6 +22,17 @@ GLOB_MAX_RESULTS = 100   # glob 内联保留的最大路径数
 # 截断提示教模型把大输出重定向到文件，再用 read_file 分页读。
 BASH_MAX_OUTPUT_CHARS = 8000
 
+# read_file 预算：默认 200 行，单次最多 2000 行 / 16000 字符。
+# 字符预算故意小于 registry 的 TOOL_RESULT_MAX_CHARS，给截断/导航提示留余量，
+# 避免 read_file 的提示又被 registry 通用截断盖掉。
+READ_FILE_DEFAULT_LIMIT = 200
+READ_FILE_MAX_LIMIT = 2000
+READ_FILE_MAX_CHARS = 16000
+
+# registry 层统一工具结果上限：任何工具返回内容超过它就截断。
+# 这是最后的安全网；具体工具（read_file/bash 等）可以有更早、更精确的预算。
+TOOL_RESULT_MAX_CHARS = 20000
+
 # web_search 预算与端点（对齐 DSH packages/web/web-search-deepseek）：
 # 搜索能力由 DeepSeek 官方在服务端提供（原生 web_search_20250305 服务端工具），
 # 我们只做"发请求 + 解析结构化结果"——绝不自己抓网页、绝不从正文抠 URL。
