@@ -135,7 +135,8 @@
   `tool/result`（surface，`is_error`，`skipped: user did not approve`）——
   模型**必须**看到"没执行"，否则以为工具跑过了（模型可见 ⟺ 可重建）
 - **拒绝是结果不是失败**：模型拿到 skipped 会自己调整方案，循环正常继续
-- 三个敏感工具同时声明 `execution_mode='sequential'`（确认是交互，逐个来）
+- 敏感工具声明 `requires_approval=True`，并且**独占执行**（2026-09 起
+  `execution_mode` 默认就是 `'sequential'`，fail-closed：并发许可要自己声明）
 - harness 对照：harness 用 `fs/write-intent` / `fs/edit-intent` 事件瀑布
   （waterfall）实现审批桥；demo 用"声明 + 钩子"简化版，功能等价
 

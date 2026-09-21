@@ -192,6 +192,8 @@ next-step 里躺了 2 分 40 秒（期间 50+ 次工具调用、`step` 恒为 1�
 - 日志顺序就是因果顺序：step/start → user/message → request/header →
   chunks → assistant/message → tool/call → tool/result → step/end
   （`step/start` 与 `request/header` 现在 1:1，除非 `request_error` 钩子重试）
+- 日志里的 `tool/call` / `tool/result` 顺序**恒等于模型请求的顺序**，即使同一步
+  里多个工具并行跑完的先后不同（按模型顺序提交，见 §3.15）
 - max-tokens 有粘性：某步被截断后，后续步正常完成也不降级
 - turn/end 五种结局：completed / blocked / aborted / error / max-tokens；
   aborted 和 error 记完账后必须重新抛
@@ -230,10 +232,11 @@ demo 运行时挂的第一个钩子是 `request_error`（上下文压缩的溢�
 | 坏 JSON（模型给了坏参数） | loop.py——连 execute 都不进 |
 | 参数校验失败（缺 required / 多参数） | registry.py 抛 ValueError → loop.py 捕获降级 |
 | 工具执行抛异常 | loop.py 捕获降级 |
-| 工具卡死超时 | tools/ 包 wait_for 兜底 |
+| 工具卡死超时 | tools/ 包 wait_for 兜底（**同步阻塞的 executor 要先声明 `offload`，否则 wait_for 的定时器永远不会触发**，见 §3.15） |
+| 用户取消（组执行中途） | loop.py 给已请求但没结果的调用补一条 is_error 合成结果——失败要降级成结果，取消也不例外（见 §3.15） |
 
 模型看到 `ValueError: missing required argument` 这类结果，自己知道怎么
-改。**任何异常都不能越过 `_run_group` 炸掉循环**，唯一能打断的只有用户
+改。**任何异常都不能越过 `_run_one` 炸掉循环**，唯一能打断的只有用户
 的取消。原则：失败被局部化、显式化，变成模型可以理解和修复的输入。
 
 ### 3.9 取消单向传播：CancelledError 即 AbortSignal
@@ -242,12 +245,13 @@ Python 的 `asyncio.CancelledError` 扮演 harness AbortSignal：
 
 ```
 cancel() → driver.cancel() → 异常沿 await 链穿过
-_run_group → _run_step → run_turn（记 turn/end aborted 后 re-raise）
-→ _kick（吞掉，回 idle）
+_run_one → _run_group（补记账）→ _execute_tool_calls（补记账）
+→ _run_step → run_turn（记 turn/end aborted 后 re-raise）→ _kick（吞掉，回 idle）
 ```
 
 **每一层只记账，不拦截**——记账是义务，拦截是背叛。取消只往一个方向
-传，没人半路吞掉。
+传，没人半路吞掉。"记账"在工具层有具体含义：取消时不能留下**没有结果的
+工具调用**（那会让后续请求的 wire 格式非法），见 §3.15。
 
 ### 3.10 能力层：双向翻译 + StreamChunk 契约
 
@@ -361,6 +365,61 @@ JSON 没有类型信息，用 `$xxx` 前缀 key 做类型标记：`$text`/`$tool
   回显只活在客户端内存：刷新/重连只从 durable 事件重建。
 - todo dock / context 面板 / 队列区 / **尾部待处理气泡** / approval 卡片
   **不进**本投影（独立订阅、即时 UI）。
+
+### 3.15 工具并发调度：声明、连续段、有序提交、取消补记账
+
+执行策略全部来自注册声明（不变式 4），循环层只读不猜。五条规则与 harness
+`core/agent-loop/src/tool-calls.ts` 一一对应：
+
+| 规则 | 我们 | harness |
+|---|---|---|
+| **并发许可 fail-closed** | `ToolSpec.execution_mode` 默认 `'sequential'`，只有显式声明才并行；非法值注册时抛错 | `executionMode()`：未声明 / 未注册 / 判定抛异常一律 `exclusive`，只有精确 `true` 才算 `parallel`（`isConcurrencySafe` 还是**看参数的谓词**，我们暂用静态声明） |
+| **分组按连续段** | `_run_group.fill()` 里的屏障（并行段撞上独占调用就停手），回传 `consumed` | `fillPool()` 里 `nextToStart > 0 && mode==='parallel' && executionMode(next)!=='parallel'` → `break`，`runGroup` 返回 `{consumed: started}` |
+| **并发池上限** | `MAX_PARALLEL_TOOL_CALLS = 4` | `agentLoop.config.maxParallelToolCalls` |
+| **结果按模型顺序落盘** | `slots` + `commit_ready()`：队首连续就绪才 `append` | `commitReady()`：`committed` 只跨连续槽位推进 |
+| **取消补合成结果** | `_run_group` 的 `except CancelledError` + `_record_aborted_calls`（补 `tool/call` + is_error 的 `tool/result`） | `appendSkippedToolCall()` |
+
+**未注册的工具名也走 fail-closed**：`ToolRegistry.mode()` 对不存在的工具返回
+`'sequential'` 而不是抛 KeyError。分组发生在**执行之前**——在这里抛错的后果不是
+"报个错"，而是 `_run_one` 里那段专门把"工具未注册"降级成 is_error 结果的兜底
+永远没机会执行：整回合没有 `turn/end`，日志里只留下"请求了工具却没有结果"的
+assistant 消息（wire 非法），模型什么都看不到（实测旧行为：`driver error: tool
+'no_such_tool' is not registered`，`turn/end` 缺失）。对齐 harness：`executionMode()`
+对未注册工具同样返回 `exclusive`，调用照旧派发，失败在派发阶段变成结果。
+
+为什么"按模型顺序落盘"重要：并发只该改变**谁先跑完**，不该改变**日志顺序**。
+顺序一乱，同一段对话每次重放出的前缀就不同——前缀缓存命中率下降、测试不稳定、
+前端除了按 call_id 配对还得处理"结果早于调用"的畸形序列。
+
+为什么取消必须补记：取消是用户随时可做的操作。若取消落在工具组执行中途，
+模型请求过的调用会没有 `tool/result`，`derive_messages` 里就留下"带 tool_calls
+却没有结果"的 assistant 消息——wire 格式要求每个 tool_call 都有对应的工具消息，
+**下一轮请求直接 400**。注意 `tool/skipped` 只是审计痕迹（非 surface 事件），
+进不了模型记忆，所以它不算记账。harness 先 drain 已派发的调用（拿到真结果）
+再给剩下的补合成结果；**我们同样先 drain**：取消前已经跑完的调用认它的真结果，
+拿不到结果的才补合成结果，文案按是否已派发分成 `aborted before dispatch` /
+`aborted while running`。drain 那一步挡住二次取消（连点两次停止）——它不能让
+后面的补记账被跳过，否则又回到"有调用没结果"。
+（旧实现两边都没有：取消时两条 `tool/call` 已落盘、`tool/result` 一条没有。）
+实测暴露面：真实会话 69 个多调用批次里有 7 个是 `[parallel…, sequential…]`
+形状，旧实现会把它们整批塞进同一个并发池。
+
+**两根正交的轴**：`execution_mode` 回答"能不能与其他调用并发"，`offload`
+回答"会不会阻塞事件循环"。二者独立，按工具的真实性质推导：
+
+| 工具 | 并发 | 卸载 | 依据 |
+|---|---|---|---|
+| read_file / list_files / grep / glob | ✅ | ✅ | 只读 + 同步盘 I/O |
+| web_search | ✅ | ✗ | 只读 + 真异步（httpx 本身有挂起点） |
+| todo_write | ✗ | ✗ | 写日志投影（共享状态），且无 I/O |
+| bash / edit / write_file | ✗ | ✗ | 要人工把关；bash 本就异步（子进程要绑在运行中的循环上） |
+
+不卸载的同步 executor 会让 `asyncio.wait_for` 的超时**永远不触发**：协程体
+没有挂起点，会一口气跑完才把控制权还给事件循环，定时器回调根本没机会执行——
+超时保护形同虚设，同进程的 SSE / 审批也被卡住。这一轴是 Python 侧的本地问题
+（harness 在 Node 上，`fs/promises` 天然不阻塞），所以是我们加的，不是抄的。
+卸载的边界同样是硬约束：**只给纯 I/O**——换了线程，`session`/`agent` 的内存
+状态就没人在循环线程上守了（不变式 3 的"入队即记账"依赖单线程串行 append）。
 
 ---
 
@@ -497,7 +556,7 @@ JSON 没有类型信息，用 `$xxx` 前缀 key 做类型标记：`$text`/`$tool
 | surface 事件标记 + 纯函数折叠投影；**replace 区间遮蔽（位置语义，compaction 用）** | 遮蔽区间溯源校验 |
 | Inbox 双队列 + claim 语义 + 持久化重放；**steer 插队（同回合 next-step）；step = 一次模型请求（工具循环由 turn 循环驱动，插队一次往返内被吸收）** | 多宿主并发仲裁、turn-stopping 钩子（`agent/turn-stopping`）、`concludesTurn` 工具结果提前收尾 |
 | sections + 严格 `{{var}}` 插值 | 作用域链 shadow、complete 段 |
-| 工具分组执行 + 坏 JSON 兜底；**approval/权限桥 + `[exit code: N]` 跨调用准则** | OS 级沙箱、事件瀑布审批 |
+| 工具分组执行 + 坏 JSON 兜底；**并发许可 fail-closed + 连续段分组（`consumed`）+ 池上限 + 按模型顺序提交 + 取消补合成结果（§3.15）**；**approval/权限桥 + `[exit code: N]` 跨调用准则** | 按参数的并发谓词（`isConcurrencySafe(args)`）、取消时 drain 已派发调用、OS 级沙箱、事件瀑布审批 |
 | request/header 落日志 + resume 恢复路由；**checkpoint 策略（四步事务 + 结构化摘要）** | 持久化后端抽象、token 预算选段 |
 | 三个钩子（回调版） | 事件总线（emit/serial/waterfall + 作用域过滤） |
 | CancelledError 贯穿 + when_idle 收敛 | 三源 abort 熔合 |

@@ -296,86 +296,199 @@ async def _confirm_approval(agent, name: str, arguments: dict) -> bool:
     return answer.strip().lower() in ('y', 'yes')
 
 
-async def _execute_tool_calls(agent, turn: int, step: int, tool_calls: list[ToolCallBlock]) -> bool:
-    """按工具声明的模式分组执行：parallel 一次全发，sequential 逐个。
+# 取消时补的合成结果文案（对齐 harness appendSkippedToolCall 的措辞）。
+# 两种情况分开写：还没起跑的调用"什么都没发生"，起跑后被取消的调用"可能已经
+# 产生了副作用"——模型据此判断要不要重试，合并成一句话会丢掉这个区别。
+ABORTED_BEFORE_DISPATCH = 'Error: tool call aborted before dispatch'
+ABORTED_WHILE_RUNNING = 'Error: tool call aborted while running'
 
-    分组策略：看批次第一个工具的模式——parallel 就把整批一起跑
-    （asyncio.gather 并发），sequential 就只跑第一个，剩下的等下一轮
-    模型决定。这样循环层不硬编码"全部并行"，模式是注册时的声明。
+# 并发池上限（对齐 harness agentLoop.config 的 maxParallelToolCalls）：
+# 模型一次吐十几个调用时不该把十几个同时打开——尤其 web_search 这种
+# 一次调用就等于"一个完整模型轮次"的工具。池子腾出空位就补下一个。
+MAX_PARALLEL_TOOL_CALLS = 4
+
+
+async def _execute_tool_calls(agent, turn: int, step: int, tool_calls: list[ToolCallBlock]) -> None:
+    """按工具声明的模式分组执行：并行段一次起跑，独占工具逐个跑。
+
+    分组对齐 harness `core/agent-loop/src/tool-calls.ts` 的 `executeToolCalls`：
+    - **每次都用当前队首重新分类**，不预先切分整批（注册表可能在执行期间变化）
+    - 一组实际跑了几个由 `_run_group` 回传（harness 的 `consumed`）：并行段
+      撞上非并发安全的调用会停在它前面，外层从那里**在同一步内**重新开始
+    - 取消时把"已请求但没结果"的调用补齐（见 `_record_aborted_calls`），
+      记账完成后原样放行 CancelledError（不变式 5）
     """
     session = agent.session
     pending = list(tool_calls)
     while pending:
-        first = pending[0]
-        if agent.tools.mode(first.name) == 'parallel':
-            group, pending = pending, []
-        else:
-            group, pending = pending[:1], pending[1:]
-        aborted = await _run_group(agent, turn, step, group)
-        if aborted:
-            for call in pending:
-                session.append('tool/skipped', {'call_id': call.id, 'name': call.name})
-            break
-    return False
+        mode = agent.tools.mode(pending[0].name)
+        group = pending if mode == 'parallel' else pending[:1]
+        try:
+            consumed = await _run_group(agent, turn, step, group, mode)
+        except asyncio.CancelledError:
+            _record_aborted_calls(session, turn, step, pending)
+            raise
+        pending = pending[consumed:]
 
 
-async def _run_group(agent, turn: int, step: int, group: list[ToolCallBlock]) -> bool:
-    """执行一组工具调用，四层兜底全部在这里闭环。
+async def _run_group(agent, turn: int, step: int, group: list[ToolCallBlock], mode: str) -> int:
+    """跑一组工具调用：**并发起跑、按模型顺序落盘、取消不留悬空**。
 
-    先给组里每个调用落 tool/call 痕迹日志，然后并发（组内）执行。
-    run_one 的四层兜底：
+    返回实际消费了几个调用（harness `runGroup` 的 `consumed`）。
+
+    三个机制缺一不可：
+    1. **自限池**（`fill`）：并行段里一旦冒出非并发安全的调用就停手，把它和
+       后面的留给外层重新分类——所以 `[read_file, bash]` 不会被塞进同一个并发池
+       （真实会话实测：69 个多调用批次里有 7 个是这种形状，旧实现全都会被并发
+       调度）。池上限 `MAX_PARALLEL_TOOL_CALLS` 防止一次吐十几个调用全放出去。
+    2. **按模型顺序提交**（`commit_ready`）：谁先跑完不等于谁先落盘——结果先进
+       槽位，等队首连续就绪才 append（harness `commitReady` 的 contiguous slots）。
+       日志顺序因此恒等于调用顺序：模型记忆确定、前缀缓存可复用、前端按 call_id
+       配对也不用处理乱序。
+    3. **取消补记账**：CancelledError 不是"整组作废"——已起跑却拿不到结果的调用
+       要补一条 is_error 结果，否则日志里会留下"请求了工具却没有结果"的
+       assistant 消息（wire 格式非法，恢复后下一轮请求直接 400）。
+
+    单条调用的四层兜底（坏 JSON / 参数不是对象 / 抛异常 / 超时）全在 `_run_one`
+    里降级成结果——它只**返回**结果、不落盘，落盘统一由这里按顺序做。这条分工
+    还顺手解决了取消时"孤儿任务写不回日志"的问题：结果没经手就没人能乱写。
+    """
+    session = agent.session
+    slots: list[Message | None] = [None] * len(group)
+    running: dict[asyncio.Task[Message], int] = {}
+    started = 0
+    committed = 0
+
+    def fill() -> None:
+        """起跑尽量多的调用（受池上限约束）；并行段撞上独占调用就停手。"""
+        nonlocal started
+        while started < len(group) and len(running) < MAX_PARALLEL_TOOL_CALLS:
+            call = group[started]
+            # 屏障：组内第一条总是跑（它就是本组的模式），之后一旦出现非并发
+            # 安全的调用就交给外层重新分类——"连续段"就是这么做出来的
+            if started > 0 and mode == 'parallel' and agent.tools.mode(call.name) != 'parallel':
+                break
+            # tool/call 痕迹事件：turn/step 一并落日志，前端 SSE 靠 (turn,step)
+            # 把工具调用挂到对应 assistant 节点（统一投影按节点定位，不猜"当前块"）
+            session.append('tool/call', {
+                'turn': turn, 'step': step,
+                'call_id': call.id, 'name': call.name, 'arguments': call.arguments,
+            })
+            running[asyncio.create_task(_run_one(agent, call))] = started
+            started += 1
+
+    def commit_ready() -> None:
+        """按模型顺序落盘：只有队首连续就绪的槽位能提交。"""
+        nonlocal committed
+        while committed < started:
+            message = slots[committed]
+            if message is None:
+                break
+            session.append('tool/result', message, surface_op='append')
+            committed += 1
+
+    fill()
+    try:
+        while running:
+            done, _ = await asyncio.wait(set(running), return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                index = running.pop(task)
+                slots[index] = (
+                    _aborted_message(group[index], ABORTED_WHILE_RUNNING)
+                    if task.cancelled() else task.result()
+                )
+            commit_ready()
+            fill()
+    except asyncio.CancelledError:
+        # 取消：先 drain 已起跑的调用，再给拿不到结果的补合成结果
+        for task in running:
+            task.cancel()
+        if running:
+            # drain（harness 语义）：只等它们停下。挡住二次取消（用户连点两次
+            # 停止 / 停止后又关会话）——它不能让下面的补记账被跳过
+            try:
+                await asyncio.gather(*running, return_exceptions=True)
+            except asyncio.CancelledError:
+                pass
+            # 取消前就跑完的调用，认它的真结果——drain 的意义就在这里
+            for task, index in running.items():
+                if not task.cancelled() and task.exception() is None:
+                    slots[index] = task.result()
+        for index in range(started):
+            if slots[index] is None:
+                slots[index] = _aborted_message(group[index], ABORTED_WHILE_RUNNING)
+        commit_ready()
+        raise
+    return started
+
+
+async def _run_one(agent, call: ToolCallBlock) -> Message:
+    """跑一个工具调用，**只返回结果消息**（落盘由 `_run_group` 按模型顺序统一做）。
+
+    四层兜底都在这里闭环：
     1. arguments 坏 JSON → is_error 结果（连 execute 都不进）
     2. arguments 不是对象 → is_error 结果
     3. 工具执行抛异常 → 捕获降级成 is_error 结果
     4. 超时（tools.execute 内部 wait_for 兜底）→ is_error 结果
 
-    唯一能传过这里的异常是 CancelledError（用户取消），
-    它沿 asyncio.gather 的 await 链往上走，由 run_turn 记 aborted。
+    唯一穿得过去的是 CancelledError（用户取消）：它沿 await 链向上走，
+    由 `_run_group` 补记账、`run_turn` 记 aborted。
     """
-    session = agent.session
-    for call in group:
-        # turn/step 一并落日志：前端 SSE 需按 (turn,step) 把工具调用挂到
-        # 对应 assistant 节点（统一投影模型按节点定位，不再靠"当前块"猜）
-        session.append('tool/call', {
-            'turn': turn, 'step': step,
-            'call_id': call.id, 'name': call.name, 'arguments': call.arguments,
-        })
+    try:
+        arguments = json.loads(call.arguments) if call.arguments.strip() else {}
+    except json.JSONDecodeError as error:
+        return create_tool_result_message(call.id, f'invalid JSON arguments: {error}', True)
+    if not isinstance(arguments, dict):
+        return create_tool_result_message(
+            call.id, f'arguments must be a JSON object, got {type(arguments).__name__}', True,
+        )
+    try:
+        spec = agent.tools.get(call.name)
+        if spec.requires_approval and not await _confirm_approval(agent, call.name, arguments):
+            # 拒绝不是失败：落 tool/skipped 痕迹（审计）+ 一条 is_error 结果
+            # （模型必须看到"没执行"，否则以为工具跑过了——模型可见 ⟺ 可重建）
+            agent.session.append('tool/skipped', {
+                'call_id': call.id, 'name': call.name, 'reason': 'not-approved',
+            })
+            return create_tool_result_message(call.id, 'skipped: user did not approve', True)
+        outcome = await agent.tools.execute(call.name, arguments, agent)
+    except Exception as error:  # noqa: BLE001 - 工具失败必须变成 is_error 结果，不能炸掉循环
+        outcome = ToolOutcome(content=f'{type(error).__name__}: {error}', is_error=True)
+    return create_tool_result_message(call.id, outcome.content, outcome.is_error)
 
-    async def run_one(call: ToolCallBlock) -> None:
-        try:
-            arguments = json.loads(call.arguments) if call.arguments.strip() else {}
-        except json.JSONDecodeError as error:
-            message = create_tool_result_message(call.id, f'invalid JSON arguments: {error}', True)
-            session.append('tool/result', message, surface_op='append')
-            return
-        if not isinstance(arguments, dict):
-            message = create_tool_result_message(
-                call.id, f'arguments must be a JSON object, got {type(arguments).__name__}', True,
-            )
-            session.append('tool/result', message, surface_op='append')
-            return
-        try:
-            spec = agent.tools.get(call.name)
-            if spec.requires_approval and not await _confirm_approval(agent, call.name, arguments):
-                # 拒绝不是失败：落 tool/skipped 痕迹（审计） + tool/result surface
-                # 事件（模型必须看到"没执行"，否则以为工具跑过了——模型可见 ⟺ 可重建）
-                session.append('tool/skipped', {
-                    'call_id': call.id, 'name': call.name, 'reason': 'not-approved',
-                })
-                message = create_tool_result_message(call.id, 'skipped: user did not approve', True)
-                session.append('tool/result', message, surface_op='append')
-                return
-            outcome = await agent.tools.execute(call.name, arguments, agent)
-        except Exception as error:  # noqa: BLE001 - 工具失败必须变成 is_error 结果，不能炸掉循环
-            outcome = ToolOutcome(content=f'{type(error).__name__}: {error}', is_error=True)
-        message = create_tool_result_message(call.id, outcome.content, outcome.is_error)
-        session.append('tool/result', message, surface_op='append')
 
-    if len(group) == 1:
-        await run_one(group[0])
-    else:
-        await asyncio.gather(*(run_one(call) for call in group))
-    return False
+def _aborted_message(call: ToolCallBlock, text: str) -> Message:
+    """取消时给没有结果的调用补的合成结果（对齐 harness appendSkippedToolCall）。"""
+    return create_tool_result_message(call.id, text, True)
+
+
+def _record_aborted_calls(session, turn: int, step: int, calls: list[ToolCallBlock]) -> None:
+    """取消时补齐"已请求但没有结果"的调用：先补 tool/call 痕迹，再补 is_error 结果。
+
+    求差集直接读日志（日志是唯一事实源），所以取消发生在组的哪一步都不会重复
+    补记——`_run_group` 已经落过结果的调用在这里自然被跳过。
+    没有这一步，日志里会留下"assistant 请求了 N 个工具、只有 M 条结果"的回合，
+    derive_messages 出来的记忆在 wire 上非法（下一轮请求 400）。取消是用户随时
+    可做的操作，不能靠"取消一般发生在流式阶段、工具早就跑完了"这种概率兜底。
+    """
+    called: set[str] = set()
+    answered: set[str] = set()
+    for event in session.events:
+        if event.type == 'tool/call':
+            called.add((event.data or {}).get('call_id', ''))
+        elif event.type == 'tool/result':
+            source = getattr(event.data, 'source', None)
+            answered.add(getattr(source, 'call_id', ''))
+    for call in calls:
+        if call.id in answered:
+            continue
+        if call.id not in called:
+            session.append('tool/call', {
+                'turn': turn, 'step': step,
+                'call_id': call.id, 'name': call.name, 'arguments': call.arguments,
+            })
+        session.append(
+            'tool/result', _aborted_message(call, ABORTED_BEFORE_DISPATCH), surface_op='append')
 
 
 def _chunk_to_data(chunk: StreamChunk) -> dict:
