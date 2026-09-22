@@ -59,7 +59,9 @@ def register(registry, skills: SkillTable) -> None:
             'required': ['name'],
         },
         execute=skill_tool,
-        # 纯读文件、不碰 agent/session 状态：可并发 + 卸载到线程（同步读盘）
+        # 纯读文件、不碰 agent/session 状态：可并发 + 卸载到线程（同步读盘）。
+        # 它唯一碰的共享状态是那张技能表（`SkillTable`）——那是 host 自己的资源，
+        # 刷新在表内部的锁里串行化（表同时被循环线程的 live 段和这里的工作线程读写）。
         execution_mode='parallel',
         offload=True,
     ))

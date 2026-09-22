@@ -74,13 +74,13 @@ def build_agent(session: Session, args, ui_state: dict, hooks=None) -> Agent:
     #
     # 两级新鲜度：**根目录正文每请求重读**（stat 缓存，文件真变了才读盘），
     # **子目录清单每回合重扫**（把回合号当刷新纪元传进去）——清单要一次全树遍历，
-    # 本仓库实测 ~580 µs、比一次 stat 贵三个数量级，而"本回合新建的子目录约定下一
+    # 本仓库实测 ~600 µs、比一次 stat 贵三个数量级，而"本回合新建的子目录约定下一
     # 回合看见"够用（根目录正文那一路才是每请求都新鲜的）。
     _instructions = InstructionLoader(args.workspace)
     prompt.section('instructions', 20, lambda ctx: _instructions.render(turn=ctx['agent'].last_turn))
     # skill:catalog：可用技能目录（**live 段**，order 95）。表由 SkillTable 持有：
     # 每次求值先算一遍内容指纹（两个技能目录的 *.md 名单 + 每文件 mtime/size，实测
-    # ~80 µs），指纹变了才重扫重解析——所以**会话中途新增/改写/删除技能，下一次模型
+    # ~70 µs），指纹变了才重扫重解析——所以**会话中途新增/改写/删除技能，下一次模型
     # 请求就生效**。同一个 SkillTable 实例也喂给 skill 工具（下面 build_tools），且工具
     # 在执行时取表，所以"目录里有的"和"工具能取到的"永不漂移。只放 name+description，
     # 正文绝不进 system（模型用 skill 工具按名字取）。

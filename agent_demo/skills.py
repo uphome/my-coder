@@ -25,7 +25,7 @@
 中途新增/改写/删除技能，目录与工具**同时**看见，不会出现"目录说着旧描述、工具却返回
 新正文"这种自相矛盾（早期目录段是 build 时算好的静态字符串，就有这个毛病：新技能要等
 新会话，改过的描述永远停在旧值）。代价用 stat 键控缓存压住：每次求值只做两轮
-`scandir` + 每文件一次 `stat`（实测 ~80 µs），文件真的变了才重扫重解析（~430 µs）；
+`scandir` + 每文件一次 `stat`（实测 ~70 µs），文件真的变了才重扫重解析（~300 µs）；
 文件没变时目录字节也不变，缓存前缀照样命中。
 
 模块职责：
@@ -39,9 +39,11 @@
 """
 from __future__ import annotations
 
+import fnmatch
 import os
 import re
 import sys
+import threading
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -115,20 +117,37 @@ class SkillTable:
     指纹覆盖三种变化：**新增 / 删除 / 改名**（改的是名单）与**改写内容**（改的是
     mtime/size）。读不到目录时指纹算作"未知"→ 每次都重扫：宁可多扫几次，也不拿一个
     可能过期的指纹把新技能挡在门外（对齐指令文件加载器的"不要把不知道降级成没有"）。
+
+    **两个线程都会碰这张表**，所以刷新要加锁 + 双检：
+
+    - 目录段在**循环线程**求值（每次模型请求）；`skill` 工具声明了 `offload=True`，
+      在**工作线程**里执行、也要刷新同一张表；
+    - 没有锁时两次刷新可能交错成"**指纹是新的、表是旧的**"（一个线程写表之后、
+      写指纹之前被抢占，另一个线程的整对赋值插进来，最后新指纹落在旧表上）——
+      之后每次求值都以为"没变"，那份技能的描述就**永远**停在旧值：正是这个 PR 要治的
+      病从另一条路回来（窗口极小，但后果是永久性的）。加锁的代价只是慢路径串行；
+    - 双检让**快路径**（指纹没变）连锁都不碰，循环线程不会被工作线程的刷新阻塞；
+    - 最坏情况退化成"晚到的旧刷新覆盖一次"：那是一对**配套**的旧值，下一次求值就会
+      发现指纹不符再刷一次，一个请求内自愈。
     """
 
     def __init__(self, workspace: Path) -> None:
         self._workspace = workspace
         self._signature: tuple | None = None
         self._skills: tuple[Skill, ...] = ()
+        self._lock = threading.Lock()
 
     def skills(self) -> tuple[Skill, ...]:
         """当前技能表（按名字排序）——目录段与 `skill` 工具看到的是同一份。"""
         signature = _skills_signature(self._workspace)
-        if signature is None or signature != self._signature:
-            self._skills = tuple(load_skills(self._workspace))
-            self._signature = signature
-        return self._skills
+        if signature is not None and signature == self._signature:
+            return self._skills                     # 快路径：指纹没变，不碰锁
+        with self._lock:
+            # 双检：等锁期间别的线程可能已经刷过了（同指纹就不用再扫一遍）
+            if signature is None or signature != self._signature:
+                self._skills = tuple(load_skills(self._workspace))
+                self._signature = signature
+            return self._skills
 
 
 def _skills_signature(workspace: Path) -> tuple | None:
@@ -146,7 +165,14 @@ def _dir_signature(root: Path) -> tuple | None:
     """一个技能目录的指纹：`(*.md 名单, 每文件 (mtime_ns, size))`。
 
     用 `os.scandir` 而不是 `glob` + 逐个 `stat`：一次系统调用就把名字和 stat 都拿到
-    （Windows 上 `DirEntry.stat()` 还自带缓存）——这个函数跑在每请求的 live 段上。
+    （Windows 上 `DirEntry.stat()` 还自带缓存）。实测两个来源合计 ~70 µs（对比"真正
+    读并解析全部技能文件"的 `load_skills`，那是 ~300 µs）——这个函数跑在每请求的
+    live 段上，所以值得抠这一下。
+
+    **匹配规则必须与 `scan_skills` 的 `glob('*.md')` 一致**，所以用
+    `fnmatch.fnmatch`（glob 内部就是这套 `os.path.normcase` 语义）而不是
+    `name.endswith('.md')`：Windows 上 glob **不区分大小写**，`Upper.MD` 会被扫成
+    技能——指纹漏掉它，就等于"改了这份技能永远看不见"（实测踩过，见测试里的覆盖断言）。
 
     目录不存在是**确定状态**（这个来源没有技能，指纹是空元组）；读不到（权限/IO）才是
     "未知"。同名目录与坏符号链接不参与指纹（`scan_skills` 会给它们打诊断）。
@@ -160,7 +186,7 @@ def _dir_signature(root: Path) -> tuple | None:
         return None
     signature = []
     for entry in entries:
-        if not entry.name.endswith('.md'):
+        if not fnmatch.fnmatch(entry.name, '*.md'):
             continue
         try:
             if not entry.is_file():

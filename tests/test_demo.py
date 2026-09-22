@@ -2250,8 +2250,8 @@ def test_skill_catalog_is_live_for_new_edited_and_deleted_skills(tmp_path):
 def test_skill_table_rescans_only_when_files_change(tmp_path, monkeypatch):
     """缓存是 stat 键控的：目录段每请求求值，但文件没变时一次都不重扫。
 
-    这条守着成本：`load_skills` 要读并解析每个技能文件（~430 µs），而 `scandir` +
-    每文件 `stat`（~80 µs）每次请求都做也没关系。指纹来自"名单 + (mtime, size)"，
+    这条守着成本：`load_skills` 要读并解析每个技能文件（~300 µs），而 `scandir` +
+    每文件 `stat`（~70 µs）每次请求都做也没关系。指纹来自"名单 + (mtime, size)"，
     所以增删改名与改写内容都判得出来。
     """
     from agent_demo import skills as skills_module
@@ -2285,6 +2285,85 @@ def test_skill_table_rescans_only_when_files_change(tmp_path, monkeypatch):
     assert any(skill.description == '改过的描述' for skill in edited)
     assert len(scans) == 6                                  # 内容变了 → 重扫（size/mtime 变）
     assert table.skills() == edited and len(scans) == 6
+
+
+def test_skill_table_refresh_is_serialized_across_threads(tmp_path, monkeypatch):
+    """这张表被两个线程碰（live 段在循环线程、`offload=True` 的 skill 工具在工作线程）。
+
+    两次刷新交错的那种时序很难手工复现，但"刷新有没有串行化"是可断言的结构性质：让 4
+    个线程同时求值（指纹已过期 → 都想重扫），断言 `load_skills` **不会被并发进入**。
+    没有锁时两次刷新会交错，可能留下"指纹是新的、表是旧的"——之后每次求值都以为没变，
+    那份技能的描述就**永远**停在旧值（本 PR 要治的病换了个入口回来）。
+    """
+    import threading
+    import time
+
+    from agent_demo import skills as skills_module
+
+    table = skills_module.SkillTable(tmp_path)
+    table.skills()                                          # 建立缓存（此时还没有技能目录）
+    skills_dir = tmp_path / 'skills'
+    skills_dir.mkdir()
+    (skills_dir / 'a.md').write_text(
+        '---\nname: a\ndescription: 初版\n---\n正文\n', encoding='utf-8')
+
+    guard = threading.Lock()
+    active = 0
+    peak = 0
+    original = skills_module.load_skills
+
+    def counting(workspace):
+        nonlocal active, peak
+        with guard:
+            active += 1
+            peak = max(peak, active)
+        try:
+            time.sleep(0.05)                                # 给别的线程插进来的机会
+            return original(workspace)
+        finally:
+            with guard:
+                active -= 1
+
+    monkeypatch.setattr(skills_module, 'load_skills', counting)
+    threads = [threading.Thread(target=table.skills) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert peak == 1                                        # 串行：双检之后只有第一个真去扫
+    assert [skill.name for skill in table.skills()] == ['a', 'project-instructions']
+
+
+def test_skill_fingerprint_covers_every_file_scan_skills_finds(tmp_path):
+    """指纹必须覆盖 `scan_skills` 会扫到的每个文件——否则"改了看不见"。
+
+    实测踩过：Windows 的 `Path.glob('*.md')` **不区分大小写**，`Upper.MD` 会被扫成
+    技能；而指纹最初用 `name.endswith('.md')` 判大小写——于是改这份技能的描述永远不会
+    让指纹变化，目录永远停在旧描述（正是本 PR 要治的病换了条路回来）。现在指纹改用
+    `fnmatch.fnmatch`（glob 内部就是这套 `os.path.normcase` 语义）。
+    """
+    from agent_demo.skills import SkillTable, _dir_signature, scan_skills
+
+    skills_dir = tmp_path / 'skills'
+    skills_dir.mkdir()
+    for name in ('Upper.MD', 'lower.md'):
+        (skills_dir / name).write_text(
+            f'---\nname: {Path(name).stem.lower()}\ndescription: 初版\n---\n正文\n',
+            encoding='utf-8')
+
+    scanned = {skill.path.name for skill in scan_skills(skills_dir)}
+    covered = {name for name, _, _ in _dir_signature(skills_dir) or ()}
+    assert scanned <= covered                               # 扫得到的都在指纹里
+
+    # 行为面：只改 `Upper.MD`（Windows 上它会被扫到，改了就必须刷新缓存）。
+    # Linux 的 glob 区分大小写、根本扫不到它，这条在那边不成立也不该成立。
+    if 'Upper.MD' in scanned:
+        table = SkillTable(tmp_path)
+        before = table.skills()
+        (skills_dir / 'Upper.MD').write_text(
+            '---\nname: upper\ndescription: 改过的描述\n---\n正文二\n', encoding='utf-8')
+        assert table.skills() != before
 
 
 def test_web_todo_dock_payloads(tmp_path):
