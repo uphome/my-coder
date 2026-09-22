@@ -31,7 +31,9 @@ agent-demo-web = "agent_demo.web_app:main"
 include = ["agent_demo*"]
 
 [tool.setuptools.package-data]
-agent_demo = []
+# 随包发布 agent 自带技能（bundled）：装到别的环境也要在（否则"自带能力"只在源码
+# checkout 里成立）。workspace 技能不在这里——它们属于项目，不属于这个包。
+agent_demo = ["bundled_skills/*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

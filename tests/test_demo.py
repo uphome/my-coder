@@ -1924,11 +1924,11 @@ def test_todo_status_bar_absent_cases(tmp_path):
 
 
 def test_skill_catalog_scan_and_format(tmp_path, capsys):
-    """技能目录扫描/格式化（AGENTS.md 约定：目录只放 name+description+路径）。
+    """技能目录扫描/格式化（AGENTS.md 约定：目录只放 name+description）。
 
     - scan_skills：解析 skills/*.md 的 frontmatter；坏技能跳过并打诊断
-    - format_catalog：纯文本目录行，路径相对 workspace 且正斜杠
-    - 正文绝不进目录（正文由模型 read_file 按需读，见下一测试）
+    - format_catalog：纯文本目录行，**不列路径**（取正文走 skill 工具按名字）
+    - 正文绝不进目录（正文由 skill 工具按需取，见后面的测试）
     """
     from agent_demo.skills import format_catalog, scan_skills
 
@@ -1968,16 +1968,18 @@ def test_skill_catalog_scan_and_format(tmp_path, capsys):
     assert '[skill] skipped 处理问题.md' in err
     assert 'README' not in err
 
-    catalog = format_catalog(skills, tmp_path)
+    catalog = format_catalog(skills)
     assert 'gh-issue' in catalog
-    assert 'skills/gh-issue.md' in catalog          # 相对 workspace 路径（正斜杠）
     assert '处理 GitHub issue' in catalog
     assert '不该出现在目录' not in catalog           # 正文不进目录
     assert 'broken' not in catalog                    # 坏技能被跳过
     assert 'README' not in catalog
+    # 不再列路径：列了只会诱导模型去 read_file，而 bundled 技能在沙箱外读不到
+    assert 'skills/' not in catalog
+    assert 'skill 工具' in catalog                    # 引导句指向按名字取正文
 
-    # 无技能目录/空目录 → 空目录文本（render 自动省略，零 token）
-    assert format_catalog([], tmp_path) == ''
+    # 无技能/空目录 → 空目录文本（render 自动省略，零 token）
+    assert format_catalog([]) == ''
     assert scan_skills(tmp_path / 'no-such-dir') == []
 
 
@@ -2019,11 +2021,81 @@ async def test_skill_catalog_injected_into_system(tmp_path):
     system = header['system']
     assert '可用技能' in system
     assert 'gh-issue' in system
-    assert 'skills/gh-issue.md' in system
+    assert 'skill 工具' in system                    # 目录引导模型按名字取正文
     assert '秘密技能正文' not in system              # 正文始终不进 system
 
     # 目录段在工具提示段之前（todo 为空时无 todo 段，取 bash 提示为序界）
     assert system.index('可用技能') < system.index('Use bash')
+
+
+# ---------------------------------------------------------------------------
+# 技能两个来源：bundled（随 agent 发布，包内）→ workspace（同名覆盖）
+# 背景与取舍见 agent_demo/skills.py 的模块 docstring（issue #22）
+# ---------------------------------------------------------------------------
+
+
+def test_bundled_skills_reach_an_arbitrary_workspace(tmp_path):
+    """自带技能必须跟着 agent 走：工作区里**没有** skills/ 也要看得到目录。"""
+    from agent_demo.skills import BUNDLED, load_skills
+
+    skills = load_skills(tmp_path)
+    names = [skill.name for skill in skills]
+    assert 'project-instructions' in names                     # 来自包内
+    assert names == sorted(names)                              # 排序 → 目录字节可复现
+    bundled = next(skill for skill in skills if skill.name == 'project-instructions')
+    assert bundled.source == BUNDLED
+    assert bundled.path.is_relative_to(tmp_path) is False      # 正文在包内，工作区之外
+
+    from agent_demo.skills import format_catalog
+    catalog = format_catalog(skills)
+    assert 'project-instructions' in catalog
+
+
+def test_workspace_skill_overrides_bundled_by_name(tmp_path):
+    """同名时 workspace 覆盖 bundled：目录里只出现一次，且是项目自己那份。"""
+    from agent_demo.skills import WORKSPACE, load_skills, read_skill_body, resolve_skill
+
+    skills_dir = tmp_path / 'skills'
+    skills_dir.mkdir()
+    (skills_dir / 'project-instructions.md').write_text(
+        '---\nname: project-instructions\ndescription: 本项目的定制版手册\n'
+        '---\n# 定制正文\n本仓库的指令文件放在 docs/ 下。\n', encoding='utf-8')
+
+    skills = load_skills(tmp_path)
+    names = [skill.name for skill in skills]
+    assert names.count('project-instructions') == 1             # 不是两条
+    winner = resolve_skill(skills, 'project-instructions')
+    assert winner is not None and winner.source == WORKSPACE
+    assert '定制正文' in read_skill_body(winner)
+
+
+async def test_skill_tool_loads_bundled_body_from_outside_the_workspace(tmp_path):
+    """机制的核心：bundled 正文在工作区之外，read_file 拒绝、skill 工具取得到。"""
+    from agent_demo.tools import build_tools
+
+    registry = build_tools(workspace=tmp_path)
+    skill = await registry.execute('skill', {'name': 'project-instructions'}, None)
+    assert skill.is_error is False
+    assert '维护项目指令文件' in skill.content              # 正文到手
+    assert '---\nname:' not in skill.content               # frontmatter 已剥离
+
+    # 对照：同一个文件用 read_file 读 → 沙箱拒绝（所以必须走 skill 工具）
+    from agent_demo.skills import BUNDLED_SKILLS_DIR
+    denied = await registry.execute(
+        'read_file', {'file_path': str(BUNDLED_SKILLS_DIR / 'project-instructions.md')}, None)
+    assert denied.is_error is True
+    assert 'outside workspace' in denied.content
+
+
+async def test_skill_tool_unknown_name_is_a_result(tmp_path):
+    """未知技能名 → is_error 结果（并列出可用名字），不炸循环。"""
+    from agent_demo.tools import build_tools
+
+    registry = build_tools(workspace=tmp_path)
+    outcome = await registry.execute('skill', {'name': 'no-such-skill'}, None)
+    assert outcome.is_error is True
+    assert 'no skill named' in outcome.content
+    assert 'project-instructions' in outcome.content        # 列出可用名字，模型能自我纠正
 
 
 def test_web_skill_catalog_survives_reload(tmp_path):

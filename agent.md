@@ -221,6 +221,27 @@ agent-demo 现状：Python 四层单向架构、日志唯一事实源、已有 r
 实施顺序（待落地时走）：先在 NEXT_STEPS.md 记设计 → 落地 skills 扫描 + 注入 +
 gh-issue 技能 → Web/CLI 实测“处理 issue #N” → 质量门三绿提交。
 
+### 3.5 事后修正（2026-09，issue #22）：技能必须有两个来源，正文必须按名字取
+
+§3.1 的两条决策被实测推翻了，这里记录修正与理由（落地规则以 AGENTS.md 约定节为准）：
+
+- **技能存储只有"仓库内建 `skills/`"一层** → 改成 **bundled（包内
+  `agent_demo/bundled_skills/`，随 agent 发布）+ workspace（`<workspace>/skills/`）**，
+  按名字合并、workspace 同名覆盖。理由（实测）：技能根目录写死为工作区之后，
+  **换个工作区自带能力归零**——用户在自己的项目里跑这个 agent，system 里既没有
+  「可用技能」段、`read_file` 读包内技能也被沙箱拒（`path outside workspace`）。
+  自带能力跟着 agent 走，不能跟着工作区走。
+- **「不新增加载工具」（§3.1 第 4 条）** → 收窄为：**加 `skill` 工具，按名字取正文**。
+  那条决策的前提是"技能文件总能被 `read_file` 读到"（PI 式的 read + location），
+  而 PI 能这么做是因为它**没有 workspace 沙箱**；我们抄了它的取正文方式，又立了
+  DSH 式的沙箱承诺，两者组合起来 bundled 就够不着。DSH 的模型侧 `skill` 工具正是
+  为支持文件系统之外的来源而存在。
+- **沙箱承诺不变**：`skill(name)` 的入参只有名字，模型没有机会拼路径；查不到就是
+  一条 is_error 结果。目录段也不再列路径（列了只会诱导 read_file）。
+- **保持不变的教学点**（§3.4）：正文仍然作为 **tool/result** 进 derive_messages，
+  可重建、可被 compaction 折叠、前端画成工具卡——换的只是"怎么找到文件"，不是
+  "正文怎么进上下文"。
+
 ## 4. 待讨论：todo 与"运行时状态栏"（2026-09 记录，未决）
 
 > 背景：讨论「模型每步是否知道自己在做什么、进行到哪一步」时，演化成
@@ -729,7 +750,7 @@ PI 干脆只在启动/`/reload` 时重建 system prompt。
 **创建这一半，三家都在 agent 之外**：opencode 给用户一个 `/init` 命令（固定 prompt：
 扫描项目、必要时问几个问题、就地改进而不是重写）、PI 靠人维护、DSH 只负责加载。
 issue #6 要的"agent 主动提议"是我们自己加的；opencode 的 `/init` 是个值得借鉴的**确定性
-入口**（将来可以把它做成一条命令，正文直接复用 `skills/project-instructions.md`）。
+入口**（将来可以把它做成一条命令，正文直接复用随包技能 `project-instructions`）。
 
 ### 9.4 我们落地时的三处裁剪（都不是"少做点"，是架构约束推出来的）
 
@@ -752,8 +773,13 @@ issue #6 要的"agent 主动提议"是我们自己加的；opencode 的 `/init` 
 ```
 discipline（静态，order 10，always-on）   ← A：通用规则（"Instructions:" 那一条）
 instructions（live system 段，order 20） ← C：确定性探测 + 正文/缺失提示
-skills/project-instructions.md           ← B：内容载体（骨架、该写/不该写、何时更新）
+随包技能 project-instructions             ← B：内容载体（骨架、该写/不该写、何时更新）
 ```
+
+> **收尾（#16 合并后）**：这份手册最初放在工作区 `skills/project-instructions.md`，
+> 但"工作区技能"在**没有 `skills/` 的工作区**里看不到（正是最需要它的场景）——所以
+> 它已随 issue #22 挪到包内 `agent_demo/bundled_skills/`，作为 **bundled 技能**随 agent
+> 发布；工作区里那份重复副本已删除（同名时 workspace 会覆盖 bundled）。详见 §3.5。
 
 - `instructions.py`：`scan_nested_instruction_files`（build 时 `os.walk` 剪枝一次）+
   `InstructionLoader`（`(mtime_ns, size)` 缓存 + 预算 + 渲染）+ 纯函数
@@ -779,5 +805,5 @@ skills/project-instructions.md           ← B：内容载体（骨架、该写/
   `files="unreadable"` 且**不给创建指引**、同名目录算读不到、一份可读 + 一份读不到时
   正文照常注入并点名后者）；代码回顾补的四条（空文件算"存在"、缓存命中不重读且两次
   渲染字节相同、越界符号链接不注入、预算自洽性）
-- 门禁：`ruff` / `mypy` 干净、`pytest 116 passed`（101 → +15）
+- 门禁：`ruff` / `mypy` 干净、`pytest 120 passed`（与技能两来源那批测试合并后的总数）
 
