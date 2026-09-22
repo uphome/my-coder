@@ -3,6 +3,7 @@
 import asyncio
 import json
 import time
+from pathlib import Path
 
 import httpx
 import pytest
@@ -16,6 +17,11 @@ from agent_demo.constants import (
 )
 from agent_demo.hooks import Hooks, PreStepContext, RequestErrorContext
 from agent_demo.inbox import Inbox
+from agent_demo.instructions import (
+    INSTRUCTION_MAX_FILE_CHARS,
+    INSTRUCTION_MAX_SOURCE_BYTES,
+    InstructionLoader,
+)
 from agent_demo.llm import (
     FakeLlm,
     LlmRequest,
@@ -1469,9 +1475,9 @@ async def test_system_prompt_carries_general_discipline(tmp_path):
 
     为什么守这条：system 是唯一"每轮都生效"的通道，文档（AGENTS.md）只有愿意读的
     agent 才看得到——反复被踩的坑如果不提成 system 里的通用规则，agent 每次都要
-    重新踩一遍。三条纪律（范围 / 成本 / 自证）与具体工具无关，所以放在通用段
-    （identity/persona/discipline）而不是某个 tool:* 段；这里断言它们真的渲染进了
-    system，且位置在工具段之前（顺序错位会让"通用性"名存实亡）。
+    重新踩一遍。四条纪律（范围 / 成本 / 自证 / 项目指令）与具体工具无关，所以放在
+    通用段（identity/persona/discipline）而不是某个 tool:* 段；这里断言它们真的
+    渲染进了 system，且位置在工具段之前（顺序错位会让"通用性"名存实亡）。
     """
     from argparse import Namespace
 
@@ -1487,11 +1493,268 @@ async def test_system_prompt_carries_general_discipline(tmp_path):
     assert headers, 'expected a request/header event'
     system = headers[0]['system']
 
-    for label in ('Scope:', 'Economy:', 'Evidence:'):
+    for label in ('Scope:', 'Economy:', 'Evidence:', 'Instructions:'):
         assert label in system, f'通用纪律缺 {label}（应提成 system 规则，而不是只写在文档里）'
     # 通用段排在工具段之前；且"验证"不再等同于"执行"（理解代码不必跑命令）
     assert system.index('Scope:') < system.index('Use bash')
     assert 'reading code needs no execution' in system
+
+
+# ---------------------------------------------------------------------------
+# 工作区项目指令文件（AGENTS.md / CLAUDE.md）：发现 + 预算 + live 注入（issue #6）
+# ---------------------------------------------------------------------------
+
+
+def test_instructions_section_reports_a_missing_file(tmp_path):
+    """全新工作区：段里给"没有指令文件"的状态 + 创建指引（issue #6 方案 C）。"""
+    rendered = InstructionLoader(tmp_path).render()
+    assert 'files="none"' in rendered
+    assert 'AGENTS.md' in rendered and 'propose writing' in rendered
+    # 指引必须同时说清两条边界：写入要用户批准；不许写密钥/临时状态/未验证猜测
+    assert 'approve' in rendered
+    assert 'secrets' in rendered and 'unverified guesses' in rendered
+
+
+def test_instructions_section_injects_an_existing_root_file(tmp_path):
+    """已有指令文件：正文进段里（不是只给路径），并注明来源路径。"""
+    (tmp_path / 'AGENTS.md').write_text('# 约定\n\n跑测试: pytest -q\n', encoding='utf-8')
+    loader = InstructionLoader(tmp_path)
+    loaded = loader.load()
+    assert [(f.display, f.truncated) for f in loaded.files] == [('AGENTS.md', False)]
+
+    rendered = loader.render()
+    assert rendered.startswith('<workspace_instructions files="AGENTS.md">')
+    assert 'Instructions from: AGENTS.md' in rendered
+    assert '跑测试: pytest -q' in rendered
+
+
+def test_instructions_injects_both_candidates_in_candidate_order(tmp_path):
+    """AGENTS.md 与 CLAUDE.md 同时存在时都注入，顺序固定（AGENTS.md 在前）。"""
+    (tmp_path / 'AGENTS.md').write_text('AGENTS 约定', encoding='utf-8')
+    (tmp_path / 'CLAUDE.md').write_text('CLAUDE 约定', encoding='utf-8')
+    rendered = InstructionLoader(tmp_path).render()
+    assert 'files="AGENTS.md, CLAUDE.md"' in rendered
+    assert rendered.index('AGENTS 约定') < rendered.index('CLAUDE 约定')
+
+
+def test_instructions_truncates_oversized_file_and_points_to_read_file(tmp_path):
+    """超预算：截断 + 明确告知"用 read_file 读剩下的"，不静默丢内容。"""
+    (tmp_path / 'AGENTS.md').write_text('x' * (INSTRUCTION_MAX_FILE_CHARS + 500), encoding='utf-8')
+    loaded = InstructionLoader(tmp_path).load()
+    assert loaded.files[0].truncated is True
+    content = loaded.files[0].content
+    assert len(content) < INSTRUCTION_MAX_FILE_CHARS + 200     # 预算 + 提示，不是原文长度
+    assert 'truncated at' in content and 'read_file' in content
+
+
+def test_instructions_skips_a_file_over_the_source_cap(tmp_path):
+    """超过读取上限（1 MiB）的文件不读进内存，只留一条指引。"""
+    (tmp_path / 'AGENTS.md').write_text('x' * (INSTRUCTION_MAX_SOURCE_BYTES + 1), encoding='utf-8')
+    loaded = InstructionLoader(tmp_path).load()
+    assert loaded.files[0].truncated is False                  # 没截断——根本没读
+    assert 'too large to inline' in loaded.files[0].content
+
+
+def test_instructions_report_unreadable_instead_of_absent(tmp_path, monkeypatch):
+    """第三态：文件在、但**读不到** → 说"不知道"，不说"没有"，也不提议创建。
+
+    把"读不到"渲染成 files="none" 会同时对用户和模型撒谎（不变式⑤ / 宁炸勿静默
+    在探测上的对应物：不要把"不知道"降级成"没有"）。对齐 DSH 的
+    ScopeInstructionProbe 与 opencode 的 SystemContext.unavailable。
+    """
+    (tmp_path / 'AGENTS.md').write_text('约定正文', encoding='utf-8')
+    original = Path.read_text
+
+    def deny(self, *args, **kwargs):
+        if self.name == 'AGENTS.md':
+            raise PermissionError('denied by test')
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'read_text', deny)
+    loader = InstructionLoader(tmp_path)
+    loaded = loader.load()
+    assert loaded.found is False
+    assert [f.display for f in loaded.unreadable] == ['AGENTS.md']
+    assert loaded.unreadable[0].reason.startswith('cannot read: ')
+
+    rendered = loader.render()
+    assert 'files="unreadable"' in rendered
+    assert 'could not be read' in rendered and '- AGENTS.md: cannot read' in rendered
+    assert 'propose writing' not in rendered      # 存在性没确认 → 连"建议创建"都不该说
+
+
+def test_instructions_treat_a_directory_named_agents_md_as_unreadable(tmp_path):
+    """同名目录（PI 踩过 EISDIR 的那种）：也算"读不到"，不算"没有"。"""
+    (tmp_path / 'AGENTS.md').mkdir()
+    loader = InstructionLoader(tmp_path)
+    loaded = loader.load()
+    assert loaded.files == ()
+    assert 'not a regular file' in loaded.unreadable[0].reason
+
+    rendered = loader.render()
+    assert 'files="unreadable"' in rendered
+    assert 'propose writing' not in rendered
+
+
+def test_instructions_list_unreadable_alongside_a_readable_file(tmp_path, monkeypatch):
+    """一份读得到 + 一份读不到：正文照常注入，同时点名读不到的那份。"""
+    (tmp_path / 'AGENTS.md').write_text('AGENTS 正文', encoding='utf-8')
+    (tmp_path / 'CLAUDE.md').write_text('CLAUDE 正文', encoding='utf-8')
+    original = Path.read_text
+
+    def deny(self, *args, **kwargs):
+        if self.name == 'CLAUDE.md':
+            raise PermissionError('denied by test')
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'read_text', deny)
+    rendered = InstructionLoader(tmp_path).render()
+    assert 'files="AGENTS.md"' in rendered and 'AGENTS 正文' in rendered
+    assert 'Unreadable candidates' in rendered and 'CLAUDE.md (cannot read' in rendered
+
+
+def test_instructions_count_an_empty_file_as_present(tmp_path):
+    """空文件算"存在"：标题照常渲染——"这里有一份约定、内容为空"与"这里没有约定"不同。
+
+    对齐 DSH 的注释（heading 存活即代表"存在"）与 opencode 的同名测试
+    （keeps an empty AGENTS.md as available context）。
+    """
+    (tmp_path / 'AGENTS.md').write_text('', encoding='utf-8')
+    assert InstructionLoader(tmp_path).load().found is True
+    rendered = InstructionLoader(tmp_path).render()
+    assert 'files="AGENTS.md"' in rendered
+    assert 'Instructions from: AGENTS.md' in rendered
+    assert 'files="none"' not in rendered
+
+
+def test_instructions_cache_avoids_rereading_an_unchanged_file(tmp_path, monkeypatch):
+    """缓存：文件没变时每次渲染只 stat、不读盘；且两次渲染字节相同（前缀缓存不失效）。"""
+    (tmp_path / 'AGENTS.md').write_text('跑测试: pytest -q', encoding='utf-8')
+    reads: list[str] = []
+    original = Path.read_text
+
+    def counting(self, *args, **kwargs):
+        reads.append(self.name)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'read_text', counting)
+    loader = InstructionLoader(tmp_path)
+    first = loader.render()
+    second = loader.render()
+    assert reads == ['AGENTS.md']                 # 第二次没读盘（live 段每请求求值，读盘会变常态）
+    assert first == second                        # 字节稳定 → 缓存前缀不因"重新渲染"失效
+
+    (tmp_path / 'AGENTS.md').write_text('质量门: ruff + mypy + pytest', encoding='utf-8')
+    third = loader.render()
+    assert reads == ['AGENTS.md', 'AGENTS.md']    # 改了才重读
+    assert '质量门' in third and '跑测试' not in third
+
+
+def test_instructions_ignore_a_symlink_pointing_outside_the_workspace(tmp_path):
+    """符号链接指向工作区外：不注入，并作为"读不到"报出来。
+
+    工具层已经用 resolve+relative_to 拦住了这条（sandbox.resolve_in_workspace），
+    指令读取是宿主的另一条路径——不拦的话 `AGENTS.md -> ~/.ssh/id_rsa` 就能把工作区
+    外的文件塞进 system prompt 发给模型，与 persona 的"工作区外不可读"直接矛盾。
+    """
+    outside = tmp_path / 'outside-secret.md'
+    outside.write_text('SECRET_OUTSIDE_WORKSPACE', encoding='utf-8')
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    try:
+        (workspace / 'AGENTS.md').symlink_to(outside)
+    except (OSError, NotImplementedError):        # Windows 无权限/未开开发者模式
+        pytest.skip('symlink not permitted on this platform')
+
+    loaded = InstructionLoader(workspace).load()
+    assert loaded.files == ()
+    assert 'outside the workspace' in loaded.unreadable[0].reason
+
+    rendered = InstructionLoader(workspace).render()
+    assert 'SECRET_OUTSIDE_WORKSPACE' not in rendered
+    assert 'files="unreadable"' in rendered
+
+
+def test_instructions_reject_a_candidate_that_resolves_outside(tmp_path, monkeypatch):
+    """越界判定本身（不依赖平台能否建符号链接）：resolve 到工作区外 → 不注入。
+
+    与上一条互补：符号链接那条是平台相关的集成验证（本机 Windows 可能 skip），
+    这条直接换掉 resolve 的返回值，保证**安全分支在任何平台都被断言到**。
+    """
+    (tmp_path / 'ws').mkdir()
+    (tmp_path / 'ws' / 'AGENTS.md').write_text('INSIDE_BODY', encoding='utf-8')
+    outside = tmp_path / 'outside.md'                      # 工作区**外**（ws 的兄弟）
+    outside.write_text('OUTSIDE_BODY', encoding='utf-8')
+    original = Path.resolve
+
+    def fake(self, *args, **kwargs):
+        if self.name == 'AGENTS.md' and self.parent == tmp_path / 'ws':
+            return outside
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'resolve', fake)
+    loaded = InstructionLoader(tmp_path / 'ws').load()
+    assert loaded.files == ()
+    assert 'outside the workspace' in loaded.unreadable[0].reason
+    rendered = InstructionLoader(tmp_path / 'ws').render()
+    assert 'INSIDE_BODY' not in rendered and 'OUTSIDE_BODY' not in rendered
+    assert 'files="unreadable"' in rendered
+
+
+def test_instruction_budget_can_hold_every_candidate():
+    """预算自洽：单文件上限 × 候选数 必须塞进总预算，否则多出来的会被静默丢掉。"""
+    from agent_demo.instructions import (
+        INSTRUCTION_FILE_CANDIDATES,
+        INSTRUCTION_MAX_TOTAL_CHARS,
+    )
+    assert INSTRUCTION_MAX_TOTAL_CHARS >= INSTRUCTION_MAX_FILE_CHARS * len(INSTRUCTION_FILE_CANDIDATES)
+
+
+def test_instructions_render_is_live(tmp_path):
+    """live 段语义：每次渲染重新求值——文件出现/被改，下一次渲染就看得到。"""
+    loader = InstructionLoader(tmp_path)
+    assert 'files="none"' in loader.render()
+
+    (tmp_path / 'AGENTS.md').write_text('跑测试: pytest -q', encoding='utf-8')
+    assert '跑测试: pytest -q' in loader.render()               # 出现即生效
+
+    (tmp_path / 'AGENTS.md').write_text('质量门: ruff + mypy + pytest', encoding='utf-8')
+    assert '质量门: ruff + mypy + pytest' in loader.render()     # 改过即失效重读
+
+
+def test_nested_instruction_files_are_listed_but_not_inlined(tmp_path):
+    """子目录清单只列路径（正文按需 read_file），隐藏目录不算数。"""
+    (tmp_path / 'web').mkdir()
+    (tmp_path / 'web' / 'AGENTS.md').write_text('WEB_BODY_SHOULD_NOT_BE_INLINED', encoding='utf-8')
+    (tmp_path / '.git').mkdir()
+    (tmp_path / '.git' / 'AGENTS.md').write_text('GIT_BODY', encoding='utf-8')
+
+    loader = InstructionLoader(tmp_path)
+    assert loader.nested == ('web/AGENTS.md',)                  # .git 被剪枝
+    rendered = loader.render()
+    assert 'web/AGENTS.md' in rendered
+    assert 'WEB_BODY_SHOULD_NOT_BE_INLINED' not in rendered      # 只列路径
+    assert 'GIT_BODY' not in rendered
+
+
+async def test_build_agent_injects_workspace_instructions_before_tool_sections(tmp_path):
+    """factory 级全链路：通用规则（discipline）在前，注入的正文在后，工具段最后。"""
+    from argparse import Namespace
+
+    from agent_demo import factory
+
+    (tmp_path / 'AGENTS.md').write_text('# 项目约定\n\nRUN: pytest -q\n', encoding='utf-8')
+    args = Namespace(fake=True, model='fake-model', workspace=tmp_path, hide_reasoning=False,
+                     session='id', sessions=str(tmp_path), prompt='x', resume=False, verbose=False)
+    session = Session(id='id')
+    agent = factory.build_agent(session, args, {'reasoning_started': False, 'request_no': 0, 'tool_no': 0})
+    agent.followup('hi')
+    await agent.when_idle()
+
+    system = [e.data for e in session.events if e.type == 'request/header'][0]['system']
+    assert 'Instructions:' in system                             # 通用规则（discipline 段）
+    assert 'RUN: pytest -q' in system                            # 注入的正文（instructions 段）
+    assert system.index('Instructions:') < system.index('RUN: pytest -q') < system.index('Use bash')
 
 
 def test_todo_write_folds_and_injects_into_prompt(tmp_path):

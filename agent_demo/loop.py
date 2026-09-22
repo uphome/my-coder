@@ -198,7 +198,9 @@ async def _run_step(agent, turn: int, step: int, assembly: dict) -> str | None:
         request = LlmRequest(
             provider=provider,
             model=model,
-            # system 全静态（不再含 todo live 段）：前缀缓存稳定命中
+            # system 每次请求渲染一次：live 段（instructions）在这里重新求值。
+            # 它只在工作区指令文件真的变了的时候才变字节，所以前缀缓存照样命中；
+            # todo 状态栏在 messages 末尾（每步都变的东西不该进稳定前缀）。
             system=agent.prompt.render(assembly, ctx={'agent': agent}),
             messages=tuple(messages),
             tools=tuple(agent.tools.schemas()),

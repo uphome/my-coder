@@ -462,6 +462,71 @@ HTTP 400 An assistant message with 'tool_calls' must be followed by tool message
 （反向的"孤儿结果"——有结果没有对应调用——当前没有任何路径能造出来：结果总是跟在
 调用之后落盘，compaction 也按整段遮蔽，所以不修。）
 
+### 3.17 工作区项目指令文件：探测 + live 注入
+
+日志负责"这次会话发生过什么"，**项目指令文件**（`AGENTS.md` / `CLAUDE.md`）负责
+"这个项目一直是怎么做的"：跨会话、跨工具、可进版本库。两者职责不同，不能互相替代
+——会话结束后日志里那些发现（怎么跑测试、依赖方向、用户偏好）不会自动变成下个会话
+的约定。
+
+**注入通道的决定**：正文直接进 **system 的 live 段**（`instructions.py` + `factory.py`
+的 order 20），而不是像 todo 那样作为 messages 末尾的合成消息。判据是"变化的频率"：
+
+| 内容 | 变化频率 | 通道 | 为什么 |
+|---|---|---|---|
+| 通用纪律（discipline） | 永不变 | 静态 system 段 | 规则该在最稳的前缀里 |
+| **项目指令文件正文** | 会话内几乎不变（除非 agent 自己改它） | **live system 段**（order 20） | 属于"每轮都该生效"的规则；字节稳定 → 不打碎缓存前缀 |
+| 技能目录 | 会话内不变 | 静态 system 段（order 95） | 只放 name/description/路径 |
+| todo 状态栏 | **每步都可能变** | messages 末尾合成消息 | 放 system 会把缓存前缀每请求打碎一次 |
+
+live 段的语义（`prompt.render` 每次模型请求求值一次）正好覆盖 issue #6 的关键路径：
+**agent 刚创建的 AGENTS.md，在同一回合的下一次请求里就能看到**——不需要等下一个回合，
+也不需要 DSH 那套 baseline/delta 变更账（它注入一次，所以必须记增量；我们每请求重算，
+重算替代版本账）。
+
+**探测（确定性，不靠模型自觉）**：`InstructionLoader` 在 build 时扫一次子目录清单
+（`os.walk` 原地剪枝隐藏目录/缓存，`dirnames` 排序后再走——不排的话提前 `break` 收
+前 N 条会因文件系统顺序不同而给出不同子集，段字节就不可复现），每次渲染时读根目录
+候选文件（`AGENTS.md`、`CLAUDE.md`，按候选顺序）并按 `(mtime_ns, size)` 缓存；
+候选路径先 `resolve()` 再判是否仍在工作区内——**指向工作区外的符号链接不注入**，
+按"读不到"报出来（工具层已经用 `resolve_in_workspace` 拦住同一条路，指令读取是宿主
+的另一条路径，不拦就等于开了一个把工作区外文件送进 system prompt 的口子）。
+
+- 有文件 → `<workspace_instructions files="AGENTS.md">` + `Instructions from: <路径>`
+  + 正文（单文件 8k / 整段 20k 字符预算，超预算截断并提示"用 read_file 读剩下的"；
+  超过 1 MiB 的文件不读进内存，只留指引）；
+- 没有文件 → 同一标签给 `files="none"` + "建议在掌握稳定项目知识后创建一份"，并写清
+  "写入需要用户批准、不许写密钥/临时状态/未验证猜测"。这段提示是 issue #6 方案 C 的
+  落地：**触发是确定的**（不依赖模型某轮想起这件事），内容则由 `discipline` 段的通用
+  规则兜底（`Instructions:` 那条，每轮都生效）。
+
+**探测是三态，不是两态**（对齐 DSH `ScopeInstructionProbe` 与 opencode
+`SystemContext.unavailable`——后者的注释原话是"distinguishes confirmed absence from
+provider failure"）：
+
+| 态 | 判据 | 渲染 |
+|---|---|---|
+| **确认存在** | `stat` 成功且是普通文件，读到了 | 注入正文（含"太大未内联"：算存在） |
+| **确认不存在** | `FileNotFoundError` | `files="none"` + 创建指引 |
+| **读不到** | 权限拒绝、IO 错误、**同名目录** | `files="unreadable"` + "内容未知、不要当成没有约定、不要提议创建" |
+
+**为什么必须分开**：只有"确认不存在"才允许说"这个工作区没有项目指令文件"、才允许建议
+创建；"读不到"时提议创建可能覆盖一份已存在（只是读不到）的文件，而且模型是在假前提上
+行动。把"读不到"渲染成 `files="none"` 等于同时对用户和模型说同一句假话——这是不变式⑤
+（失败降级为结果）与"宁炸勿静默"在**探测**上的对应物：**不要把"不知道"降级成"没有"**。
+（真实案例：PI 的 CHANGELOG 记过一个叫 `AGENTS.md` 的**目录**导致 EISDIR，后来专门加了
+`statSync(...).isFile()` 判断——正是"存在但不是文件"这一态。）
+
+**边界（与 DSH 的三处裁剪，理由见 `agent.md` §9）**：只在本工作区内发现（工具被沙箱
+限制在 workspace 内，向上发现的文件模型读不到）；不做 user-global / `.local` 层级；
+不做 baseline/delta 版本账。
+
+**实测（真模型，两个方向都验过）**：全新工作区跑首轮任务后，模型主动问"要不要我把这条
+测试命令写进 AGENTS.md？"且**没有静默创建**（文件确实不存在）；已有 AGENTS.md 的工作区
+里，模型用的正是文件规定的命令（`python -m pytest -q test_calc.py -k add`，只按全局
+`tool:bash` 提示套了 `conda run` 外壳），并在回答里说明"按 AGENTS.md 的约定只跑了
+`-k add`"。
+
 ---
 
 ## 4. 一条消息的完整生命周期
@@ -510,6 +575,8 @@ HTTP 400 An assistant message with 'tool_calls' must be followed by tool message
 | `agent.py` | 被动状态机：wake / kick / when_idle / cancel |
 | `persistence.py` | JSONL 追加写 + 重放读 |
 | `recovery.py` | 会话自愈：恢复时给崩溃留下的悬空工具调用补 is_error 合成结果 + `session/repaired` 痕迹 |
+| `instructions.py` | 工作区项目指令文件（AGENTS.md/CLAUDE.md）：子目录清单扫描 + 根文件探测 + 字符预算 + system live 段渲染 |
+| `skills.py` | 按需技能：`skills/*.md` 扫描（frontmatter 解析）+ 目录文本（正文由模型按需 read_file） |
 | `tools/` | 应用工具（file_io 读写/编辑、search grep/glob、shell bash、todo、**web_search 联网搜索**）+ `build_tools(workspace)` |
 | `sandbox.py` | workspace 路径边界（轻量沙箱：归一化 + 前缀匹配） |
 | `ui.py` | 终端渲染（_render_event / _paint，UI 是日志投影） |
@@ -518,7 +585,7 @@ HTTP 400 An assistant message with 'tool_calls' must be followed by tool message
 | `web_app.py` | Web UI（FastAPI + SSE：会话/标题/approval/手动压缩/steer 插队；seat 化并发隔离；事件透传 turn/step + turn_start/user_message（带 message_id/rpc_id）/queue_update 帧供前端投影；队列项操作 `POST /queue/update`） |
 | `compaction.py` | 上下文压缩引擎（四步事务 + checkpoint + 会话 token 累计账） |
 | `show_memory.py` | 教学脚本：重放日志展示"记忆 = 投影" |
-| `tests/test_demo.py` | 101 个架构测试 |
+| `tests/test_demo.py` | 116 个架构测试 |
 
 ---
 
