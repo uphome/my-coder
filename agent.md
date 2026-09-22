@@ -750,7 +750,7 @@ PI 干脆只在启动/`/reload` 时重建 system prompt。
 **创建这一半，三家都在 agent 之外**：opencode 给用户一个 `/init` 命令（固定 prompt：
 扫描项目、必要时问几个问题、就地改进而不是重写）、PI 靠人维护、DSH 只负责加载。
 issue #6 要的"agent 主动提议"是我们自己加的；opencode 的 `/init` 是个值得借鉴的**确定性
-入口**（将来可以把它做成一条命令，正文直接复用 `skills/project-instructions.md`）。
+入口**（将来可以把它做成一条命令，正文直接复用随包技能 `project-instructions`）。
 
 ### 9.4 我们落地时的三处裁剪（都不是"少做点"，是架构约束推出来的）
 
@@ -773,8 +773,13 @@ issue #6 要的"agent 主动提议"是我们自己加的；opencode 的 `/init` 
 ```
 discipline（静态，order 10，always-on）   ← A：通用规则（"Instructions:" 那一条）
 instructions（live system 段，order 20） ← C：确定性探测 + 正文/缺失提示
-skills/project-instructions.md           ← B：内容载体（骨架、该写/不该写、何时更新）
+随包技能 project-instructions             ← B：内容载体（骨架、该写/不该写、何时更新）
 ```
+
+> **收尾（#16 合并后）**：这份手册最初放在工作区 `skills/project-instructions.md`，
+> 但"工作区技能"在**没有 `skills/` 的工作区**里看不到（正是最需要它的场景）——所以
+> 它已随 issue #22 挪到包内 `agent_demo/bundled_skills/`，作为 **bundled 技能**随 agent
+> 发布；工作区里那份重复副本已删除（同名时 workspace 会覆盖 bundled）。详见 §3.5。
 
 - `instructions.py`：`scan_nested_instruction_files`（build 时 `os.walk` 剪枝一次）+
   `InstructionLoader`（`(mtime_ns, size)` 缓存 + 预算 + 渲染）+ 纯函数
@@ -800,5 +805,5 @@ skills/project-instructions.md           ← B：内容载体（骨架、该写/
   `files="unreadable"` 且**不给创建指引**、同名目录算读不到、一份可读 + 一份读不到时
   正文照常注入并点名后者）；代码回顾补的四条（空文件算"存在"、缓存命中不重读且两次
   渲染字节相同、越界符号链接不注入、预算自洽性）
-- 门禁：`ruff` / `mypy` 干净、`pytest 116 passed`（101 → +15）
+- 门禁：`ruff` / `mypy` 干净、`pytest 120 passed`（与技能两来源那批测试合并后的总数）
 
