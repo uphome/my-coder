@@ -10,7 +10,8 @@ CLI 是终端投影，Web 是 DOM 投影，同一份日志。
 approval_request 到 SSE，浏览器批准/拒绝）。
 
 **这个文件只管路由与装配**：状态在 `state.py`、会话/seat 生命周期在 `sessions.py`、
-自动起名在 `titles.py`、投影在 `payload.py`（拆分理由见 `REFACTOR_PLAN.md` §4）。
+自动起名在 `titles.py`、投影在 `payload.py`——993 行的单文件里这四件事互相纠缠，
+改一处要在千行里找上下文（拆分清单见 `web/__init__.py` 的模块表）。
 """
 from __future__ import annotations
 
