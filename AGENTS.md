@@ -9,7 +9,7 @@ Python 复刻 deepseek-harness 架构的教学 demo（agent 框架本身，不�
 # 质量门：ruff + mypy + pytest 三绿才可提交（pyproject.toml 已配好）
 conda run -n agent-demo python -m ruff check agent_demo tests
 conda run -n agent-demo python -m mypy agent_demo
-conda run -n agent-demo python -m pytest        # 122 个测试
+conda run -n agent-demo python -m pytest        # 124 个测试
 
 # CLI（可 pip install -e . 后直接 agent-demo；或模块方式跑）
 conda run --no-capture-output -n agent-demo python -m agent_demo.cli --workspace . --fake "read README.md and summarize"
@@ -102,12 +102,19 @@ conda run --no-capture-output -n agent-demo python -m agent_demo.web_app --works
 - **工作区项目指令文件的发现与维护**（落地时遵循；DSH 对照与实测见 `agent.md` §9）：
   - **候选与范围**：工作区根的 `AGENTS.md` / `CLAUDE.md`（对齐 DSH
     `DEFAULT_INSTRUCTION_FILE_CANDIDATES`）；子目录里的同名文件**只列路径**
-    （正文由模型按需 read_file，和技能同一条路），隐藏目录不扫。**不向上发现**——
-    我们的工具被沙箱限制在 workspace 内，注入一份读不到的约定只会制造幻觉
+    （正文由模型按需 read_file，和技能同一条路），隐藏目录不扫；清单**每回合重扫
+    一次**（本回合新建的子目录约定下一回合可见）。**不向上发现**——我们的工具被
+    沙箱限制在 workspace 内，注入一份读不到的约定只会制造幻觉
   - **注入通道 = system 的 live 段**（`instructions.py`，order 20：紧跟通用纪律、
     先于工具段与技能目录）。正文**直接进 system**（与 DSH 一致）而不是只给路径：
-    项目约定属于"每轮都该生效"的规则。它是 system 里唯一的 live 段——内容按
-    `(mtime, size)` 缓存，文件没变就不重读、字节就不变，所以不打碎缓存前缀
+    项目约定属于"每轮都该生效"的规则。system 里有两个 live 段（另一个是技能目录），
+    都是"读磁盘 + stat 键控缓存"：文件没变就不重读、字节就不变，所以不打碎缓存前缀
+  - **两级新鲜度（文件来源的通用规则，判据是代价而不是"越新越好"）**：**内容按请求
+    新鲜**——根目录正文每请求探测一次（`stat` 是微秒级，文件真变了才读盘）；**清单类
+    信息按回合新鲜**——子目录清单要一次全树遍历（本仓库实测 ~580 µs，比一次 stat 贵
+    三个数量级），所以拿回合号当刷新纪元（`agent.last_turn`）：同回合内多次请求复用
+    同一份、新回合开头重扫。技能目录介于两者之间——它的"清单"来自 `scandir` + 每文件
+    stat（实测 ~80 µs），所以按请求新鲜（见"按需技能"约定）
   - **预算**：单文件 8k / 整段 20k 字符；超预算**截断并明说**"用 read_file 读剩下的"，
     超过 1 MiB 的文件不读进内存（只留指引）。缺文件时给"没有指令文件 + 建议创建"
     的确定性提示（issue #6 的方案 C 落地）

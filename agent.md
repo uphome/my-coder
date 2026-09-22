@@ -786,9 +786,10 @@ instructions（live system 段，order 20） ← C：确定性探测 + 正文/�
 > 它已随 issue #22 挪到包内 `agent_demo/bundled_skills/`，作为 **bundled 技能**随 agent
 > 发布；工作区里那份重复副本已删除（同名时 workspace 会覆盖 bundled）。详见 §3.5。
 
-- `instructions.py`：`scan_nested_instruction_files`（build 时 `os.walk` 剪枝一次）+
-  `InstructionLoader`（`(mtime_ns, size)` 缓存 + 预算 + 渲染）+ 纯函数
-  `render_workspace_instructions`（便于直接断言）
+- `instructions.py`：`scan_nested_instruction_files`（每回合 `os.walk` 剪枝重扫一次——
+  清单要一次全树遍历，实测 ~580 µs，所以按回合刷新而不是按请求）+
+  `InstructionLoader`（根目录正文 `(mtime_ns, size)` 缓存，每请求探测 + 预算 + 渲染）+
+  纯函数 `render_workspace_instructions`（便于直接断言）
 - 缺文件时段的正文是"没有指令文件 + 建议在掌握稳定知识后创建 + 写入需要批准 +
   不许写密钥/临时状态/未验证猜测"——**触发确定**，不依赖模型某轮想起
 - 写入走 `write_file`/`edit` 的 approval 门（不变式 1：变更作为 `tool/call` +
@@ -804,11 +805,13 @@ instructions（live system 段，order 20） ← C：确定性探测 + 正文/�
   （`python -m pytest -q test_calc.py -k add`）。结果：system 里有该正文，模型执行的
   正是这条命令（只按全局 `tool:bash` 提示套了 `conda run` 外壳），并在回答里说明
   "按 AGENTS.md 的约定只跑了 `-k add`"（验收标准 3）
-- **单元测试 15 条**：缺失提示、根文件注入、两个候选的顺序、超预算截断指引、
+- **单元测试 17 条**：缺失提示、根文件注入、两个候选的顺序、超预算截断指引、
   超过读取上限不读进内存、live 渲染随文件变化、子目录只列路径（隐藏目录不扫）、
   factory 级全链路（通用规则在前、注入正文居中、工具段在后）；三态三条（读不到 →
   `files="unreadable"` 且**不给创建指引**、同名目录算读不到、一份可读 + 一份读不到时
   正文照常注入并点名后者）；代码回顾补的四条（空文件算"存在"、缓存命中不重读且两次
-  渲染字节相同、越界符号链接不注入、预算自洽性）
-- 门禁：`ruff` / `mypy` 干净、`pytest 122 passed`（与技能两来源那批测试合并后的总数）
+  渲染字节相同、越界符号链接不注入、预算自洽性）；新鲜度补的两条（清单按回合刷新：
+  同回合不重扫 / 新回合看得见新建与删除；factory 接线用**真回合**验——不传 `turn=`
+  时第二条断言必失败）
+- 门禁：`ruff` / `mypy` 干净、`pytest 124 passed`（与技能那批测试合并后的总数）
 

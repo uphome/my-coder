@@ -484,13 +484,20 @@ live 段的语义（`prompt.render` 每次模型请求求值一次）正好覆�
 也不需要 DSH 那套 baseline/delta 变更账（它注入一次，所以必须记增量；我们每请求重算，
 重算替代版本账）。
 
-**探测（确定性，不靠模型自觉）**：`InstructionLoader` 在 build 时扫一次子目录清单
-（`os.walk` 原地剪枝隐藏目录/缓存，`dirnames` 排序后再走——不排的话提前 `break` 收
-前 N 条会因文件系统顺序不同而给出不同子集，段字节就不可复现），每次渲染时读根目录
-候选文件（`AGENTS.md`、`CLAUDE.md`，按候选顺序）并按 `(mtime_ns, size)` 缓存；
-候选路径先 `resolve()` 再判是否仍在工作区内——**指向工作区外的符号链接不注入**，
-按"读不到"报出来（工具层已经用 `resolve_in_workspace` 拦住同一条路，指令读取是宿主
-的另一条路径，不拦就等于开了一个把工作区外文件送进 system prompt 的口子）。
+**两级新鲜度**：注入的内容和子目录清单"保质期"不同，判据是代价而不是"越新越好"。
+
+| 注入物 | 刷新时机 | 一次刷新的代价 | 为什么是这个粒度 |
+|---|---|---|---|
+| 根目录正文 | **每请求**（`(mtime_ns, size)` 键控缓存） | 2 次 `stat`（微秒级） | 便宜；而且"模型刚写下的 AGENTS.md"必须立刻生效——这正是 issue #6 的关键路径 |
+| 子目录清单 | **每回合**（回合号当刷新纪元，`render(turn=…)`） | 一次 `os.walk` 全树遍历（本仓库实测 ~580 µs） | 贵三个数量级；"本回合新建的子目录约定下一回合可见"够用 |
+
+**探测（确定性，不靠模型自觉）**：`InstructionLoader` 每次渲染读根目录候选文件
+（`AGENTS.md`、`CLAUDE.md`，按候选顺序）并按 `(mtime_ns, size)` 缓存；子目录清单每回合
+重扫一次（`os.walk` 原地剪枝隐藏目录/缓存，`dirnames` 排序后再走——不排的话提前
+`break` 收前 N 条会因文件系统顺序不同而给出不同子集，段字节就不可复现）；候选路径先
+`resolve()` 再判是否仍在工作区内——**指向工作区外的符号链接不注入**，按"读不到"报出来
+（工具层已经用 `resolve_in_workspace` 拦住同一条路，指令读取是宿主的另一条路径，不拦就
+等于开了一个把工作区外文件送进 system prompt 的口子）。
 
 - 有文件 → `<workspace_instructions files="AGENTS.md">` + `Instructions from: <路径>`
   + 正文（单文件 8k / 整段 20k 字符预算，超预算截断并提示"用 read_file 读剩下的"；
@@ -610,7 +617,7 @@ workspace 沙箱）；DSH 式沙箱承诺又把可读范围锁在工作区内。
 | `agent.py` | 被动状态机：wake / kick / when_idle / cancel |
 | `persistence.py` | JSONL 追加写 + 重放读 |
 | `recovery.py` | 会话自愈：恢复时给崩溃留下的悬空工具调用补 is_error 合成结果 + `session/repaired` 痕迹 |
-| `instructions.py` | 工作区项目指令文件（AGENTS.md/CLAUDE.md）：子目录清单扫描 + 根文件探测 + 字符预算 + system live 段渲染 |
+| `instructions.py` | 工作区项目指令文件（AGENTS.md/CLAUDE.md）：子目录清单扫描（每回合）+ 根文件探测（每请求）+ 字符预算 + system live 段渲染 |
 | `skills.py` | 按需技能：**两来源合并**（包内 `bundled_skills/` + `<workspace>/skills/`，workspace 同名覆盖，按名字排序）+ 目录文本 + 按名字解析正文 |
 | `bundled_skills/` | 随 agent 发布的技能正文（`pyproject` 的 package-data）；自带能力必须跟着 agent 走，不能跟着工作区走 |
 | `tools/` | 应用工具（file_io 读写/编辑、search grep/glob、shell bash、todo、**web_search 联网搜索**、**skill 按名字取技能正文**）+ `build_tools(workspace, skills=…)` |

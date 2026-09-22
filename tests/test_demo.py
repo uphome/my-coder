@@ -1737,6 +1737,43 @@ def test_nested_instruction_files_are_listed_but_not_inlined(tmp_path):
     assert 'GIT_BODY' not in rendered
 
 
+def test_nested_instruction_list_refreshes_per_turn(tmp_path, monkeypatch):
+    """子目录清单按**回合**刷新：同一回合内不重扫（省一次全树遍历），新回合看得见。
+
+    根目录正文是每请求新鲜的（上面那条测过），清单不是——它要一次 `os.walk`，
+    比 stat 贵三个数量级，所以拿回合号当刷新纪元。
+    """
+    from agent_demo import instructions as instructions_module
+
+    scans: list[Path] = []
+    original = instructions_module.scan_nested_instruction_files
+
+    def counting(workspace):
+        scans.append(workspace)
+        return original(workspace)
+
+    monkeypatch.setattr(instructions_module, 'scan_nested_instruction_files', counting)
+    loader = InstructionLoader(tmp_path)
+    assert len(scans) == 1                                      # 构造时那份
+
+    assert 'Subdirectory instruction files' not in loader.render(turn=1)
+    assert len(scans) == 2                                      # 新纪元 → 重扫一次
+    assert loader.render(turn=1) == loader.render(turn=1)        # 同一回合：不再扫
+    assert len(scans) == 2
+
+    web = tmp_path / 'web'
+    web.mkdir()
+    (web / 'AGENTS.md').write_text('WEB', encoding='utf-8')
+    assert 'web/AGENTS.md' not in loader.render(turn=1)          # 本回合新建 → 还看不见
+    assert 'web/AGENTS.md' in loader.render(turn=2)              # 下一回合 → 进清单
+    assert len(scans) == 3
+
+    (web / 'AGENTS.md').unlink()
+    assert 'web/AGENTS.md' in loader.render(turn=2)              # 同一回合：清单不动
+    assert 'web/AGENTS.md' not in loader.render(turn=3)          # 删掉 → 下一回合消失
+    assert len(scans) == 4
+
+
 async def test_build_agent_injects_workspace_instructions_before_tool_sections(tmp_path):
     """factory 级全链路：通用规则（discipline）在前，注入的正文在后，工具段最后。"""
     from argparse import Namespace
@@ -1755,6 +1792,44 @@ async def test_build_agent_injects_workspace_instructions_before_tool_sections(t
     assert 'Instructions:' in system                             # 通用规则（discipline 段）
     assert 'RUN: pytest -q' in system                            # 注入的正文（instructions 段）
     assert system.index('Instructions:') < system.index('RUN: pytest -q') < system.index('Use bash')
+
+
+async def test_instruction_section_follows_the_agent_turn_number(tmp_path):
+    """factory 把 `agent.last_turn` 接进 live 段：新建的子目录指令文件下一回合进清单。
+
+    用**真回合**（不是手改 `_last_turn`）验接线：factory 忘了传 `turn=` 的话，加载器
+    就永远停在构造时那份清单上，最后那条断言必然失败。
+    """
+    from argparse import Namespace
+
+    from agent_demo.factory import build_agent
+
+    args = Namespace(fake=True, model='fake-model', workspace=tmp_path, hide_reasoning=False,
+                     session='id', sessions=str(tmp_path), prompt='x', resume=False, verbose=False)
+    agent = build_agent(Session(id='turn-wired'), args,
+                        {'reasoning_started': False, 'request_no': 0, 'tool_no': 0})
+    agent.llm = FakeLlm(script=[
+        {'text': 'one', 'finish_reason': 'stop'},
+        {'text': 'two', 'finish_reason': 'stop'},
+    ], provider='fake', model='fake-model')
+
+    def last_system() -> str:
+        header = agent.session.request_header()
+        assert header is not None
+        return header['system']
+
+    agent.followup('one')
+    await agent.when_idle()
+    assert 'Subdirectory instruction files' not in last_system()   # 回合 1：还没有这份约定
+
+    web = tmp_path / 'web'
+    web.mkdir()
+    (web / 'AGENTS.md').write_text('WEB_BODY', encoding='utf-8')
+
+    agent.followup('two')
+    await agent.when_idle()
+    assert 'web/AGENTS.md' in last_system()                        # 回合 2：进清单
+    assert 'WEB_BODY' not in last_system()                         # 仍然只列路径
 
 
 def test_todo_write_folds_and_injects_into_prompt(tmp_path):

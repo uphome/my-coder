@@ -71,8 +71,13 @@ def build_agent(session: Session, args, ui_state: dict, hooks=None) -> Agent:
     # 且在一个会话里字节稳定（除非 agent 自己改它）——不像 todo 状态每步都变、会把
     # 缓存前缀打碎。order 20 = 紧跟通用纪律，先于工具段与技能目录。它是 system 里
     # 两个 live 段之一（另一个是下面的 skill:catalog）。
+    #
+    # 两级新鲜度：**根目录正文每请求重读**（stat 缓存，文件真变了才读盘），
+    # **子目录清单每回合重扫**（把回合号当刷新纪元传进去）——清单要一次全树遍历，
+    # 本仓库实测 ~580 µs、比一次 stat 贵三个数量级，而"本回合新建的子目录约定下一
+    # 回合看见"够用（根目录正文那一路才是每请求都新鲜的）。
     _instructions = InstructionLoader(args.workspace)
-    prompt.section('instructions', 20, lambda ctx: _instructions.render())
+    prompt.section('instructions', 20, lambda ctx: _instructions.render(turn=ctx['agent'].last_turn))
     # skill:catalog：可用技能目录（**live 段**，order 95）。表由 SkillTable 持有：
     # 每次求值先算一遍内容指纹（两个技能目录的 *.md 名单 + 每文件 mtime/size，实测
     # ~80 µs），指纹变了才重扫重解析——所以**会话中途新增/改写/删除技能，下一次模型

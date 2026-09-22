@@ -14,8 +14,11 @@
 
 三个职责：
 
-1. `scan_nested_instruction_files`：build 时扫一次子目录里的指令文件，**只记相对
-   路径**（正文由模型按需 `read_file`，和技能机制同一条路）
+1. `scan_nested_instruction_files`：**每个回合**扫一次子目录里的指令文件，**只记相对
+   路径**（正文由模型按需 `read_file`，和技能机制同一条路）。为什么是"每回合"而不是
+   "每请求"：这是一次全树遍历（本仓库实测 ~580 µs，比一次 `stat` 贵三个数量级），而
+   同一回合内的多次请求通常什么都没变；"本回合新建的子目录约定下一回合生效"够用了
+   （根目录正文那一路是**每请求**都新鲜的）
 2. `InstructionLoader.load`：每次渲染读根目录候选文件，`(mtime, size)` 没变就不
    重读——live 段每请求求值，不缓存就是每请求读盘
 3. `InstructionLoader.render`：探测结果 + 预算内正文 → system 段文本；没有文件时
@@ -118,7 +121,10 @@ class WorkspaceInstructions:
 
 
 def scan_nested_instruction_files(workspace: Path) -> tuple[str, ...]:
-    """扫子目录里的指令文件（build 时一次），返回相对 workspace 的 posix 路径。
+    """扫子目录里的指令文件（**每个回合**一次），返回相对 workspace 的 posix 路径。
+
+    调用时机由 `InstructionLoader.render(turn=…)` 决定：回合号变了才重扫（比较
+    "这次渲染属于哪个回合"，见 `_refresh_nested`）。
 
     用 os.walk 而不是 rglob：可以**原地剪枝**，不下钻进隐藏目录/缓存/依赖——
     rglob('**/AGENTS.md') 会先遍历整棵 node_modules 才轮到过滤。隐藏目录策略
@@ -151,6 +157,13 @@ class InstructionLoader:
     文件真的变了才读一次盘——所以这点同步 I/O 不值得 offload（对比工具层：那里
     一次要读整个文件，才有 `offload=True`）。
 
+    **两级新鲜度**（判据是代价，不是"越新越好"）：
+
+    - **根目录正文：每请求新鲜**——`stat` 是微秒级，每次渲染都探测，文件真变了才重读；
+    - **子目录清单：每回合新鲜**——清单要一次全树遍历（实测 ~580 µs），所以用回合号
+      当"刷新纪元"（`render(turn=…)`）：同一回合内多次请求复用同一份，新回合开头重扫
+      一次。于是会话中途新建的子目录指令文件**下一回合**出现在清单里。
+
     **边界例外**：候选文件由宿主直接读（不走 `sandbox.resolve_in_workspace`），
     但会做同样的越界检查——`AGENTS.md` 是指向工作区**外**的符号链接时**不注入**，
     并作为"读不到"报出来。否则一个恶意仓库就能用 `AGENTS.md -> ~/.ssh/id_rsa`
@@ -171,6 +184,8 @@ class InstructionLoader:
         self._workspace = workspace
         self._resolved_workspace = workspace.resolve()
         self._nested = scan_nested_instruction_files(workspace)
+        # 清单是按哪个回合扫的（None = 还没渲染过任何回合，先用构造时那份）
+        self._nested_turn: int | None = None
         self._cache: dict[Path, tuple[tuple[int, int], str]] = {}
 
     @property
@@ -205,9 +220,22 @@ class InstructionLoader:
         return WorkspaceInstructions(
             files=tuple(files), nested=self._nested, unreadable=tuple(unreadable))
 
-    def render(self) -> str:
-        """system 段文本（live 段 provider：每次模型请求求值一次）。"""
+    def render(self, *, turn: int | None = None) -> str:
+        """system 段文本（live 段 provider：每次模型请求求值一次）。
+
+        `turn` 是**回合号**（`factory.py` 传 `ctx['agent'].last_turn`），只用来决定
+        子目录清单要不要重扫：回合号没变就复用上一次那份。`turn=None`（直接调用、
+        测试、不关心回合的宿主）不刷新——用构造时扫到的那份。
+        """
+        self._refresh_nested(turn)
         return render_workspace_instructions(self.load())
+
+    def _refresh_nested(self, turn: int | None) -> None:
+        """回合号变了 → 重扫子目录清单（`turn=None` 表示调用方不按回合刷新）。"""
+        if turn is None or turn == self._nested_turn:
+            return
+        self._nested = scan_nested_instruction_files(self._workspace)
+        self._nested_turn = turn
 
     def _read(self, path: Path) -> tuple[str | None, str]:
         """探测一份候选文件 → `(正文, 不可用原因)`。
