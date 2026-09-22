@@ -77,9 +77,9 @@ class Inbox:
 
         纯函数式投影：_state 本身就是重放 agent/inbox/spliced 的结果
         （构造时 _apply 过；_splice 也是"先落日志再同一套语义改内存"），
-        所以这里直接读它——**不再有第二份折叠实现**。此前 web_app 自己
-        重放过一遍 spliced，同一事件类型两份折叠会分叉，且投影落在 web
-        层（CLI 看不到、测试要绕过 web 模块才测得到）。
+        所以这里直接读它——**不再有第二份折叠实现**。此前 Web 宿主（当时的
+        单文件 `web_app.py`）自己重放过一遍 spliced，同一事件类型两份折叠会
+        分叉，且投影落在 web 层（CLI 看不到、测试要绕过 web 模块才测得到）。
 
         顺序：TARGETS 顺序 = 先 next-turn（queued）后 next-step（steering）。
         """

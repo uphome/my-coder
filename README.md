@@ -56,8 +56,8 @@ Web 前端也是"投影架构"：页面只持有一份从日志重建的投影�
 
 ```sh
 # 启动 Web 服务（默认 http://127.0.0.1:8000）
-conda run -n agent-demo python -m agent_demo.web_app --workspace . --fake    # 离线（不需要 key）
-conda run -n agent-demo python -m agent_demo.web_app --workspace .           # 真实模型
+conda run -n agent-demo python -m agent_demo.web --workspace . --fake    # 离线（不需要 key）
+conda run -n agent-demo python -m agent_demo.web --workspace .           # 真实模型
 ```
 
 浏览器打开 http://127.0.0.1:8000：
@@ -107,7 +107,7 @@ conda run -n agent-demo python -m agent_demo.web_app --workspace .           # �
 ## 架构：四层单向依赖
 
 ```
-入口层  cli.py / web_app.py   CLI 与 Web 两个入口（经 factory.build_agent 组装）
+入口层  cli.py / web/         CLI 与 Web 两个入口（经 factory.build_agent 组装）
         factory.py          组装：prompt + llm（fake/真实）+ 工具 + 渲染订阅
         │
 循环层  agent.py      被动状态机：send → inbox → wake → driver → idle
@@ -208,7 +208,7 @@ compaction.py（上下文压缩引擎）
 | `ui.py` | 终端渲染（_render_event / _paint，UI 是日志投影） |
 | `factory.py` | build_agent / load_env（CLI 与 Web 共用组装） |
 | `cli.py` | CLI 入口（单次任务 / 无任务参数进 REPL） |
-| `web_app.py` | Web UI（FastAPI + SSE：会话/标题/approval/手动压缩/steer 插队） |
+| `web/` | Web 宿主：`app.py` 路由+装配 / `state.py` Seat+宿主状态 / `sessions.py` 会话生命周期 / `titles.py` 自动标题 / `payload.py` 纯函数投影（FastAPI + SSE：会话/标题/approval/手动压缩/steer 插队） |
 | `compaction.py` | 上下文压缩引擎（四步事务 + checkpoint + 会话 token 累计账） |
 | `tests/test_demo.py` | 132 个架构测试 |
 

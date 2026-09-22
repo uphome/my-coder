@@ -372,7 +372,7 @@ turn/step 序号、step/start、todo 痕迹都是**模型不可见的痕迹事�
 - 提示词未引导"信息足够就先汇报结论，不足再查"（与 gh-issue 技能要求的
   "独立验证"叠加，容易无限扩大调查面）
 - 后果：长回合期间用户无法及时得到中间结论；配合当时的 SSE 断开 bug（已修，
-  见 web_app sse_stream finally agent.cancel）还会放大"停不下来"的观感
+  见 `web/app.py` 的 sse_stream finally agent.cancel）还会放大"停不下来"的观感
 
 **候选方向**（未决）：回合内请求次数上限（如单 step 最多 N 轮工具循环后强制
 要求给结论）；或提示词/技能正文加收敛纪律（"验证核心事实后即汇报，把后续
@@ -439,7 +439,7 @@ turn/step 序号、step/start、todo 痕迹都是**模型不可见的痕迹事�
   `QueuedItem(placement, message)`（next-turn→`queued`、next-step→`steering`），
   和 `Session.derive_messages()` 并列——都是"日志 → 不可变投影"。和 todo 一样
   "不物化"：日志里没有独立队列状态，投影是纯函数。
-  - **分层教训**：投影一度写在 `web_app._queue_rows()` 里自己重放
+  - **分层教训**：投影一度写在 Web 宿主（当时是单文件 `web_app.py`）的 `_queue_rows()` 里自己重放
     `agent/inbox/spliced`——后果有两个：① 同一事件类型出现**两份折叠实现**
     （`Inbox._apply` 一份、web 一份），语义一变就分叉；② 投影绑死在 Web
     宿主上（CLI、测试都拿不到，测试要绕过 web 模块才测得到）。现在折叠只有
@@ -678,7 +678,7 @@ snippet 永远空；② 摘要无法做"句句有据"的引用；③ 摘要正�
 - **修完即持久**：`session.append` 落在 `bind_store` 之后，重放一次依然一致。
 
 判据只看投影、不看痕迹事件（只有进得了模型记忆的调用才会让 wire 非法；被
-compaction 遮蔽的老调用不该被算进来）。函数幂等，所以 `web_app._open_session_seat`
+compaction 遮蔽的老调用不该被算进来）。函数幂等，所以 `web/sessions.open_session_seat`
 与 `cli._prepare` 两个恢复入口都无条件调一次。
 
 ### 8.4 修复效果（真模型验证）

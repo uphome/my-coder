@@ -23,7 +23,7 @@ harness 的四个核心设计：
 ## 2. 架构：四层单向依赖
 
 ```
-入口层  cli.py / web_app.py   CLI 与 Web 两个入口（经 factory.build_agent 组装）
+入口层  cli.py / web/         CLI 与 Web 两个入口（经 factory.build_agent 组装）
         │
 循环层  agent.py      被动状态机：send → inbox → wake → driver → idle
         loop.py       turn/step 两级循环 + 三个钩子
@@ -125,7 +125,7 @@ claim 的批次语义：先取空整个 next-step，再从 next-turn 取一条�
 只是对象一个是"还没浮上水面的待处理输入"，一个是"模型可见的记忆"。
 
 分层要求：**折叠实现只有一份**（`_apply`/`_splice` 共用同一套 splice 语义），
-上层宿主（web/cli）只做序列化。投影一度被写在 `web_app` 里自己重放
+上层宿主（web/cli）只做序列化。投影一度被写在 Web 宿主（当时是单文件 `web_app.py`）里自己重放
 spliced——同一事件类型两份折叠必然分叉，而且投影绑死在 Web 宿主上
 （CLI/测试拿不到）。
 
@@ -455,7 +455,7 @@ HTTP 400 An assistant message with 'tool_calls' must be followed by tool message
 
 判据只看**投影**（`derive_messages`），不看痕迹事件：只有进得了模型记忆的调用才会
 让 wire 非法；被 compaction 遮蔽掉的老调用不该被算进来。函数幂等（补完再扫就什么都不
-缺），所以两个恢复入口（`web_app._open_session_seat`、`cli._prepare`）都可以无条件调一次。
+缺），所以两个恢复入口（`web/sessions.open_session_seat`、`cli._prepare`）都可以无条件调一次。
 
 实测修复效果：同一条崩溃日志，修完再发真请求 → `turn/end{reason: 'completed'}`，
 模型正确复述"收到过一条失败的工具结果，提示可重新发起"，没有幻觉成"我读过那个文件"。
@@ -672,7 +672,7 @@ workspace 沙箱）；DSH 式沙箱承诺又把可读范围锁在工作区内。
 | `ui.py` | 终端渲染（_render_event / _paint，UI 是日志投影） |
 | `factory.py` | build_agent / load_env（CLI 与 Web 共用组装） |
 | `cli.py` | CLI 入口（单次任务 / 无任务参数进 REPL） |
-| `web_app.py` | Web UI（FastAPI + SSE：会话/标题/approval/手动压缩/steer 插队；seat 化并发隔离；事件透传 turn/step + turn_start/user_message（带 message_id/rpc_id）/queue_update 帧供前端投影；队列项操作 `POST /queue/update`） |
+| `web/` | Web 宿主（入口层）：`app.py` FastAPI 路由 + `init_web` + `main`；`state.py` `Seat`/`WebState`/`state`；`sessions.py` seat 生命周期 + 会话文件 + 审批钩子；`titles.py` 自动会话标题；`payload.py` 纯函数投影（不依赖 FastAPI）。seat 化并发隔离；事件透传 turn/step + turn_start/user_message（带 message_id/rpc_id）/queue_update 帧供前端投影；队列项操作 `POST /queue/update` |
 | `compaction.py` | 上下文压缩引擎（四步事务 + checkpoint + 会话 token 累计账） |
 | `show_memory.py` | 教学脚本：重放日志展示"记忆 = 投影" |
 | `tests/test_demo.py` | 132 个架构测试（3 条平台相关：Windows 建不了符号链接时 skip） |

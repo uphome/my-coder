@@ -184,6 +184,9 @@ async def chat(request: Request) -> StreamingResponse:
         raise HTTPException(400, 'message must not be empty')
     sid = body.get('sid') or state.current_sid
     seat = state.seats.get(sid) or open_session_seat(sid, allow_missing=True)
+    # seat 一旦建成就带 agent：`Seat.agent` 只在 `open_session_seat` 的构造窗口里是
+    # None（先登记 seat 好让审批钩子闭包引用它，再 build_agent），路由侧看不到那个窗口
+    assert seat.agent is not None
     session, agent = seat.session, seat.agent
     # 提交身份（对齐 dsh 的 prompt requestId）：前端铸的 uuid，落到 durable
     # 消息 source 上；前端据此把"本地回显"原子换成真身。
@@ -278,6 +281,7 @@ async def steer(request: Request) -> dict:
     seat = state.seats.get(sid)
     if seat is None:
         raise HTTPException(404, f'session {sid!r} not open — switch to it first')
+    assert seat.agent is not None
     if seat.queue is None:
         raise HTTPException(409, '会话没有活跃对话流——用 /chat 开新回合')
     if seat.agent.status != 'running':
@@ -327,6 +331,7 @@ async def queue_update(request: Request) -> dict:
     seat = state.seats.get(sid)
     if seat is None:
         raise HTTPException(404, f'session {sid!r} not open — switch to it first')
+    assert seat.agent is not None
     code = seat.agent.update_queue(item_id, kind, text)
     return {'ok': code == 'ok', 'code': code, 'sid': sid,
             'queue': queue_rows(seat.agent)}
@@ -360,6 +365,7 @@ async def compact(request: Request) -> dict:
     seat = state.seats.get(sid)
     if seat is None:
         raise HTTPException(404, f'session {sid!r} not open — switch to it first')
+    assert seat.agent is not None
     agent = seat.agent
     if agent.status != 'idle':
         raise HTTPException(409, 'agent 正在运行——回合结束后再压缩')

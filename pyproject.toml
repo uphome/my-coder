@@ -25,7 +25,7 @@ dev = [
 
 [project.scripts]
 agent-demo = "agent_demo.cli:main"
-agent-demo-web = "agent_demo.web_app:main"
+agent-demo-web = "agent_demo.web.app:main"
 
 [tool.setuptools.packages.find]
 include = ["agent_demo*"]

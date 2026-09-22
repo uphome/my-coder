@@ -15,7 +15,7 @@ conda run -n agent-demo python -m pytest        # 132 个测试（3 条平台相
 conda run --no-capture-output -n agent-demo python -m agent_demo.cli --workspace . --fake "read README.md and summarize"
 
 # Web UI（DeepSeek 风格，默认 http://127.0.0.1:8000；--fake 离线演示）
-conda run --no-capture-output -n agent-demo python -m agent_demo.web_app --workspace . --fake
+conda run --no-capture-output -n agent-demo python -m agent_demo.web --workspace . --fake
 ```
 
 注意：Windows 控制台是 GBK，用 `--no-capture-output` 避免 conda run 二次打印乱码；`conda run` 的 `-c` 参数不支持多行/换行脚本，内联 Python 写到临时文件再跑。
@@ -30,7 +30,7 @@ conda run --no-capture-output -n agent-demo python -m agent_demo.web_app --works
 > 规则提炼进本文件，agent.md 只留背景。
 
 包结构 `agent_demo/`（取代早期平铺）。依赖方向不变，仍是四层单向：
-入口（`cli.py` / `web_app.py` → `factory.py` 组装）→ 框架循环（`agent.py` 被动状态机 / `loop.py` turn-step）→ 状态（`session.py`/`inbox.py`/`prompt.py`/`registry.py`）→ 能力（`llm.py`/`hooks.py`）→ 值（`values.py` + `persistence.py`）。应用内容独立成包：工具在 `agent_demo/tools/`（file_io/search/shell/todo/web_search/skill + build_tools 组装）、渲染在 `ui.py`、路径边界在 `sandbox.py`、常量在 `constants.py`；技能正文在 `agent_demo/bundled_skills/`（随包发布，`pyproject` 的 package-data）与 `<workspace>/skills/`（项目自带），两边由 `skills.py` 按名字合并、`skill` 工具按名字取；工作区指令文件的发现与注入在 `instructions.py`（正文直接进 system，见约定）。上层依赖下层，下层不感知上层。
+入口（`cli.py` / `web/` → `factory.py` 组装）→ 框架循环（`agent.py` 被动状态机 / `loop.py` turn-step）→ 状态（`session.py`/`inbox.py`/`prompt.py`/`registry.py`）→ 能力（`llm.py`/`hooks.py`）→ 值（`values.py` + `persistence.py`）。应用内容独立成包：工具在 `agent_demo/tools/`（file_io/search/shell/todo/web_search/skill + build_tools 组装）、渲染在 `ui.py`、路径边界在 `sandbox.py`、常量在 `constants.py`；技能正文在 `agent_demo/bundled_skills/`（随包发布，`pyproject` 的 package-data）与 `<workspace>/skills/`（项目自带），两边由 `skills.py` 按名字合并、`skill` 工具按名字取；工作区指令文件的发现与注入在 `instructions.py`（正文直接进 system，见约定）。上层依赖下层，下层不感知上层。
 
 **日志（`.sessions/<id>.jsonl`）是唯一事实源**：模型记忆（`derive_messages`）、inbox 队列、回合号、模型路由全部是日志的重放投影。恢复 = 重放（`adopt`）+ **自愈**（补上崩溃留下的悬空工具调用，见 `recovery.py`），没有独立的对话状态。本仓库已建 CodeGraph 索引（`.codegraph/`），理解/定位代码先 `codegraph_explore`。
 
@@ -202,7 +202,7 @@ conda run --no-capture-output -n agent-demo python -m agent_demo.web_app --works
   - **队列是状态层投影**：`Inbox.queued_items()` 折重放结果产出
     `QueuedItem(placement, message)`，和 `Session.derive_messages()` 并列；
     **折叠只有一份**（`_apply`/`_splice` 共用 splice 语义），web/cli 等宿主只
-    做序列化（`web_app._queue_rows(agent)` 摊平成 JSON）
+    做序列化（`web.payload.queue_rows(agent)` 摊平成 JSON）
   - **提交身份 `rpc_id`**（对齐 DSH 的 `beginSubmission`/`rpcId`）：前端提交时
     铸 uuid 随请求上来，落到 `UserSource.rpc_id`（durable）与 `QueuedItem.rpc_id`
     （队列项）；前端据此在同一次渲染里把本地回显换成真身（原子交接——不重复、
@@ -226,7 +226,7 @@ conda run --no-capture-output -n agent-demo python -m agent_demo.web_app --works
 ## 入口与工具
 
 - `agent_demo/cli.py`：CLI 入口；`--fake` 用脚本化假模型离线跑通全流程（不需要 API key）；`--resume` 演示日志重放恢复
-- `agent_demo/web_app.py`：Web UI（FastAPI + SSE，会话管理/标题/approval）；`factory.py` 的 `build_agent`/`load_env` 被 CLI 与 Web 共用
+- `agent_demo/web/`：Web 宿主（入口层，FastAPI + SSE，会话管理/标题/approval）——拆成 `app.py`（路由+装配）/ `state.py`（Seat+宿主状态）/ `sessions.py`（seat 生命周期）/`titles.py`（自动标题）/ `payload.py`（纯函数投影，不依赖 FastAPI）；`python -m agent_demo.web` 是它的入口，`factory.py` 的 `build_agent`/`load_env` 被 CLI 与 Web 共用
 - `show_memory.py`：教学脚本，重放日志展示"记忆 = 日志投影"
 - 工具在 `agent_demo/tools/`：`build_tools(workspace, skills=…)` 组装（read_file 行号分页 / list_files / grep / glob / edit / write_file / bash / todo_write / web_search / **skill**（按名字取技能正文）），工具类型（`ToolSpec`：schema + executor + 并发模式 + 卸载声明 + 超时 + requires_approval）在 `registry.py`；`--workspace` 必填（路径边界，`sandbox.py` 实现）；bash/write_file/edit 执行前需人工确认；阶段一实施进度见 `NEXT_STEPS.md`
 - `web_search` 与 `skill` 是两个"读工作区之外"的工具：前者的**搜索能力由 DeepSeek 官方在服务端提供**（Anthropic 兼容 `.../anthropic/v1/messages` + 原生服务端工具 `web_search_20250305`），我们只做"发请求 + 解析结构化块"——绝不自己抓网页、绝不从模型正文里抠 URL；没有结果块要**响亮报错**而不是退化成"没找到"；后者按**名字**（不是路径）取包内/bundled 技能正文，模型没有机会拼出任意路径。两个都不读工作区文件、无副作用，所以**不走 workspace 沙箱、也不需要 approval**（web_search 与 DSH 一致，见 `agent.md` §6）

@@ -1178,7 +1178,7 @@ function addToolResultTo(node, res) {
  * 三份数据：
  *   serverQueue        —— 服务端队列快照（SSE queue_update 帧 / POST 响应），
  *                         由状态层 Inbox.queued_items() 折 agent/inbox/spliced
- *                         得到（web_app._queue_rows 只负责摊平成 JSON）
+ *                         得到（web/payload.py 的 queue_rows 只负责摊平成 JSON）
  *   pendingSubmissions —— 本地提交回显（对齐 DSH PendingSubmission）：提交的
  *                         那一刻就登记，带 requestId（= 提交身份/durable 侧的
  *                         source.rpc_id），durable 内容一出现就在同一次渲染里

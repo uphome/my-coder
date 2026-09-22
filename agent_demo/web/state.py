@@ -17,6 +17,7 @@ import asyncio
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..agent import Agent
 from ..session import Session
 
 
@@ -25,7 +26,7 @@ class Seat:
     """一个打开过的会话的运行时资源（**并发隔离的边界**）。"""
     sid: str
     session: Session
-    agent: object | None = None
+    agent: Agent | None = None
     # 该会话当前活跃的 SSE 队列（approval 请求经它推给本会话的浏览器）。
     # 每会话同时最多一条活跃对话流（前端单标签页串行使用）；None = 空闲。
     queue: asyncio.Queue | None = None
@@ -41,7 +42,7 @@ class WebState:
     seats: dict[str, Seat] = field(default_factory=dict)
     # 焦点：仅"前端正在看哪个会话"的便捷别名（不是状态源——状态源永远是各 seat）
     session: Session | None = None
-    agent: object | None = None
+    agent: Agent | None = None
     current_sid: str = ''
     # 后台任务注册表：保住未完成任务的强引用，防事件循环 GC 丢弃
     # （asyncio 文档明确：create_task 的返回值若无引用，任务可能在执行前被回收）
