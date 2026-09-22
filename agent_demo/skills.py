@@ -48,6 +48,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from .sandbox import workspace_escape_reason
+
 # 技能名只允许小写字母/数字/连字符（对齐 Agent Skills 约定的名字规则）。
 _NAME = re.compile(r'^[a-z0-9]+(?:-[a-z0-9]+)*$')
 
@@ -72,19 +74,31 @@ class Skill:
     source: str = WORKSPACE
 
 
-def scan_skills(root: Path, *, source: str = WORKSPACE) -> list[Skill]:
+def scan_skills(
+    root: Path, *, source: str = WORKSPACE, boundary: Path | None = None,
+) -> list[Skill]:
     """扫描一个技能目录：每个 .md 文件即一个技能（解析 frontmatter 取 name/description）。
 
     只扫顶层 *.md（扁平形态，教学够用）；SKILL.md 目录形态等有需要再加。
-    解析容错：坏技能（不可读/无 frontmatter/缺 name 或 description/名字非法）
+    解析容错：坏技能（不可读/无 frontmatter/缺 name 或 description/名字非法/**越界**）
     **跳过并打诊断**（对齐项目"宁炸勿静默"——技能作者要能发现自己写坏了；
     但技能坏了不炸 system，只提示，正文由 `skill` 工具按需取）。
+
+    `boundary` = 工作区根（**传 resolve() 过的路径**），只对 workspace 来源必需：
+    技能文件由宿主直接读、不走工具沙箱，所以 `skills/x.md -> 工作区外的 md` 这种
+    符号链接必须和指令文件一样被拦下（共用 `sandbox.workspace_escape_reason`，
+    issue #25）。bundled 来源**不给边界**——包内技能本来就在工作区外，那正是
+    `skill` 工具存在的理由。少给边界（workspace 来源却忘了传）直接抛错：宁炸勿静默。
     """
+    if source == WORKSPACE and boundary is None:
+        raise ValueError(
+            'scan_skills(source=WORKSPACE) 必须给 boundary=<workspace>：'
+            '工作区来源的技能要做越界检查（符号链接可能指向工作区外）')
     skills: list[Skill] = []
     if not root.is_dir():
         return skills
     for path in sorted(root.glob('*.md')):
-        skill, error = _parse_skill(path, source)
+        skill, error = _parse_skill(path, source, boundary)
         if skill is not None:
             skills.append(skill)
         elif error:
@@ -98,11 +112,14 @@ def load_skills(workspace: Path) -> list[Skill]:
     """两个来源合并：bundled（随包）→ workspace（工作区，同名覆盖），按名字排序。
 
     排序不只是好看：目录段进 system 的缓存稳定前缀，字节必须可复现。
+    workspace 来源带上边界：项目里的技能文件可能是符号链接，越界的那些不当技能。
     """
     merged: dict[str, Skill] = {}
     for skill in scan_skills(BUNDLED_SKILLS_DIR, source=BUNDLED):
         merged[skill.name] = skill
-    for skill in scan_skills(workspace / 'skills', source=WORKSPACE):
+    for skill in scan_skills(
+        workspace / 'skills', source=WORKSPACE, boundary=workspace.resolve(),
+    ):
         merged[skill.name] = skill
     return sorted(merged.values(), key=lambda skill: skill.name)
 
@@ -247,13 +264,21 @@ def _frontmatter_span(text: str) -> tuple[int, int] | None:
     return 0, end + 4
 
 
-def _parse_skill(path: Path, source: str) -> tuple[Skill | None, str]:
+def _parse_skill(path: Path, source: str, boundary: Path | None = None) -> tuple[Skill | None, str]:
     """解析一个技能文件 → (Skill | None, 跳过原因)。
 
     返回 (None, '') = 正常跳过（非技能文件，如目录说明文档），不打诊断；
-    返回 (None, reason) = 写坏了要提示（缺 name/description、名字非法、frontmatter 没闭合）。
-    只取 name/description（目录需要），正文不读——正文由 `skill` 工具按需取。
+    返回 (None, reason) = 要提示（缺 name/description、名字非法、frontmatter 没闭合、
+    **符号链接越界**）。只取 name/description（目录需要），正文不读——正文由 `skill`
+    工具按需取。
+
+    **越界检查在读文件之前**：越界的目标连读都不该读（那是"把工作区外的内容读进内存
+    只是为了丢掉"），顺序反了就等于先泄后拦。
     """
+    if boundary is not None:
+        escape = workspace_escape_reason(path, boundary)
+        if escape:
+            return None, escape
     try:
         text = path.read_text(encoding='utf-8')
     except OSError as error:

@@ -513,9 +513,9 @@ provider failure"）：
 
 | 态 | 判据 | 渲染 |
 |---|---|---|
-| **确认存在** | `stat` 成功且是普通文件，读到了 | 注入正文（含"太大未内联"：算存在） |
-| **确认不存在** | `FileNotFoundError` | `files="none"` + 创建指引 |
-| **读不到** | 权限拒绝、IO 错误、**同名目录** | `files="unreadable"` + "内容未知、不要当成没有约定、不要提议创建" |
+| **确认存在** | `lstat` 成功、目标是普通文件，读到了 | 注入正文（含"太大未内联"：算存在） |
+| **确认不存在** | `lstat` 抛 `FileNotFoundError`（**条目本身**不在） | `files="none"` + 创建指引 |
+| **读不到** | 权限拒绝、IO 错误、**同名目录**、**断链符号链接**、**读的时候文件在动**、**符号链接指向工作区外** | `files="unreadable"` + "内容未知、不要当成没有约定、不要提议创建" |
 
 **为什么必须分开**：只有"确认不存在"才允许说"这个工作区没有项目指令文件"、才允许建议
 创建；"读不到"时提议创建可能覆盖一份已存在（只是读不到）的文件，而且模型是在假前提上
@@ -523,6 +523,19 @@ provider failure"）：
 （失败降级为结果）与"宁炸勿静默"在**探测**上的对应物：**不要把"不知道"降级成"没有"**。
 （真实案例：PI 的 CHANGELOG 记过一个叫 `AGENTS.md` 的**目录**导致 EISDIR，后来专门加了
 `statSync(...).isFile()` 判断——正是"存在但不是文件"这一态。）
+
+**三态落地的两个细节**（都是"读盘的顺序"问题，复盘见 issue #17）：
+
+- **`lstat` 再 `stat`**：`stat()` 跟随符号链接，于是 `AGENTS.md -> 不存在的目标` 抛的
+  `FileNotFoundError` 与"目录里没这个文件"长得一模一样——照旧写法会把断链当成"确认不
+  存在"，模型据此提议创建一份其实**已经存在（只是目标没了）**的约定。先 `lstat()` 确认
+  **条目**在不在，再 `stat()` 拿目标状态，两者分开才是三态。
+- **读完再取一次缓存键**：键是读之前取的 `(mtime_ns, size)`。若读的过程中文件在变
+  （编辑器保存 / agent 写文件 / git checkout），可能读到半截，而半截会被当成"这个键对应
+  的内容"**缓存住并持续服务**——模型看到缺条目的约定还不自知。所以读完再取一次键，
+  不一致就不写缓存、按"读不到"报出来，下一个请求自然重读（宁可这一轮说"内容未知"，
+  也不给模型一份被削过的正文）。这条同时封住了"键精度粗的文件系统上等长改写"那条
+  最坏组合。
 
 **边界（与 DSH 的三处裁剪，理由见 `agent.md` §9）**：只在本工作区内发现（工具被沙箱
 限制在 workspace 内，向上发现的文件模型读不到）；不做 user-global / `.local` 层级；
@@ -577,6 +590,31 @@ workspace 沙箱）；DSH 式沙箱承诺又把可读范围锁在工作区内。
   `fnmatch.fnmatch`（glob 内部就是这套 `os.path.normcase` 语义）而不是
   `name.endswith('.md')`：Windows 上 glob **不区分大小写**，`Upper.MD` 会被扫成技能
   ——指纹漏掉它，"改了看不见"这个病就从另一条路回来了（实测踩过，测试里有覆盖断言）。
+- **工作区来源必须做越界检查**（issue #25）：技能文件由宿主直接读、不走工具沙箱，
+  所以 `skills/x.md -> 工作区外的 md` 与指令文件那条是**同一个洞**——放行的话，一份
+  项目里的符号链接就能把工作区外的文件读给模型。判据与措辞两处共用
+  （`sandbox.workspace_escape_reason`，一条规则一处实现）；**bundled 来源豁免**（包内
+  技能本来就在工作区外，那正是 `skill` 工具存在的理由）；越界的那个**在读文件之前**
+  就被跳过（否则等于"先泄后拦"）并打 stderr 诊断，于是目录与工具两边同时看不到它。
+  少给边界（workspace 来源却忘了传）直接抛错：宁炸勿静默。
+
+### 3.19 宿主直读文件的两条边界：越界 + 三态
+
+`instructions.py`（指令文件）与 `skills.py`（工作区来源的技能）是**宿主自己发现并读取**
+工作区文件的两条路——它们不经过工具沙箱（模型没参与，也没给路径），所以**边界要自己
+守**。两条规则相同，实现也共用：
+
+| 规则 | 判据 | 违反时的行为 |
+|---|---|---|
+| **越界不读** | `resolve()` 后仍在 `resolve()` 过的 workspace 内（`sandbox.workspace_escape_reason`） | 指令文件按"读不到"报出来；技能跳过 + stderr 诊断 |
+| **不确定 ≠ 不存在** | 只有"条目本身不在"才算确认不存在；权限/IO/断链/同名目录/读取期间被改都是"读不到" | 按第三态渲染（`files="unreadable"`）或跳过，**绝不**降级成"没有" |
+
+为什么值得单列一条：这两条路读的是**用户仓库里的内容**，而读出来的东西一条进
+**system prompt**（指令文件正文）、一条进**对话**（技能正文）——都是"工作区里的文本
+直接变成模型的输入"。persona 明写"工作区外不可读"，工具层也已经用
+`sandbox.resolve_in_workspace` 拦住了模型给路径那条路；宿主直读这条路不自己拦，就等于
+在后门留了同一个洞。（与 `sandbox.py` 同级：hardlink / TOCTOU 不设防，这是"防误用
+保险"，不是 OS 级沙箱。）
 
 ---
 
@@ -626,18 +664,18 @@ workspace 沙箱）；DSH 式沙箱承诺又把可读范围锁在工作区内。
 | `agent.py` | 被动状态机：wake / kick / when_idle / cancel |
 | `persistence.py` | JSONL 追加写 + 重放读 |
 | `recovery.py` | 会话自愈：恢复时给崩溃留下的悬空工具调用补 is_error 合成结果 + `session/repaired` 痕迹 |
-| `instructions.py` | 工作区项目指令文件（AGENTS.md/CLAUDE.md）：子目录清单扫描（每回合）+ 根文件探测（每请求）+ 字符预算 + system live 段渲染 |
-| `skills.py` | 按需技能：**两来源合并**（包内 `bundled_skills/` + `<workspace>/skills/`，workspace 同名覆盖，按名字排序）+ 目录文本 + 按名字解析正文 |
+| `instructions.py` | 工作区项目指令文件（AGENTS.md/CLAUDE.md）：子目录清单扫描（每回合）+ 根文件三态探测（每请求；`lstat`/`stat` 分开 + 读完校验缓存键）+ 字符预算 + system live 段渲染 |
+| `skills.py` | 按需技能：**两来源合并**（包内 `bundled_skills/` + `<workspace>/skills/`，workspace 同名覆盖，按名字排序）+ `SkillTable`（stat 键控缓存）+ 目录文本 + 按名字解析正文 + **工作区来源的越界检查**（`boundary`） |
 | `bundled_skills/` | 随 agent 发布的技能正文（`pyproject` 的 package-data）；自带能力必须跟着 agent 走，不能跟着工作区走 |
 | `tools/` | 应用工具（file_io 读写/编辑、search grep/glob、shell bash、todo、**web_search 联网搜索**、**skill 按名字取技能正文**）+ `build_tools(workspace, skills=…)` |
-| `sandbox.py` | workspace 路径边界（轻量沙箱：归一化 + 前缀匹配） |
+| `sandbox.py` | workspace 路径边界：工具入参的轻量沙箱（归一化 + 前缀匹配）+ **宿主直读文件的越界判据**（`workspace_escape_reason`，指令文件与技能共用） |
 | `ui.py` | 终端渲染（_render_event / _paint，UI 是日志投影） |
 | `factory.py` | build_agent / load_env（CLI 与 Web 共用组装） |
 | `cli.py` | CLI 入口（单次任务 / 无任务参数进 REPL） |
 | `web_app.py` | Web UI（FastAPI + SSE：会话/标题/approval/手动压缩/steer 插队；seat 化并发隔离；事件透传 turn/step + turn_start/user_message（带 message_id/rpc_id）/queue_update 帧供前端投影；队列项操作 `POST /queue/update`） |
 | `compaction.py` | 上下文压缩引擎（四步事务 + checkpoint + 会话 token 累计账） |
 | `show_memory.py` | 教学脚本：重放日志展示"记忆 = 投影" |
-| `tests/test_demo.py` | 120 个架构测试 |
+| `tests/test_demo.py` | 132 个架构测试（3 条平台相关：Windows 建不了符号链接时 skip） |
 
 ---
 

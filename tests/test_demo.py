@@ -1701,6 +1701,90 @@ def test_instructions_reject_a_candidate_that_resolves_outside(tmp_path, monkeyp
     assert 'files="unreadable"' in rendered
 
 
+def test_instructions_do_not_cache_a_torn_read(tmp_path, monkeypatch):
+    """撕裂读不进缓存（issue #17 缺陷 1）：读到半截时按"读不到"报出来，下个请求重读。
+
+    复现手法：让 `read_text` 在**读的过程中**把磁盘内容改长，同时只返回半截——正是
+    "编辑器保存 / agent 写文件 / git checkout 撞上这一读"的形状。修复前那半截会被按
+    "读之前的键"缓存住，于是**后续每个请求都吃这份缺条目的约定**；修复后读完再取一次
+    键发现不一致 → 不写缓存 + `files="unreadable"`，下一次渲染拿到盘上的完整内容。
+
+    磁盘内容故意**每次读都变长**（而不是只动 mtime）：键必然不同，测试不依赖时间戳精度。
+    """
+    path = tmp_path / 'AGENTS.md'
+    path.write_text('ORIGINAL-CONTENT-AAAA', encoding='utf-8')
+    loader = InstructionLoader(tmp_path)
+    original = Path.read_text
+    calls: list[int] = []
+
+    def tearing(self, *args, **kwargs):
+        if self == path:
+            calls.append(1)
+            self.write_text('FULL-CONTENT-' + 'X' * (10 * len(calls)), encoding='utf-8')
+            return 'HALF'                                   # 读到的只是半截
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'read_text', tearing)
+    for _ in range(2):                                      # 第二次渲染 = 检验"有没有被缓存住"
+        rendered = loader.render()
+        assert 'files="unreadable"' in rendered
+        assert 'file changed while reading' in rendered
+        assert 'HALF' not in rendered                       # 半截既没进 system，也没被当成缓存内容
+        assert 'propose writing' not in rendered            # 第三态，不是"没有约定"
+
+    monkeypatch.setattr(Path, 'read_text', original)
+    healed = loader.render()
+    assert 'files="AGENTS.md"' in healed
+    assert 'FULL-CONTENT-' in healed                        # 重读拿到盘上的完整内容
+
+
+def test_instructions_treat_a_broken_symlink_as_unreadable(tmp_path, monkeypatch):
+    """断链符号链接 = 第三态"读不到"，**不是**"确认不存在"（issue #17 缺陷 2）。
+
+    平台无关的做法：文件真实存在（`lstat` 成功），只把 `stat()` 打成 `FileNotFoundError`
+    ——这正是"条目在、目标不在"的形状。修复前它被映射成 `(None, '')`，渲染出
+    "这个工作区没有约定 + 建议创建"，模型于是会在假前提上行动（顺着链接去创建目标）。
+
+    注意（本机 Python 3.13 实测）：`Path.lstat()` 的实现就是 `self.stat(follow_symlinks=False)`
+    ——假函数必须放行 `follow_symlinks=False` 那一支，否则它会把"条目在不在"也一起打掉，
+    测试就变成了在验证"不存在"。
+    """
+    path = tmp_path / 'AGENTS.md'
+    path.write_text('REAL_BODY', encoding='utf-8')
+    original = Path.stat
+
+    def broken(self, *args, **kwargs):
+        if self == path and kwargs.get('follow_symlinks', True):
+            raise FileNotFoundError(2, 'No such file or directory')
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'stat', broken)
+    loaded = InstructionLoader(tmp_path).load()
+    assert loaded.files == ()
+    assert 'broken symlink' in loaded.unreadable[0].reason
+    rendered = InstructionLoader(tmp_path).render()
+    assert 'REAL_BODY' not in rendered
+    assert 'files="unreadable"' in rendered
+    assert 'propose writing' not in rendered
+
+
+def test_instructions_report_a_real_broken_symlink_as_unreadable(tmp_path):
+    """真·断链符号链接的平台集成验证（Windows 无权限建链接 → skip）。"""
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    try:
+        (workspace / 'AGENTS.md').symlink_to(tmp_path / 'does-not-exist.md')
+    except (OSError, NotImplementedError):
+        pytest.skip('symlink not permitted on this platform')
+
+    loaded = InstructionLoader(workspace).load()
+    assert loaded.files == ()
+    assert 'broken symlink' in loaded.unreadable[0].reason
+    rendered = InstructionLoader(workspace).render()
+    assert 'files="unreadable"' in rendered
+    assert 'propose writing' not in rendered
+
+
 def test_instruction_budget_can_hold_every_candidate():
     """预算自洽：单文件上限 × 候选数 必须塞进总预算，否则多出来的会被静默丢掉。"""
     from agent_demo.instructions import (
@@ -2028,7 +2112,7 @@ def test_skill_catalog_scan_and_format(tmp_path, capsys):
     # 非技能 md（无 frontmatter）：静默跳过（不算坏，不打诊断）
     (skills_dir / 'README.md').write_text('目录说明，不是技能。\n', encoding='utf-8')
 
-    skills = scan_skills(skills_dir)
+    skills = scan_skills(skills_dir, boundary=tmp_path)
     names = [s.name for s in skills]
     assert names == ['gh-issue', 'quoted'], names
     # 引号剥离 + 值内冒号保留
@@ -2055,7 +2139,7 @@ def test_skill_catalog_scan_and_format(tmp_path, capsys):
 
     # 无技能/空目录 → 空目录文本（render 自动省略，零 token）
     assert format_catalog([]) == ''
-    assert scan_skills(tmp_path / 'no-such-dir') == []
+    assert scan_skills(tmp_path / 'no-such-dir', boundary=tmp_path) == []
 
 
 @pytest.mark.asyncio
@@ -2162,6 +2246,69 @@ async def test_skill_tool_loads_bundled_body_from_outside_the_workspace(tmp_path
     assert 'outside workspace' in denied.content
 
 
+def test_workspace_skill_pointing_outside_the_workspace_is_not_a_skill(tmp_path, monkeypatch, capsys):
+    """工作区来源的技能越界 → 不当技能（issue #25）：目录里没有、工具也取不到。
+
+    与指令文件那条（`AGENTS.md -> 工作区外` 不注入）是**同一条判据、同一个模块**
+    （`sandbox.workspace_escape_reason`）。放行的后果比指令文件更直接：技能正文是
+    `skill` 工具按需读进对话的，等于把工作区外的文件读给模型。
+
+    平台无关做法：直接换掉 `resolve` 的返回值（真符号链接那条见下一条，Windows 会 skip）。
+    """
+    from agent_demo.skills import SkillTable, format_catalog, load_skills
+    from agent_demo.tools import build_tools
+
+    body = '---\nname: leak\ndescription: 外面的技能\n---\nSECRET_OUTSIDE_WORKSPACE\n'
+    outside = tmp_path / 'outside' / 'secret.md'
+    outside.parent.mkdir()
+    outside.write_text(body, encoding='utf-8')
+    workspace = tmp_path / 'ws'
+    (workspace / 'skills').mkdir(parents=True)
+    (workspace / 'skills' / 'leak.md').write_text(body, encoding='utf-8')
+
+    original = Path.resolve
+
+    def fake(self, *args, **kwargs):
+        if self.name == 'leak.md' and self.parent.name == 'skills':
+            return outside
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'resolve', fake)
+    skills = load_skills(workspace)
+    names = [skill.name for skill in skills]
+    assert 'leak' not in names                             # 不当技能（越界）
+    assert 'project-instructions' in names                 # bundled 不受影响
+    assert 'leak' not in format_catalog(skills)            # 目录里也没有
+    assert 'SECRET_OUTSIDE_WORKSPACE' not in format_catalog(skills)
+
+    err = capsys.readouterr().err
+    assert '[skill] skipped leak.md' in err and 'outside the workspace' in err
+
+    # 工具侧同样取不到（目录与工具共用同一张表 → 不会"目录没有、工具却有"）
+    registry = build_tools(workspace=workspace, skills=SkillTable(workspace))
+    denial = asyncio.run(registry.execute('skill', {'name': 'leak'}, None))
+    assert denial.is_error is True and 'no skill named' in denial.content
+
+
+def test_workspace_skill_symlink_outside_is_skipped(tmp_path):
+    """真·符号链接的平台集成验证（Windows 无权限建链接 → skip）。"""
+    body = '---\nname: leak\ndescription: 外面的技能\n---\nSECRET\n'
+    outside = tmp_path / 'secret.md'
+    outside.write_text(body, encoding='utf-8')
+    workspace = tmp_path / 'ws'
+    (workspace / 'skills').mkdir(parents=True)
+    try:
+        (workspace / 'skills' / 'leak.md').symlink_to(outside)
+    except (OSError, NotImplementedError):
+        pytest.skip('symlink not permitted on this platform')
+
+    from agent_demo.skills import load_skills
+
+    names = [skill.name for skill in load_skills(workspace)]
+    assert 'leak' not in names
+    assert 'project-instructions' in names
+
+
 async def test_skill_tool_unknown_name_is_a_result(tmp_path):
     """未知技能名 → is_error 结果（并列出可用名字），不炸循环。"""
     from agent_demo.tools import build_tools
@@ -2259,9 +2406,9 @@ def test_skill_table_rescans_only_when_files_change(tmp_path, monkeypatch):
     scans: list[Path] = []
     original = skills_module.scan_skills
 
-    def counting(root, *, source=skills_module.WORKSPACE):
+    def counting(root, **kwargs):
         scans.append(root)
-        return original(root, source=source)
+        return original(root, **kwargs)
 
     monkeypatch.setattr(skills_module, 'scan_skills', counting)
     table = skills_module.SkillTable(tmp_path)
@@ -2352,7 +2499,7 @@ def test_skill_fingerprint_covers_every_file_scan_skills_finds(tmp_path):
             f'---\nname: {Path(name).stem.lower()}\ndescription: 初版\n---\n正文\n',
             encoding='utf-8')
 
-    scanned = {skill.path.name for skill in scan_skills(skills_dir)}
+    scanned = {skill.path.name for skill in scan_skills(skills_dir, boundary=tmp_path)}
     covered = {name for name, _, _ in _dir_signature(skills_dir) or ()}
     assert scanned <= covered                               # 扫得到的都在指纹里
 

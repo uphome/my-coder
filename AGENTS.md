@@ -9,7 +9,7 @@ Python 复刻 deepseek-harness 架构的教学 demo（agent 框架本身，不�
 # 质量门：ruff + mypy + pytest 三绿才可提交（pyproject.toml 已配好）
 conda run -n agent-demo python -m ruff check agent_demo tests
 conda run -n agent-demo python -m mypy agent_demo
-conda run -n agent-demo python -m pytest        # 126 个测试
+conda run -n agent-demo python -m pytest        # 132 个测试（3 条平台相关：Windows 建不了符号链接时 skip）
 
 # CLI（可 pip install -e . 后直接 agent-demo；或模块方式跑）
 conda run --no-capture-output -n agent-demo python -m agent_demo.cli --workspace . --fake "read README.md and summarize"
@@ -125,15 +125,23 @@ conda run --no-capture-output -n agent-demo python -m agent_demo.web_app --works
   - **探测是三态，不是两态**（对齐 DSH 的 `ScopeInstructionProbe` 与 opencode 的
     `SystemContext.unavailable`，后者原话是"distinguishes confirmed absence from
     provider failure"）：**确认存在**（注入正文）/ **确认不存在**（只有这一态才允许
-    说"没有项目指令文件"、才允许建议创建）/ **读不到**（权限拒绝、IO 错误、同名目录
-    ——必须说"内容未知"：既不许当成"没有约定"，也不许提议创建，因为可能覆盖一份已
-    存在只是读不到的文件）。**不要把"不知道"降级成"没有"**，这是不变式 5 与
-    "宁炸勿静默"在探测上的对应物
+    说"没有项目指令文件"、才允许建议创建）/ **读不到**（权限拒绝、IO 错误、同名目录、
+    **断链符号链接**、**读的时候文件在动**、**符号链接指向工作区外**——必须说"内容未知"：
+    既不许当成"没有约定"，也不许提议创建，因为可能覆盖一份已存在只是读不到的文件）。
+    **不要把"不知道"降级成"没有"**，这是不变式 5 与"宁炸勿静默"在探测上的对应物
+  - **三态落在"读盘的顺序"上**（两个坑，复盘见 issue #17）：① **`lstat` 再 `stat`**——
+    `stat()` 跟随符号链接，断链抛的 `FileNotFoundError` 与"目录里没这个文件"长得一样，
+    照旧写法会把断链当成"确认不存在"、让模型去创建一份其实已经存在（只是目标没了）的约定；
+    ② **读完再取一次缓存键**——键是读之前取的 `(mtime_ns, size)`，读的过程中文件在变
+    （编辑器保存 / agent 写文件 / git checkout）就可能读到半截，而半截会被当成"这个键
+    对应的内容"**一直服务下去**（模型看到缺条目的约定还不自知）。键不一致就不写缓存、
+    按"读不到"报出来，下个请求自然重读
   - **符号链接不越界**：候选文件由宿主直接读（不走工具沙箱），但做**同样的**越界
     检查——`AGENTS.md` 指向工作区外时**不注入**，并作为"读不到"报出来。否则一个
     `AGENTS.md -> ~/.ssh/id_rsa` 就能把工作区外的文件塞进 system prompt 发给模型，
     与 persona 的"工作区外不可读"直接矛盾。（与 `sandbox.py` 同级：hardlink /
-    TOCTOU 不设防，"防误用保险"不是 OS 级沙箱）
+    TOCTOU 不设防，"防误用保险"不是 OS 级沙箱）**技能的工作区来源是同一个洞**，
+    共用同一判据：`sandbox.workspace_escape_reason`（见"按需技能"约定）
   - **输出必须可复现**：子目录扫描 `dirnames.sort()` 后再走（`os.walk` 的顺序取决于
     文件系统，排序前提前 `break` 收前 N 条会让不同机器得到不同子集 → 段字节不可复现）；
     文件没变时两次渲染**字节相同**，缓存前缀才不因"每请求重新渲染"而失效
@@ -168,6 +176,12 @@ conda run --no-capture-output -n agent-demo python -m agent_demo.web_app --works
     碰（live 段在循环线程、`offload=True` 的 skill 工具在工作线程），无锁时两次刷新
     可能交错成"指纹是新的、表是旧的"——那之后每次求值都以为没变，描述就**永远**停在
     旧值；快路径（指纹没变）不碰锁，所以循环线程不会被工作线程的重扫阻塞
+  - **工作区来源必须做越界检查（bundled 豁免）**：技能正文由宿主直接读、不走工具沙箱，
+    所以 `skills/x.md -> 工作区外的 md` 与指令文件那条是同一个洞（issue #25）——放行的话
+    一份项目里的符号链接就能把工作区外的文件读给模型。判据与措辞两处共用
+    `sandbox.workspace_escape_reason`（**一条规则一处实现**）；越界的技能在**读文件之前**
+    就被跳过并打 stderr 诊断（否则等于"先泄后拦"），于是目录与工具两边同时看不到它。
+    `scan_skills(source=WORKSPACE)` 少给 `boundary` 直接抛错：宁炸勿静默
   - **正文 = 工具结果注入，按名字取**：模型调 `skill(name)` → host 把名字解析到文件
     → 正文作为 tool/result（source.kind='tool'）进 derive_messages，与读任何文件机制
     一致（落日志可重建、可被 compaction 折叠）。**这是对早期"不新增 skill() 加载
@@ -200,6 +214,14 @@ conda run --no-capture-output -n agent-demo python -m agent_demo.web_app --works
     `steer-unavailable`（agent 空闲时没有"下一步"）/ `unknown-action`
   - 三条推送通道幂等：SSE `queue_update` 帧、`POST /steer` 响应体、
     `/history` 与 `/sessions/*/switch|new` 响应体
+- **发现缺口时怎么办（本仓库的工作方式，2026-09 复盘）**：实现或回顾时发现问题，
+  **先判断能不能就地修，再决定要不要开 issue**——① 是本 PR 引入的 → **必须在本 PR
+  修掉**，不留尾巴（哪怕窗口极小）；② 修它只要几十行、且不改变本 PR 的语义 →
+  **顺手修**，在 PR 正文里点明；③ 只有"真的大 / 真该单独评估"的才开 issue，且必须
+  写清**建议什么时候修、卡在什么前提**。同主题**合并成一条**（别把一个批次拆成三条）；
+  **没承诺要做的取舍与候选方案进 `NEXT_STEPS.md`，不进 issue 列表**——issue 只装
+  "决定要修 / 要做的事"。起因：一度"发现即记 issue"，两天开了 6 条，列表长得比关得
+  快（11 开 / 5 关），其中几条是十几行就能修完的小缺陷——那不是记录，是把活推给未来
 
 ## 入口与工具
 
