@@ -526,6 +526,35 @@ provider failure"）：
 里，模型用的正是文件规定的命令（`python -m pytest -q test_calc.py -k add`，只按全局
 `tool:bash` 提示套了 `conda run` 外壳），并在回答里说明"按 AGENTS.md 的约定只跑了
 `-k add`"。
+### 3.18 技能的两个来源：自带能力跟着 agent 走
+
+技能正文不再是"只从工作区读"，而是**两个来源按名字合并**（对齐 DSH 的
+project / user / bundled 与同名覆盖）：
+
+| 来源 | 位置 | 谁维护 | 例子 |
+|---|---|---|---|
+| **bundled** | 包内 `agent_demo/bundled_skills/*.md`（`pyproject` package-data 保证随包发布） | agent 作者 | `project-instructions`（怎么写 AGENTS.md，任何工作区都适用） |
+| **workspace** | `<workspace>/skills/*.md` | 项目 / 用户 | `gh-issue`（只对本仓库有意义的工作流） |
+
+同名时 **workspace 覆盖 bundled**；合并后按名字排序——目录段进 system 的缓存稳定
+前缀，字节必须可复现。
+
+**为什么必须有 bundled 这一层**（issue #22 实测）：早期只扫工作区，于是"用户在自己
+的项目里跑这个 agent"时，system 里没有「可用技能」段、`read_file` 读包内技能被沙箱
+拒（`path outside workspace`）——**换个工作区自带能力归零**。根因是两种参考实现各取
+了一半：PI 式"模型用 read 按路径取正文"要求技能文件在**模型读得到的地方**（PI 没有
+workspace 沙箱）；DSH 式沙箱承诺又把可读范围锁在工作区内。两者组合，bundled 就够不着。
+
+**取正文：`skill(name)` 工具，不是路径**。host 把名字解析到文件（自带技能是 host 自己
+的资源），所以：
+
+- **沙箱承诺一个字不用改**：工具入参只有名字，模型没有机会拼出路径；查不到就是一条
+  `is_error` 结果（失败降级为结果，不变式⑤），不需要给沙箱开任何例外；
+- **正文仍然作为 tool/result 进日志**：可重建、可被 compaction 折叠、前端画成工具卡
+  ——与"读任何文件"机制一致，换的只是"怎么找到文件"；
+- **目录与工具共用同一张表**（`factory` 里算一次、传两处），"目录里有的"和"工具能
+  取到的"永不漂移；目录段**不再列路径**（列了只会诱导 `read_file`，而 bundled 读了
+  会被拒）。
 
 ---
 
@@ -576,8 +605,9 @@ provider failure"）：
 | `persistence.py` | JSONL 追加写 + 重放读 |
 | `recovery.py` | 会话自愈：恢复时给崩溃留下的悬空工具调用补 is_error 合成结果 + `session/repaired` 痕迹 |
 | `instructions.py` | 工作区项目指令文件（AGENTS.md/CLAUDE.md）：子目录清单扫描 + 根文件探测 + 字符预算 + system live 段渲染 |
-| `skills.py` | 按需技能：`skills/*.md` 扫描（frontmatter 解析）+ 目录文本（正文由模型按需 read_file） |
-| `tools/` | 应用工具（file_io 读写/编辑、search grep/glob、shell bash、todo、**web_search 联网搜索**）+ `build_tools(workspace)` |
+| `skills.py` | 按需技能：**两来源合并**（包内 `bundled_skills/` + `<workspace>/skills/`，workspace 同名覆盖，按名字排序）+ 目录文本 + 按名字解析正文 |
+| `bundled_skills/` | 随 agent 发布的技能正文（`pyproject` 的 package-data）；自带能力必须跟着 agent 走，不能跟着工作区走 |
+| `tools/` | 应用工具（file_io 读写/编辑、search grep/glob、shell bash、todo、**web_search 联网搜索**、**skill 按名字取技能正文**）+ `build_tools(workspace, skills=…)` |
 | `sandbox.py` | workspace 路径边界（轻量沙箱：归一化 + 前缀匹配） |
 | `ui.py` | 终端渲染（_render_event / _paint，UI 是日志投影） |
 | `factory.py` | build_agent / load_env（CLI 与 Web 共用组装） |
@@ -585,7 +615,7 @@ provider failure"）：
 | `web_app.py` | Web UI（FastAPI + SSE：会话/标题/approval/手动压缩/steer 插队；seat 化并发隔离；事件透传 turn/step + turn_start/user_message（带 message_id/rpc_id）/queue_update 帧供前端投影；队列项操作 `POST /queue/update`） |
 | `compaction.py` | 上下文压缩引擎（四步事务 + checkpoint + 会话 token 累计账） |
 | `show_memory.py` | 教学脚本：重放日志展示"记忆 = 投影" |
-| `tests/test_demo.py` | 116 个架构测试 |
+| `tests/test_demo.py` | 120 个架构测试 |
 
 ---
 

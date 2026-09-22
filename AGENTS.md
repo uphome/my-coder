@@ -9,7 +9,7 @@ Python 复刻 deepseek-harness 架构的教学 demo（agent 框架本身，不�
 # 质量门：ruff + mypy + pytest 三绿才可提交（pyproject.toml 已配好）
 conda run -n agent-demo python -m ruff check agent_demo tests
 conda run -n agent-demo python -m mypy agent_demo
-conda run -n agent-demo python -m pytest        # 116 个测试
+conda run -n agent-demo python -m pytest        # 120 个测试
 
 # CLI（可 pip install -e . 后直接 agent-demo；或模块方式跑）
 conda run --no-capture-output -n agent-demo python -m agent_demo.cli --workspace . --fake "read README.md and summarize"
@@ -30,7 +30,7 @@ conda run --no-capture-output -n agent-demo python -m agent_demo.web_app --works
 > 规则提炼进本文件，agent.md 只留背景。
 
 包结构 `agent_demo/`（取代早期平铺）。依赖方向不变，仍是四层单向：
-入口（`cli.py` / `web_app.py` → `factory.py` 组装）→ 框架循环（`agent.py` 被动状态机 / `loop.py` turn-step）→ 状态（`session.py`/`inbox.py`/`prompt.py`/`registry.py`）→ 能力（`llm.py`/`hooks.py`）→ 值（`values.py` + `persistence.py`）。应用内容独立成包：工具在 `agent_demo/tools/`（file_io/search/shell/todo/web_search + build_tools 组装）、渲染在 `ui.py`、路径边界在 `sandbox.py`、常量在 `constants.py`；技能与工作区指令文件的发现/渲染分别是 `skills.py` 与 `instructions.py`（技能正文在 `skills/`，按需 read_file；指令文件正文直接进 system，见约定）。上层依赖下层，下层不感知上层。
+入口（`cli.py` / `web_app.py` → `factory.py` 组装）→ 框架循环（`agent.py` 被动状态机 / `loop.py` turn-step）→ 状态（`session.py`/`inbox.py`/`prompt.py`/`registry.py`）→ 能力（`llm.py`/`hooks.py`）→ 值（`values.py` + `persistence.py`）。应用内容独立成包：工具在 `agent_demo/tools/`（file_io/search/shell/todo/web_search/skill + build_tools 组装）、渲染在 `ui.py`、路径边界在 `sandbox.py`、常量在 `constants.py`；技能正文在 `agent_demo/bundled_skills/`（随包发布，`pyproject` 的 package-data）与 `<workspace>/skills/`（项目自带），两边由 `skills.py` 按名字合并、`skill` 工具按名字取；工作区指令文件的发现与注入在 `instructions.py`（正文直接进 system，见约定）。上层依赖下层，下层不感知上层。
 
 **日志（`.sessions/<id>.jsonl`）是唯一事实源**：模型记忆（`derive_messages`）、inbox 队列、回合号、模型路由全部是日志的重放投影。恢复 = 重放（`adopt`）+ **自愈**（补上崩溃留下的悬空工具调用，见 `recovery.py`），没有独立的对话状态。本仓库已建 CodeGraph 索引（`.codegraph/`），理解/定位代码先 `codegraph_explore`。
 
@@ -113,10 +113,8 @@ conda run --no-capture-output -n agent-demo python -m agent_demo.web_app --works
     的确定性提示（issue #6 的方案 C 落地）
   - **规则与状态分离**：通用规则（存在就先读并遵循 / 稳定知识提议写进去 / 不静默改 /
     不写密钥临时状态未验证猜测）属于**每轮都生效**的通用纪律 → 进 `discipline` 段；
-    live 段只承载**状态与内容**。内容载体是**项目级技能**
-    `skills/project-instructions.md`（骨架 + 该写/不该写 + 何时更新），由技能目录按需加载
-    ——注意它是**工作区**技能：只在带 `skills/` 的工作区里可见；"自带能力要跟着 agent
-    走"这条缺口与它的修法见 issue #22
+    live 段只承载**状态与内容**。内容载体是**随包发布的技能** `project-instructions`
+    （bundled，见"按需技能"约定：任何工作区都取得到），由技能目录按需加载
   - **探测是三态，不是两态**（对齐 DSH 的 `ScopeInstructionProbe` 与 opencode 的
     `SystemContext.unavailable`，后者原话是"distinguishes confirmed absence from
     provider failure"）：**确认存在**（注入正文）/ **确认不存在**（只有这一态才允许
@@ -142,15 +140,25 @@ conda run --no-capture-output -n agent-demo python -m agent_demo.web_app --works
 - 每个文件顶部有 `from __future__ import annotations`
 - **按需技能（skill）机制的设计决策**（落地时遵循；三家对照与取舍背景见
   `agent.md` §3，那里只留动机不作规范）：
-  - 技能 = `skills/<name>.md` 文件 + YAML frontmatter（name/description）
-  - **目录（catalog）静态注入 system**：只放 name + description + 相对
-    workspace 路径（正文绝不进 system）；作为静态 section 注册，order 必须
-    **小于 todo:state 等动态 live 段**——目录处于缓存稳定前缀，不被动态段
-    拖累（todo:state 现状 order=100，故目录 order 取 <100）
-  - **正文 = 工具结果注入**：模型用现有 read_file 按目录路径读技能文件 →
-    正文作为 tool/result（source.kind='tool'）进 derive_messages，与读任何
-    文件机制一致（落日志可重建、可被 compaction 折叠）；**不新增 skill() 专用
-    加载工具**，不搞 DSH 式注入 user 快照
+  - 技能 = `*.md` 文件 + YAML frontmatter（name/description），正文是操作指南
+    （纯指令，不携带执行代码）
+  - **两个来源，按名字合并（对齐 DSH 的 project / user / bundled 与"同名覆盖"）**：
+    **bundled** 随 agent 发布，放包内 `agent_demo/bundled_skills/*.md`——agent 自带的
+    通用能力（如"怎么写 AGENTS.md"）；**workspace** 放 `<workspace>/skills/*.md`——
+    项目自己的约定与工作流。同名时 **workspace 覆盖 bundled**；合并后**按名字排序**，
+    目录字节可复现。**自带能力必须跟着 agent 走**：放在工作区里等于"换个工作区就
+    消失"（issue #22 实测：用户自己的项目里目录为空、`read_file` 读包内技能被沙箱拒）
+  - **目录（catalog）静态注入 system**（order 95，小于 todo:state 等动态段）：只放
+    name + description，**不列路径**——列路径会诱导模型去 `read_file`，而 bundled
+    技能在工作区之外、读了会被拒。目录与 `skill` 工具**共用同一张表**（`factory` 里
+    算一次传两处），所以"目录里有的"和"工具能取到的"永不漂移
+  - **正文 = 工具结果注入，按名字取**：模型调 `skill(name)` → host 把名字解析到文件
+    → 正文作为 tool/result（source.kind='tool'）进 derive_messages，与读任何文件机制
+    一致（落日志可重建、可被 compaction 折叠）。**这是对早期"不新增 skill() 加载
+    工具"那条决策的收窄**：它的前提是"技能文件总能被 `read_file` 读到"，而 bundled
+    技能在包内、被沙箱挡住——所以自带技能必须有一条**不经过路径**的通道；
+    workspace 技能为统一取法也走同一个工具。**沙箱承诺不受影响**：工具入参只有
+    名字，模型没有机会拼出路径；查不到就是一条 `is_error` 结果（失败降级为结果）
 - **待处理消息（inbox 队列）的显示与操作规则**（落地时遵循；DSH 源码对照、
   三个配套机制与两次位置 bug 的复盘见 `agent.md` §5）：
   - **按 placement 分区渲染，恒定贴尾**——未 claim 的消息在日志里没有 seq
@@ -182,6 +190,6 @@ conda run --no-capture-output -n agent-demo python -m agent_demo.web_app --works
 - `agent_demo/cli.py`：CLI 入口；`--fake` 用脚本化假模型离线跑通全流程（不需要 API key）；`--resume` 演示日志重放恢复
 - `agent_demo/web_app.py`：Web UI（FastAPI + SSE，会话管理/标题/approval）；`factory.py` 的 `build_agent`/`load_env` 被 CLI 与 Web 共用
 - `show_memory.py`：教学脚本，重放日志展示"记忆 = 日志投影"
-- 工具在 `agent_demo/tools/`：`build_tools(workspace)` 组装（read_file 行号分页 / list_files / grep / glob / edit / write_file / bash / todo_write / web_search），工具类型（`ToolSpec`：schema + executor + 并发模式 + 卸载声明 + 超时 + requires_approval）在 `registry.py`；`--workspace` 必填（路径边界，`sandbox.py` 实现）；bash/write_file/edit 执行前需人工确认；阶段一实施进度见 `NEXT_STEPS.md`
-- `web_search` 是唯一"读工作区之外"的工具：**搜索能力由 DeepSeek 官方在服务端提供**（Anthropic 兼容 `.../anthropic/v1/messages` + 原生服务端工具 `web_search_20250305`），我们只做"发请求 + 解析结构化块"——绝不自己抓网页、绝不从模型正文里抠 URL；没有结果块要**响亮报错**而不是退化成"没找到"。它不读文件、无副作用，所以**不走 workspace 沙箱、也不需要 approval**（与 DSH 一致，见 `agent.md` §6）
+- 工具在 `agent_demo/tools/`：`build_tools(workspace, skills=…)` 组装（read_file 行号分页 / list_files / grep / glob / edit / write_file / bash / todo_write / web_search / **skill**（按名字取技能正文）），工具类型（`ToolSpec`：schema + executor + 并发模式 + 卸载声明 + 超时 + requires_approval）在 `registry.py`；`--workspace` 必填（路径边界，`sandbox.py` 实现）；bash/write_file/edit 执行前需人工确认；阶段一实施进度见 `NEXT_STEPS.md`
+- `web_search` 与 `skill` 是两个"读工作区之外"的工具：前者的**搜索能力由 DeepSeek 官方在服务端提供**（Anthropic 兼容 `.../anthropic/v1/messages` + 原生服务端工具 `web_search_20250305`），我们只做"发请求 + 解析结构化块"——绝不自己抓网页、绝不从模型正文里抠 URL；没有结果块要**响亮报错**而不是退化成"没找到"；后者按**名字**（不是路径）取包内/bundled 技能正文，模型没有机会拼出任意路径。两个都不读工作区文件、无副作用，所以**不走 workspace 沙箱、也不需要 approval**（web_search 与 DSH 一致，见 `agent.md` §6）
 - `.env` 存 `DEEPSEEK_API_KEY`/`DEEPSEEK_BASE_URL`；`.sessions/`、`.codegraph/`、`.env` 均不入库
