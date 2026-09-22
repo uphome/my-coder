@@ -34,6 +34,33 @@ def resolve_in_workspace(raw: str, workspace: Path) -> tuple[Path | None, ToolOu
     return path, None
 
 
+def workspace_escape_reason(path: Path, resolved_workspace: Path) -> str | None:
+    """**宿主自己读文件**前的越界检查：`None` = 在工作区内，否则返回"读不到"的原因。
+
+    与 `resolve_in_workspace` 是两件事，不是重复：
+
+    - `resolve_in_workspace` 管**工具入参**（模型给的字符串 → 解析 + 越界 → is_error 结果）；
+    - 这条管**宿主直读**的两条路——指令文件（`instructions.py`）与工作区来源的技能
+      （`skills.py`）。它们不走工具沙箱（读的是宿主自己发现的文件），但必须做**同样的**
+      检查：否则一个 `AGENTS.md -> ~/.ssh/id_rsa` 就能把工作区外的文件塞进 system prompt，
+      或者一份 `skills/x.md -> 工作区外的 md` 被当成技能读进对话——两者都与 persona 的
+      "工作区外不可读"直接矛盾。
+
+    判据与措辞两处共用（一条规则一处实现）；`resolve()` 失败（循环链接、权限）也算越界：
+    **读不确定的文件，不如不读**。
+
+    `resolved_workspace` 必须传 **`resolve()` 过的**工作区根（两条调用方都已经持有），
+    否则"工作区自己就是符号链接"的平台上会把区内的文件误判成越界。
+    """
+    try:
+        resolved = path.resolve()
+    except OSError as error:
+        return f'cannot resolve: {error}'
+    if not resolved.is_relative_to(resolved_workspace):
+        return 'outside the workspace (symlink?)'
+    return None
+
+
 def iter_files(root: Path):
     """递归产出 root 下的普通文件（相对路径显示用），跳过隐藏条目与 __pycache__。
 

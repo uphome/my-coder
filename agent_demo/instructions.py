@@ -34,6 +34,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from .sandbox import workspace_escape_reason
+
 # 候选文件名（对齐 DSH DEFAULT_INSTRUCTION_FILE_CANDIDATES）。
 # 按顺序扫描：先命中的先注入，两份都存在时都注入（AGENTS.md 在前）。
 INSTRUCTION_FILE_CANDIDATES = ('AGENTS.md', 'CLAUDE.md')
@@ -77,6 +79,27 @@ _UNREADABLE_HINT = (
     'rules here, and do not propose creating one — tell the user what could not be read '
     'and why.'
 )
+
+
+def _stat_key(path: Path) -> tuple[int, int] | None:
+    """`(mtime_ns, size)`；拿不到（文件消失/权限）返回 None。
+
+    用途是**读完之后再取一次**与读之前的键比对：不一致说明读的时候文件在动，
+    那份正文可能是半截（见 `InstructionLoader._read`）。
+    """
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return stat.st_mtime_ns, stat.st_size
+
+
+def _link_target(path: Path) -> str:
+    """符号链接指向哪里（给"断链"那条诊断用）；读不出链接目标就说明是别的毛病。"""
+    try:
+        return os.readlink(path)
+    except OSError:
+        return '<unreadable target>'
 
 
 def _unreadable_line(unreadable: tuple[UnreadableFile, ...]) -> str:
@@ -245,30 +268,45 @@ class InstructionLoader:
 
         - `(正文, '')`     —— **确认存在**且读到了（含"太大未内联"：那种情况正文
           本身是一条说明，仍然算"存在"）
-        - `(None, '')`     —— **确认不存在**（目录里没有这个名字的文件）
-        - `(None, '原因')` —— **读不到**：存在性没能确认（权限 / IO / 同名目录）。
-          这一态绝不能被当成"这个工作区没有约定"，否则模型会在假前提上提议创建
-          一份可能已经存在（只是读不到）的指令文件。
+        - `(None, '')`     —— **确认不存在**（条目本身就不在）
+        - `(None, '原因')` —— **读不到**：存在性没能确认（权限 / IO / 同名目录 /
+          **断链符号链接** / 读的时候文件在动）。这一态绝不能被当成"这个工作区没有
+          约定"，否则模型会在假前提上提议创建一份可能已经存在（只是读不到）的文件。
+
+        两个坑都在这里堵住（复盘见 issue #17）：
+
+        - **断链符号链接不是"不存在"**：`stat()` 跟随符号链接，于是 `AGENTS.md ->
+          不存在的目标` 抛的 `FileNotFoundError` 和"目录里没有这个文件"长得一模一样。
+          所以先 `lstat()`（不跟随）确认**条目**在不在，再 `stat()` 拿真正要读的那个
+          文件的状态——条目在、目标不在就是第三态。
+        - **撕裂读不能进缓存**：缓存键是读之前取的 `(mtime_ns, size)`，若读的过程中
+          文件在变（编辑器保存、agent 写文件、git checkout），可能读到半截，而半截会被
+          当成"这个键对应的内容"一直服务下去（模型看到少条目的约定，还不自知）。所以
+          **读完再取一次键**，不一致就不写缓存、按"读不到"报出来（下个请求自然重读）。
         """
         try:
-            stat = path.stat()
+            path.lstat()                       # 不跟随符号链接：先看条目本身在不在
         except FileNotFoundError:
-            return None, ''
+            return None, ''                    # 确认不存在
+        except OSError as error:
+            return None, f'cannot stat: {error}'
+        try:
+            stat = path.stat()                 # 跟随符号链接：真正要读的那个文件
+        except FileNotFoundError:
+            # 条目在、目标不在 = 断链符号链接：**不是**"不存在"，是"存在性没确认"
+            return None, f'broken symlink -> {_link_target(path)}'
         except OSError as error:
             return None, f'cannot stat: {error}'
         if not path.is_file():
             # 真实案例（PI 的 CHANGELOG）：目录里有个叫 AGENTS.md 的**目录**
             return None, 'not a regular file (a directory with this name?)'
-        try:
-            resolved = path.resolve()
-        except OSError as error:
-            return None, f'cannot resolve: {error}'
-        if not resolved.is_relative_to(self._resolved_workspace):
+        escape = workspace_escape_reason(path, self._resolved_workspace)
+        if escape:
             # 符号链接指向工作区外：**不注入**，但要说出来。理由是这个仓库的 persona
             # 明写"工作区外不可读"，而工具层也已经用 resolve+relative_to 拦住了同一
             # 条路（sandbox.resolve_in_workspace）——只有这里放行的话，一个
             # `AGENTS.md -> ~/.ssh/id_rsa` 就能把工作区外的文件送进 system prompt。
-            return None, 'outside the workspace (symlink?) — not loaded'
+            return None, escape
         if stat.st_size > INSTRUCTION_MAX_SOURCE_BYTES:
             return _TOO_LARGE_NOTICE.format(size=stat.st_size), ''
         key = (stat.st_mtime_ns, stat.st_size)
@@ -279,6 +317,10 @@ class InstructionLoader:
             text = path.read_text(encoding='utf-8', errors='replace')
         except OSError as error:
             return None, f'cannot read: {error}'
+        if _stat_key(path) != key:
+            # 读的时候文件在动 → 这可能是半截内容：**不写缓存**，按"读不到"报出来。
+            # （键取不到也走这一支：宁可不注入，也不服务一份没把握的正文。）
+            return None, 'file changed while reading'
         self._cache[path] = (key, text)
         return text, ''
 
