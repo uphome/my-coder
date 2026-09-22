@@ -1737,6 +1737,43 @@ def test_nested_instruction_files_are_listed_but_not_inlined(tmp_path):
     assert 'GIT_BODY' not in rendered
 
 
+def test_nested_instruction_list_refreshes_per_turn(tmp_path, monkeypatch):
+    """子目录清单按**回合**刷新：同一回合内不重扫（省一次全树遍历），新回合看得见。
+
+    根目录正文是每请求新鲜的（上面那条测过），清单不是——它要一次 `os.walk`，
+    比 stat 贵三个数量级，所以拿回合号当刷新纪元。
+    """
+    from agent_demo import instructions as instructions_module
+
+    scans: list[Path] = []
+    original = instructions_module.scan_nested_instruction_files
+
+    def counting(workspace):
+        scans.append(workspace)
+        return original(workspace)
+
+    monkeypatch.setattr(instructions_module, 'scan_nested_instruction_files', counting)
+    loader = InstructionLoader(tmp_path)
+    assert len(scans) == 1                                      # 构造时那份
+
+    assert 'Subdirectory instruction files' not in loader.render(turn=1)
+    assert len(scans) == 2                                      # 新纪元 → 重扫一次
+    assert loader.render(turn=1) == loader.render(turn=1)        # 同一回合：不再扫
+    assert len(scans) == 2
+
+    web = tmp_path / 'web'
+    web.mkdir()
+    (web / 'AGENTS.md').write_text('WEB', encoding='utf-8')
+    assert 'web/AGENTS.md' not in loader.render(turn=1)          # 本回合新建 → 还看不见
+    assert 'web/AGENTS.md' in loader.render(turn=2)              # 下一回合 → 进清单
+    assert len(scans) == 3
+
+    (web / 'AGENTS.md').unlink()
+    assert 'web/AGENTS.md' in loader.render(turn=2)              # 同一回合：清单不动
+    assert 'web/AGENTS.md' not in loader.render(turn=3)          # 删掉 → 下一回合消失
+    assert len(scans) == 4
+
+
 async def test_build_agent_injects_workspace_instructions_before_tool_sections(tmp_path):
     """factory 级全链路：通用规则（discipline）在前，注入的正文在后，工具段最后。"""
     from argparse import Namespace
@@ -1755,6 +1792,44 @@ async def test_build_agent_injects_workspace_instructions_before_tool_sections(t
     assert 'Instructions:' in system                             # 通用规则（discipline 段）
     assert 'RUN: pytest -q' in system                            # 注入的正文（instructions 段）
     assert system.index('Instructions:') < system.index('RUN: pytest -q') < system.index('Use bash')
+
+
+async def test_instruction_section_follows_the_agent_turn_number(tmp_path):
+    """factory 把 `agent.last_turn` 接进 live 段：新建的子目录指令文件下一回合进清单。
+
+    用**真回合**（不是手改 `_last_turn`）验接线：factory 忘了传 `turn=` 的话，加载器
+    就永远停在构造时那份清单上，最后那条断言必然失败。
+    """
+    from argparse import Namespace
+
+    from agent_demo.factory import build_agent
+
+    args = Namespace(fake=True, model='fake-model', workspace=tmp_path, hide_reasoning=False,
+                     session='id', sessions=str(tmp_path), prompt='x', resume=False, verbose=False)
+    agent = build_agent(Session(id='turn-wired'), args,
+                        {'reasoning_started': False, 'request_no': 0, 'tool_no': 0})
+    agent.llm = FakeLlm(script=[
+        {'text': 'one', 'finish_reason': 'stop'},
+        {'text': 'two', 'finish_reason': 'stop'},
+    ], provider='fake', model='fake-model')
+
+    def last_system() -> str:
+        header = agent.session.request_header()
+        assert header is not None
+        return header['system']
+
+    agent.followup('one')
+    await agent.when_idle()
+    assert 'Subdirectory instruction files' not in last_system()   # 回合 1：还没有这份约定
+
+    web = tmp_path / 'web'
+    web.mkdir()
+    (web / 'AGENTS.md').write_text('WEB_BODY', encoding='utf-8')
+
+    agent.followup('two')
+    await agent.when_idle()
+    assert 'web/AGENTS.md' in last_system()                        # 回合 2：进清单
+    assert 'WEB_BODY' not in last_system()                         # 仍然只列路径
 
 
 def test_todo_write_folds_and_injects_into_prompt(tmp_path):
@@ -2127,6 +2202,168 @@ def test_web_skill_catalog_survives_reload(tmp_path):
     assert 'gh-issue' in first
     # 第二个会话重建 → 目录仍在（来源是磁盘文件，与日志无关）
     assert system_of() == first
+
+
+def test_skill_catalog_is_live_for_new_edited_and_deleted_skills(tmp_path):
+    """新鲜度：会话中途新增/改写/删除技能，**下一次请求**的目录就是新的。
+
+    早期目录段是 build 时算好的静态字符串，于是新技能要等新会话；更糟的是改写：
+    目录还念着旧描述，`skill` 工具却返回新正文——同一份表在 system 和工具里说法不一。
+    现在目录是 live 段、工具在执行时取同一张表，两边同时更新。
+    """
+    from argparse import Namespace
+
+    from agent_demo.factory import build_agent
+
+    args = Namespace(fake=True, model='fake-model', workspace=tmp_path, hide_reasoning=False,
+                     session='id', sessions=str(tmp_path), prompt='x', resume=False, verbose=False)
+    agent = build_agent(Session(id='live-skills'), args,
+                        {'reasoning_started': False, 'request_no': 0, 'tool_no': 0})
+
+    def system() -> str:
+        assembly = agent.prompt.assemble(ctx={'agent': agent})
+        return agent.prompt.render(assembly, ctx={'agent': agent})
+
+    assert 'gh-issue' not in system()                       # 这份技能还不存在
+
+    skills_dir = tmp_path / 'skills'
+    skills_dir.mkdir()
+    skill_file = skills_dir / 'gh-issue.md'
+    skill_file.write_text(
+        '---\nname: gh-issue\ndescription: 初版描述\n---\n初版正文\n', encoding='utf-8')
+    assert 'gh-issue: 初版描述' in system()                  # 新增 → 下一次请求可见
+
+    skill_file.write_text(
+        '---\nname: gh-issue\ndescription: 二版描述\n---\n二版正文\n', encoding='utf-8')
+    rendered = system()
+    assert 'gh-issue: 二版描述' in rendered
+    assert '初版描述' not in rendered                       # 描述跟着改（不再停在 build 时刻）
+    body = asyncio.run(agent.tools.execute('skill', {'name': 'gh-issue'}, agent))
+    assert body.is_error is False and '二版正文' in body.content   # 工具给的也是新的
+
+    skill_file.unlink()
+    assert 'gh-issue' not in system()                       # 删除 → 下一次请求消失
+    gone = asyncio.run(agent.tools.execute('skill', {'name': 'gh-issue'}, agent))
+    assert gone.is_error is True and 'no skill named' in gone.content
+
+
+def test_skill_table_rescans_only_when_files_change(tmp_path, monkeypatch):
+    """缓存是 stat 键控的：目录段每请求求值，但文件没变时一次都不重扫。
+
+    这条守着成本：`load_skills` 要读并解析每个技能文件（~300 µs），而 `scandir` +
+    每文件 `stat`（~70 µs）每次请求都做也没关系。指纹来自"名单 + (mtime, size)"，
+    所以增删改名与改写内容都判得出来。
+    """
+    from agent_demo import skills as skills_module
+
+    scans: list[Path] = []
+    original = skills_module.scan_skills
+
+    def counting(root, *, source=skills_module.WORKSPACE):
+        scans.append(root)
+        return original(root, source=source)
+
+    monkeypatch.setattr(skills_module, 'scan_skills', counting)
+    table = skills_module.SkillTable(tmp_path)
+
+    first = table.skills()
+    assert len(scans) == 2                                  # 两个来源各扫一次
+    assert table.skills() == first and len(scans) == 2      # 没变 → 命中缓存，不重扫
+
+    skills_dir = tmp_path / 'skills'
+    skills_dir.mkdir()
+    skill_file = skills_dir / 'new-skill.md'
+    skill_file.write_text('---\nname: new-skill\ndescription: 新技能\n---\n正文\n', encoding='utf-8')
+    added = table.skills()
+    assert [skill.name for skill in added] != [skill.name for skill in first]
+    assert len(scans) == 4                                  # 名单变了 → 重扫
+    assert table.skills() == added and len(scans) == 4       # 再求值又命中
+
+    skill_file.write_text('---\nname: new-skill\ndescription: 改过的描述\n---\n正文二\n',
+                          encoding='utf-8')
+    edited = table.skills()
+    assert any(skill.description == '改过的描述' for skill in edited)
+    assert len(scans) == 6                                  # 内容变了 → 重扫（size/mtime 变）
+    assert table.skills() == edited and len(scans) == 6
+
+
+def test_skill_table_refresh_is_serialized_across_threads(tmp_path, monkeypatch):
+    """这张表被两个线程碰（live 段在循环线程、`offload=True` 的 skill 工具在工作线程）。
+
+    两次刷新交错的那种时序很难手工复现，但"刷新有没有串行化"是可断言的结构性质：让 4
+    个线程同时求值（指纹已过期 → 都想重扫），断言 `load_skills` **不会被并发进入**。
+    没有锁时两次刷新会交错，可能留下"指纹是新的、表是旧的"——之后每次求值都以为没变，
+    那份技能的描述就**永远**停在旧值（本 PR 要治的病换了个入口回来）。
+    """
+    import threading
+    import time
+
+    from agent_demo import skills as skills_module
+
+    table = skills_module.SkillTable(tmp_path)
+    table.skills()                                          # 建立缓存（此时还没有技能目录）
+    skills_dir = tmp_path / 'skills'
+    skills_dir.mkdir()
+    (skills_dir / 'a.md').write_text(
+        '---\nname: a\ndescription: 初版\n---\n正文\n', encoding='utf-8')
+
+    guard = threading.Lock()
+    active = 0
+    peak = 0
+    original = skills_module.load_skills
+
+    def counting(workspace):
+        nonlocal active, peak
+        with guard:
+            active += 1
+            peak = max(peak, active)
+        try:
+            time.sleep(0.05)                                # 给别的线程插进来的机会
+            return original(workspace)
+        finally:
+            with guard:
+                active -= 1
+
+    monkeypatch.setattr(skills_module, 'load_skills', counting)
+    threads = [threading.Thread(target=table.skills) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert peak == 1                                        # 串行：双检之后只有第一个真去扫
+    assert [skill.name for skill in table.skills()] == ['a', 'project-instructions']
+
+
+def test_skill_fingerprint_covers_every_file_scan_skills_finds(tmp_path):
+    """指纹必须覆盖 `scan_skills` 会扫到的每个文件——否则"改了看不见"。
+
+    实测踩过：Windows 的 `Path.glob('*.md')` **不区分大小写**，`Upper.MD` 会被扫成
+    技能；而指纹最初用 `name.endswith('.md')` 判大小写——于是改这份技能的描述永远不会
+    让指纹变化，目录永远停在旧描述（正是本 PR 要治的病换了条路回来）。现在指纹改用
+    `fnmatch.fnmatch`（glob 内部就是这套 `os.path.normcase` 语义）。
+    """
+    from agent_demo.skills import SkillTable, _dir_signature, scan_skills
+
+    skills_dir = tmp_path / 'skills'
+    skills_dir.mkdir()
+    for name in ('Upper.MD', 'lower.md'):
+        (skills_dir / name).write_text(
+            f'---\nname: {Path(name).stem.lower()}\ndescription: 初版\n---\n正文\n',
+            encoding='utf-8')
+
+    scanned = {skill.path.name for skill in scan_skills(skills_dir)}
+    covered = {name for name, _, _ in _dir_signature(skills_dir) or ()}
+    assert scanned <= covered                               # 扫得到的都在指纹里
+
+    # 行为面：只改 `Upper.MD`（Windows 上它会被扫到，改了就必须刷新缓存）。
+    # Linux 的 glob 区分大小写、根本扫不到它，这条在那边不成立也不该成立。
+    if 'Upper.MD' in scanned:
+        table = SkillTable(tmp_path)
+        before = table.skills()
+        (skills_dir / 'Upper.MD').write_text(
+            '---\nname: upper\ndescription: 改过的描述\n---\n正文二\n', encoding='utf-8')
+        assert table.skills() != before
 
 
 def test_web_todo_dock_payloads(tmp_path):

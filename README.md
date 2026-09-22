@@ -200,8 +200,8 @@ compaction.py（上下文压缩引擎）
 | `agent.py` | 被动状态机：wake / kick / when_idle / cancel |
 | `persistence.py` | JSONL 追加写 + 重放读 |
 | `recovery.py` | 会话自愈：恢复时给崩溃留下的悬空工具调用补 is_error 合成结果 + 修复痕迹 |
-| `instructions.py` | 工作区项目指令文件（AGENTS.md/CLAUDE.md）：子目录清单 + 根文件探测 + 字符预算 + system live 段 |
-| `skills.py` | 按需技能：两来源（包内 `bundled_skills/` + 工作区 `skills/`）按名字合并、workspace 同名覆盖；目录文本 + 按名字解析正文 |
+| `instructions.py` | 工作区项目指令文件（AGENTS.md/CLAUDE.md）：子目录清单（每回合重扫）+ 根文件探测（每请求）+ 字符预算 + system live 段 |
+| `skills.py` | 按需技能：两来源（包内 `bundled_skills/` + 工作区 `skills/`）按名字合并、workspace 同名覆盖；目录文本 + 按名字解析正文；`SkillTable` 按内容指纹缓存（目录段是 live 段——技能文件改了，下一次请求就生效） |
 | `bundled_skills/` | **随 agent 发布的技能正文**（`project-instructions.md`：怎么写 AGENTS.md）；`pyproject` package-data 保证装到别处也在 |
 | `tools/` | 应用工具（file_io.py 读/写/编辑、search.py grep/glob、shell.py bash、todo.py、**web_search.py 联网搜索**、**skill.py 按名字取技能正文**）+ `build_tools(workspace, skills=…)` 组装 |
 | `sandbox.py` | workspace 路径边界（归一化 + 前缀匹配的轻量沙箱） |
@@ -210,7 +210,7 @@ compaction.py（上下文压缩引擎）
 | `cli.py` | CLI 入口（单次任务 / 无任务参数进 REPL） |
 | `web_app.py` | Web UI（FastAPI + SSE：会话/标题/approval/手动压缩/steer 插队） |
 | `compaction.py` | 上下文压缩引擎（四步事务 + checkpoint + 会话 token 累计账） |
-| `tests/test_demo.py` | 120 个架构测试 |
+| `tests/test_demo.py` | 126 个架构测试 |
 
 > `web_search` 与 `skill` 是两个"读工作区之外"的工具：搜索由 **DeepSeek 官方在服务端**
 > 执行（Anthropic 兼容端点 + 原生服务端工具 `web_search_20250305`），我们只发请求、

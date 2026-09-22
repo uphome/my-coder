@@ -476,7 +476,7 @@ HTTP 400 An assistant message with 'tool_calls' must be followed by tool message
 |---|---|---|---|
 | 通用纪律（discipline） | 永不变 | 静态 system 段 | 规则该在最稳的前缀里 |
 | **项目指令文件正文** | 会话内几乎不变（除非 agent 自己改它） | **live system 段**（order 20） | 属于"每轮都该生效"的规则；字节稳定 → 不打碎缓存前缀 |
-| 技能目录 | 会话内不变 | 静态 system 段（order 95） | 只放 name/description/路径 |
+| 技能目录 | 会话内可变（新增/改写技能） | **live system 段**（order 95，stat 键控缓存） | 只放 name/description（**不列路径**） |
 | todo 状态栏 | **每步都可能变** | messages 末尾合成消息 | 放 system 会把缓存前缀每请求打碎一次 |
 
 live 段的语义（`prompt.render` 每次模型请求求值一次）正好覆盖 issue #6 的关键路径：
@@ -484,13 +484,20 @@ live 段的语义（`prompt.render` 每次模型请求求值一次）正好覆�
 也不需要 DSH 那套 baseline/delta 变更账（它注入一次，所以必须记增量；我们每请求重算，
 重算替代版本账）。
 
-**探测（确定性，不靠模型自觉）**：`InstructionLoader` 在 build 时扫一次子目录清单
-（`os.walk` 原地剪枝隐藏目录/缓存，`dirnames` 排序后再走——不排的话提前 `break` 收
-前 N 条会因文件系统顺序不同而给出不同子集，段字节就不可复现），每次渲染时读根目录
-候选文件（`AGENTS.md`、`CLAUDE.md`，按候选顺序）并按 `(mtime_ns, size)` 缓存；
-候选路径先 `resolve()` 再判是否仍在工作区内——**指向工作区外的符号链接不注入**，
-按"读不到"报出来（工具层已经用 `resolve_in_workspace` 拦住同一条路，指令读取是宿主
-的另一条路径，不拦就等于开了一个把工作区外文件送进 system prompt 的口子）。
+**两级新鲜度**：注入的内容和子目录清单"保质期"不同，判据是代价而不是"越新越好"。
+
+| 注入物 | 刷新时机 | 一次刷新的代价 | 为什么是这个粒度 |
+|---|---|---|---|
+| 根目录正文 | **每请求**（`(mtime_ns, size)` 键控缓存） | 2 次 `stat`（微秒级） | 便宜；而且"模型刚写下的 AGENTS.md"必须立刻生效——这正是 issue #6 的关键路径 |
+| 子目录清单 | **每回合**（回合号当刷新纪元，`render(turn=…)`） | 一次 `os.walk` 全树遍历（本仓库实测 ~600 µs） | 贵三个数量级；"本回合新建的子目录约定下一回合可见"够用 |
+
+**探测（确定性，不靠模型自觉）**：`InstructionLoader` 每次渲染读根目录候选文件
+（`AGENTS.md`、`CLAUDE.md`，按候选顺序）并按 `(mtime_ns, size)` 缓存；子目录清单每回合
+重扫一次（`os.walk` 原地剪枝隐藏目录/缓存，`dirnames` 排序后再走——不排的话提前
+`break` 收前 N 条会因文件系统顺序不同而给出不同子集，段字节就不可复现）；候选路径先
+`resolve()` 再判是否仍在工作区内——**指向工作区外的符号链接不注入**，按"读不到"报出来
+（工具层已经用 `resolve_in_workspace` 拦住同一条路，指令读取是宿主的另一条路径，不拦就
+等于开了一个把工作区外文件送进 system prompt 的口子）。
 
 - 有文件 → `<workspace_instructions files="AGENTS.md">` + `Instructions from: <路径>`
   + 正文（单文件 8k / 整段 20k 字符预算，超预算截断并提示"用 read_file 读剩下的"；
@@ -552,9 +559,24 @@ workspace 沙箱）；DSH 式沙箱承诺又把可读范围锁在工作区内。
   `is_error` 结果（失败降级为结果，不变式⑤），不需要给沙箱开任何例外；
 - **正文仍然作为 tool/result 进日志**：可重建、可被 compaction 折叠、前端画成工具卡
   ——与"读任何文件"机制一致，换的只是"怎么找到文件"；
-- **目录与工具共用同一张表**（`factory` 里算一次、传两处），"目录里有的"和"工具能
-  取到的"永不漂移；目录段**不再列路径**（列了只会诱导 `read_file`，而 bundled 读了
-  会被拒）。
+- **目录与工具共用同一个 `SkillTable` 实例**（`factory` 构造一次、传两处），且工具在
+  **执行时**才取表，"目录里有的"和"工具能取到的"永不漂移；目录段**不再列路径**（列了
+  只会诱导 `read_file`，而 bundled 读了会被拒）。
+- **目录段是 live 段，按请求新鲜**：表由 `SkillTable` 持有，每次求值只算一遍**内容
+  指纹**（两个来源目录的 `*.md` 名单 + 每文件 `(mtime_ns, size)`，实测 ~70 µs），指纹
+  变了才重扫重解析（~300 µs）。于是**会话中途新增/改写/删除技能，下一次模型请求就
+  生效**——这正是早期"build 时算一次"版本的毛病：新技能要等新会话，更糟的是改写技能
+  时**目录念旧描述、`skill` 工具给新正文**（同一份表在 system 与工具里说法不一）。
+  文件没变时目录字节不变，所以缓存前缀照样命中。
+- **刷新加锁 + 双检**：这张表被**两个线程**碰——live 段在循环线程求值，`skill` 工具
+  声明了 `offload=True`、在工作线程执行。无锁时两次刷新可能交错成"指纹是新的、表是
+  旧的"（一个线程写表之后、写指纹之前被抢占，另一个线程的整对赋值插进来），之后每次
+  求值都以为"没变"，那份技能的描述就**永远**停在旧值。快路径（指纹没变）不碰锁，
+  所以循环线程不会被工作线程的重扫阻塞。
+- **指纹的匹配规则必须与 `scan_skills` 的 `glob('*.md')` 一致**，所以用
+  `fnmatch.fnmatch`（glob 内部就是这套 `os.path.normcase` 语义）而不是
+  `name.endswith('.md')`：Windows 上 glob **不区分大小写**，`Upper.MD` 会被扫成技能
+  ——指纹漏掉它，"改了看不见"这个病就从另一条路回来了（实测踩过，测试里有覆盖断言）。
 
 ---
 
@@ -604,7 +626,7 @@ workspace 沙箱）；DSH 式沙箱承诺又把可读范围锁在工作区内。
 | `agent.py` | 被动状态机：wake / kick / when_idle / cancel |
 | `persistence.py` | JSONL 追加写 + 重放读 |
 | `recovery.py` | 会话自愈：恢复时给崩溃留下的悬空工具调用补 is_error 合成结果 + `session/repaired` 痕迹 |
-| `instructions.py` | 工作区项目指令文件（AGENTS.md/CLAUDE.md）：子目录清单扫描 + 根文件探测 + 字符预算 + system live 段渲染 |
+| `instructions.py` | 工作区项目指令文件（AGENTS.md/CLAUDE.md）：子目录清单扫描（每回合）+ 根文件探测（每请求）+ 字符预算 + system live 段渲染 |
 | `skills.py` | 按需技能：**两来源合并**（包内 `bundled_skills/` + `<workspace>/skills/`，workspace 同名覆盖，按名字排序）+ 目录文本 + 按名字解析正文 |
 | `bundled_skills/` | 随 agent 发布的技能正文（`pyproject` 的 package-data）；自带能力必须跟着 agent 走，不能跟着工作区走 |
 | `tools/` | 应用工具（file_io 读写/编辑、search grep/glob、shell bash、todo、**web_search 联网搜索**、**skill 按名字取技能正文**）+ `build_tools(workspace, skills=…)` |

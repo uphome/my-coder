@@ -238,6 +238,14 @@ gh-issue 技能 → Web/CLI 实测“处理 issue #N” → 质量门三绿提�
   为支持文件系统之外的来源而存在。
 - **沙箱承诺不变**：`skill(name)` 的入参只有名字，模型没有机会拼路径；查不到就是
   一条 is_error 结果。目录段也不再列路径（列了只会诱导 read_file）。
+- **「技能目录是静态的」（§3.1 第 2 条）→ 目录段改为 live 段**：静态说的是"文件不变
+  → 字节不变"（缓存稳定），但落地成"build 时算一次"就多出两个说不通的地方——新技能
+  要等新会话，改写技能时**目录还念着旧描述、`skill` 工具已经返回新正文**。现在目录段
+  由 `SkillTable` 现算（stat 键控缓存：每次只比指纹，实测 ~70 µs，变了才重扫），且
+  `skill` 工具在**执行时**取同一张表：文件改了，**下一次模型请求**两处一起变。
+  （回顾时补的两处：刷新加锁 + 双检——这张表被循环线程与 `offload` 的工作线程同时用；
+  指纹的匹配规则改用 `fnmatch`——与 `Path.glob` 同一套 `normcase` 语义，否则 Windows 上
+  `Upper.MD` 会被扫成技能却漏在指纹外，同一个病又回来。见 `ARCHITECTURE.md` §3.18。）
 - **保持不变的教学点**（§3.4）：正文仍然作为 **tool/result** 进 derive_messages，
   可重建、可被 compaction 折叠、前端画成工具卡——换的只是"怎么找到文件"，不是
   "正文怎么进上下文"。
@@ -781,9 +789,10 @@ instructions（live system 段，order 20） ← C：确定性探测 + 正文/�
 > 它已随 issue #22 挪到包内 `agent_demo/bundled_skills/`，作为 **bundled 技能**随 agent
 > 发布；工作区里那份重复副本已删除（同名时 workspace 会覆盖 bundled）。详见 §3.5。
 
-- `instructions.py`：`scan_nested_instruction_files`（build 时 `os.walk` 剪枝一次）+
-  `InstructionLoader`（`(mtime_ns, size)` 缓存 + 预算 + 渲染）+ 纯函数
-  `render_workspace_instructions`（便于直接断言）
+- `instructions.py`：`scan_nested_instruction_files`（每回合 `os.walk` 剪枝重扫一次——
+  清单要一次全树遍历，实测 ~600 µs，所以按回合刷新而不是按请求）+
+  `InstructionLoader`（根目录正文 `(mtime_ns, size)` 缓存，每请求探测 + 预算 + 渲染）+
+  纯函数 `render_workspace_instructions`（便于直接断言）
 - 缺文件时段的正文是"没有指令文件 + 建议在掌握稳定知识后创建 + 写入需要批准 +
   不许写密钥/临时状态/未验证猜测"——**触发确定**，不依赖模型某轮想起
 - 写入走 `write_file`/`edit` 的 approval 门（不变式 1：变更作为 `tool/call` +
@@ -799,11 +808,13 @@ instructions（live system 段，order 20） ← C：确定性探测 + 正文/�
   （`python -m pytest -q test_calc.py -k add`）。结果：system 里有该正文，模型执行的
   正是这条命令（只按全局 `tool:bash` 提示套了 `conda run` 外壳），并在回答里说明
   "按 AGENTS.md 的约定只跑了 `-k add`"（验收标准 3）
-- **单元测试 15 条**：缺失提示、根文件注入、两个候选的顺序、超预算截断指引、
+- **单元测试 17 条**：缺失提示、根文件注入、两个候选的顺序、超预算截断指引、
   超过读取上限不读进内存、live 渲染随文件变化、子目录只列路径（隐藏目录不扫）、
   factory 级全链路（通用规则在前、注入正文居中、工具段在后）；三态三条（读不到 →
   `files="unreadable"` 且**不给创建指引**、同名目录算读不到、一份可读 + 一份读不到时
   正文照常注入并点名后者）；代码回顾补的四条（空文件算"存在"、缓存命中不重读且两次
-  渲染字节相同、越界符号链接不注入、预算自洽性）
-- 门禁：`ruff` / `mypy` 干净、`pytest 120 passed`（与技能两来源那批测试合并后的总数）
+  渲染字节相同、越界符号链接不注入、预算自洽性）；新鲜度补的两条（清单按回合刷新：
+  同回合不重扫 / 新回合看得见新建与删除；factory 接线用**真回合**验——不传 `turn=`
+  时第二条断言必失败）
+- 门禁：`ruff` / `mypy` 干净、`pytest 126 passed`（与技能那批测试合并后的总数）
 
