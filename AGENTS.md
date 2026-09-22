@@ -9,7 +9,7 @@ Python 复刻 deepseek-harness 架构的教学 demo（agent 框架本身，不�
 # 质量门：ruff + mypy + pytest 三绿才可提交（pyproject.toml 已配好）
 conda run -n agent-demo python -m ruff check agent_demo tests
 conda run -n agent-demo python -m mypy agent_demo
-conda run -n agent-demo python -m pytest        # 120 个测试
+conda run -n agent-demo python -m pytest        # 122 个测试
 
 # CLI（可 pip install -e . 后直接 agent-demo；或模块方式跑）
 conda run --no-capture-output -n agent-demo python -m agent_demo.cli --workspace . --fake "read README.md and summarize"
@@ -148,10 +148,15 @@ conda run --no-capture-output -n agent-demo python -m agent_demo.web_app --works
     项目自己的约定与工作流。同名时 **workspace 覆盖 bundled**；合并后**按名字排序**，
     目录字节可复现。**自带能力必须跟着 agent 走**：放在工作区里等于"换个工作区就
     消失"（issue #22 实测：用户自己的项目里目录为空、`read_file` 读包内技能被沙箱拒）
-  - **目录（catalog）静态注入 system**（order 95，小于 todo:state 等动态段）：只放
-    name + description，**不列路径**——列路径会诱导模型去 `read_file`，而 bundled
-    技能在工作区之外、读了会被拒。目录与 `skill` 工具**共用同一张表**（`factory` 里
-    算一次传两处），所以"目录里有的"和"工具能取到的"永不漂移
+  - **目录（catalog）以 live 段注入 system**（order 95，小于 todo:state 等动态段）：
+    只放 name + description，**不列路径**——列路径会诱导模型去 `read_file`，而 bundled
+    技能在工作区之外、读了会被拒。段文本由 `SkillTable.skills()` 现算：每次求值只算
+    一遍**内容指纹**（两个技能目录的 `*.md` 名单 + 每文件 `(mtime_ns, size)`，实测
+    ~80 µs），指纹变了才重扫重解析（~430 µs）——所以**会话中途新增/改写/删除技能，
+    下一次模型请求就生效**，文件没变时目录字节不变、缓存前缀照样命中。目录与 `skill`
+    工具**共用同一个 `SkillTable` 实例**（`factory` 构造一次传两处），且工具在**执行
+    时**取表：两处永不漂移，也不会出现"目录念旧描述、工具给新正文"（早期目录段是
+    build 时的静态字符串，这两条都做不到）
   - **正文 = 工具结果注入，按名字取**：模型调 `skill(name)` → host 把名字解析到文件
     → 正文作为 tool/result（source.kind='tool'）进 derive_messages，与读任何文件机制
     一致（落日志可重建、可被 compaction 折叠）。**这是对早期"不新增 skill() 加载

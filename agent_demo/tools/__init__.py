@@ -17,23 +17,24 @@ from __future__ import annotations
 from pathlib import Path
 
 from ..registry import ToolRegistry
-from ..skills import load_skills
+from ..skills import SkillTable
 from . import file_io, search, shell, skill, todo, web_search
 
 
 def build_tools(
-    workspace: Path | None, bash_timeout_s: float = 60.0, skills=None,
+    workspace: Path | None, bash_timeout_s: float = 60.0, skills: SkillTable | None = None,
 ) -> ToolRegistry:
     """工具注册表：全部文件工具共用一个 workspace 边界（轻量沙箱）。
 
-    web_search 与 skill 是例外（见模块 docstring）。`skills` 可注入 build 时算好的
-    技能表——`factory.build_agent` 把它同时喂给目录段与 skill 工具，保证两处一致；
-    不传就自己 load_skills(workspace)（测试与单独用 build_tools 的场景）。
+    web_search 与 skill 是例外（见模块 docstring）。`skills` 可注入
+    `factory.build_agent` 构造好的技能表：**同一个实例**同时喂给目录段（live 段
+    provider）与 skill 工具，两处永不漂移，会话中途新增的技能也两边同时可见；
+    不传就自己建一个（测试与单独用 build_tools 的场景）。
     """
     if workspace is None:
         raise ValueError('build_tools requires an explicit workspace（安全边界必须显式声明）')
     workspace = workspace.resolve()
-    skills = load_skills(workspace) if skills is None else skills
+    skills = SkillTable(workspace) if skills is None else skills
     registry = ToolRegistry()
     file_io.register(registry, workspace)
     search.register(registry, workspace)

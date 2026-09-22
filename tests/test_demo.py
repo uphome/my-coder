@@ -2129,6 +2129,89 @@ def test_web_skill_catalog_survives_reload(tmp_path):
     assert system_of() == first
 
 
+def test_skill_catalog_is_live_for_new_edited_and_deleted_skills(tmp_path):
+    """新鲜度：会话中途新增/改写/删除技能，**下一次请求**的目录就是新的。
+
+    早期目录段是 build 时算好的静态字符串，于是新技能要等新会话；更糟的是改写：
+    目录还念着旧描述，`skill` 工具却返回新正文——同一份表在 system 和工具里说法不一。
+    现在目录是 live 段、工具在执行时取同一张表，两边同时更新。
+    """
+    from argparse import Namespace
+
+    from agent_demo.factory import build_agent
+
+    args = Namespace(fake=True, model='fake-model', workspace=tmp_path, hide_reasoning=False,
+                     session='id', sessions=str(tmp_path), prompt='x', resume=False, verbose=False)
+    agent = build_agent(Session(id='live-skills'), args,
+                        {'reasoning_started': False, 'request_no': 0, 'tool_no': 0})
+
+    def system() -> str:
+        assembly = agent.prompt.assemble(ctx={'agent': agent})
+        return agent.prompt.render(assembly, ctx={'agent': agent})
+
+    assert 'gh-issue' not in system()                       # 这份技能还不存在
+
+    skills_dir = tmp_path / 'skills'
+    skills_dir.mkdir()
+    skill_file = skills_dir / 'gh-issue.md'
+    skill_file.write_text(
+        '---\nname: gh-issue\ndescription: 初版描述\n---\n初版正文\n', encoding='utf-8')
+    assert 'gh-issue: 初版描述' in system()                  # 新增 → 下一次请求可见
+
+    skill_file.write_text(
+        '---\nname: gh-issue\ndescription: 二版描述\n---\n二版正文\n', encoding='utf-8')
+    rendered = system()
+    assert 'gh-issue: 二版描述' in rendered
+    assert '初版描述' not in rendered                       # 描述跟着改（不再停在 build 时刻）
+    body = asyncio.run(agent.tools.execute('skill', {'name': 'gh-issue'}, agent))
+    assert body.is_error is False and '二版正文' in body.content   # 工具给的也是新的
+
+    skill_file.unlink()
+    assert 'gh-issue' not in system()                       # 删除 → 下一次请求消失
+    gone = asyncio.run(agent.tools.execute('skill', {'name': 'gh-issue'}, agent))
+    assert gone.is_error is True and 'no skill named' in gone.content
+
+
+def test_skill_table_rescans_only_when_files_change(tmp_path, monkeypatch):
+    """缓存是 stat 键控的：目录段每请求求值，但文件没变时一次都不重扫。
+
+    这条守着成本：`load_skills` 要读并解析每个技能文件（~430 µs），而 `scandir` +
+    每文件 `stat`（~80 µs）每次请求都做也没关系。指纹来自"名单 + (mtime, size)"，
+    所以增删改名与改写内容都判得出来。
+    """
+    from agent_demo import skills as skills_module
+
+    scans: list[Path] = []
+    original = skills_module.scan_skills
+
+    def counting(root, *, source=skills_module.WORKSPACE):
+        scans.append(root)
+        return original(root, source=source)
+
+    monkeypatch.setattr(skills_module, 'scan_skills', counting)
+    table = skills_module.SkillTable(tmp_path)
+
+    first = table.skills()
+    assert len(scans) == 2                                  # 两个来源各扫一次
+    assert table.skills() == first and len(scans) == 2      # 没变 → 命中缓存，不重扫
+
+    skills_dir = tmp_path / 'skills'
+    skills_dir.mkdir()
+    skill_file = skills_dir / 'new-skill.md'
+    skill_file.write_text('---\nname: new-skill\ndescription: 新技能\n---\n正文\n', encoding='utf-8')
+    added = table.skills()
+    assert [skill.name for skill in added] != [skill.name for skill in first]
+    assert len(scans) == 4                                  # 名单变了 → 重扫
+    assert table.skills() == added and len(scans) == 4       # 再求值又命中
+
+    skill_file.write_text('---\nname: new-skill\ndescription: 改过的描述\n---\n正文二\n',
+                          encoding='utf-8')
+    edited = table.skills()
+    assert any(skill.description == '改过的描述' for skill in edited)
+    assert len(scans) == 6                                  # 内容变了 → 重扫（size/mtime 变）
+    assert table.skills() == edited and len(scans) == 6
+
+
 def test_web_todo_dock_payloads(tmp_path):
     """todo dock 的数据通道：SSE 帧 todo_update + /history 附带 todos + 会话切换恢复。"""
     from fastapi.testclient import TestClient
