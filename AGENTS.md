@@ -113,8 +113,10 @@ conda run --no-capture-output -n agent-demo python -m agent_demo.web_app --works
     的确定性提示（issue #6 的方案 C 落地）
   - **规则与状态分离**：通用规则（存在就先读并遵循 / 稳定知识提议写进去 / 不静默改 /
     不写密钥临时状态未验证猜测）属于**每轮都生效**的通用纪律 → 进 `discipline` 段；
-    live 段只承载**状态与内容**。内容载体是内置技能 `skills/project-instructions.md`
-    （骨架 + 该写/不该写 + 何时更新），由技能目录按需加载
+    live 段只承载**状态与内容**。内容载体是**项目级技能**
+    `skills/project-instructions.md`（骨架 + 该写/不该写 + 何时更新），由技能目录按需加载
+    ——注意它是**工作区**技能：只在带 `skills/` 的工作区里可见；"自带能力要跟着 agent
+    走"这条缺口与它的修法见 issue #22
   - **探测是三态，不是两态**（对齐 DSH 的 `ScopeInstructionProbe` 与 opencode 的
     `SystemContext.unavailable`，后者原话是"distinguishes confirmed absence from
     provider failure"）：**确认存在**（注入正文）/ **确认不存在**（只有这一态才允许
