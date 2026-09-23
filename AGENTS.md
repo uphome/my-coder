@@ -9,7 +9,7 @@ Python 复刻 deepseek-harness 架构的教学 demo（agent 框架本身，不�
 # 质量门：ruff + mypy + pytest 三绿才可提交（pyproject.toml 已配好）
 conda run -n agent-demo python -m ruff check agent_demo tests
 conda run -n agent-demo python -m mypy agent_demo
-conda run -n agent-demo python -m pytest        # 151 个测试（3 条平台相关：Windows 建不了符号链接时 skip）
+conda run -n agent-demo python -m pytest        # 154 个测试（3 条平台相关：Windows 建不了符号链接时 skip）
 
 # CLI（可 pip install -e . 后直接 agent-demo；或模块方式跑）
 conda run --no-capture-output -n agent-demo python -m agent_demo.cli --workspace . --fake "read README.md and summarize"
@@ -109,23 +109,27 @@ conda run --no-capture-output -n agent-demo python -m agent_demo.web --workspace
   DSH 的 runtime-context contributor 与 opencode 的 SystemContext 对照见 `agent.md` §4）：
   - **形态**：`state/runtime_status.py` 的 `RuntimeStatusRegistry` —— 一个状态源 = 一个名字 +
     `build(session) -> str | None`（**无内容返回 None**，那一轮就不出现，绝不用空串占位）；
-    `register` 对空名/重名**当场抛错**（重名会悄悄只留一个，到日志里谁也说不清是哪个），
-    返回注销函数。
+    `register` 对空名/重名/`build` 不可调用**当场抛错**（重名会悄悄只留一个、不可调用会在
+    求值时才炸并被兜底吞掉，两种都该在装配时暴露），返回注销函数。
   - **通道**：`runtime/loop.py` 每请求 `collect()` 一次，**非空者各贴一条合成 user 消息**在
     messages 末尾——不进日志、不进 `derive_messages`（历史零污染），放 system 则会把缓存
     前缀每请求打碎（动态事实不该进稳定前缀）。
   - **审计**：`request/header.runtime_status = {名字: 原文}`（映射形态，痕迹数据），回答
-    "这一轮模型被告知了哪些运行时状态"；多个来源不必加平铺字段。
+    "这一轮模型被告知了哪些运行时状态"；多个来源不必加平铺字段。**所有贡献者都返回空时，
+    这个字段整体缺席**（与改造前的 `todo_status` 行为一致，不是空映射）。
   - **加一个状态源 = `app/factory.py` 的 `_runtime_status()` 里一行注册，循环一行都不用改**
     ——这就是这条通道的意义（此前是 `runtime/loop.py` 直接 import `tools.todo` 的反向依赖，
     见 `tests/test_architecture.py` 那条已清空的白名单）。将来的 L0 会话目录 / M2 预算水位
     （issue #3）也在这里各加一行。
   - **`build` 必须是日志投影的纯函数**（同一段日志 → 同一份状态，符合"模型可见 ⟺ 可重建"），
     且要便宜：**每个模型请求都会求值一次**。
-  - **坏一个不炸对话**：单个贡献者在求值时抛异常 → 记一条 ERROR 日志（带名字）并跳过它，
-    这一轮就是"没有这份状态"；审计映射只列**真的被告知模型**的项。判据：这是可选的状态
-    展示通道（对照：工具失败要降级成 is_error 结果——那是模型输入可能不合法的通道；而
-    **注册时刻**的空名/重名仍然当场抛，那是宿主写错了代码）。
+  - **坏一个不炸对话**：单个贡献者求值时抛异常、或返回非字符串（契约是 `str | None`）→
+    记一条 ERROR 日志（带名字）并跳过它，这一轮就是"没有这份状态"；审计映射只列**真的被告知
+    模型**的项。迭代用**快照**，所以贡献者在求值期间注册/注销自己也不会炸（**求值期间的增删
+    本轮不生效，下一请求生效**）。判据：这是可选的状态展示通道（对照：工具失败要降级成
+    `is_error` 结果——那是模型输入可能不合法的通道；而**注册时刻**的空名/重名/不可调用仍然
+    当场抛，那是宿主写错了代码）。`except Exception` **不捕 `BaseException`**：`CancelledError`
+    照常穿透，"取消单向传播"不被这条兜底破坏（有用例钉住）。
 - **恢复要自愈"悬空工具调用"**（落地时遵循；实测证据与 400 原文见
   `ARCHITECTURE.md` §3.16）：取消路径能补记账，但**进程被 kill / 断电 / OOM** 时
   没有任何代码有机会跑——日志会停在 `tool/call`（痕迹已落）与 `tool/result`

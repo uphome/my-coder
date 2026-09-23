@@ -684,10 +684,12 @@ async def test_runtime_status_contributor_failure_does_not_kill_the_turn(caplog)
 
 
 def test_runtime_status_registry_is_strict_and_unregisterable():
-    """注册时刻严格校验（空名/重名当场抛错），`register` 返回注销函数。"""
+    """注册时刻严格校验（空名/重名/不可调用当场抛错），`register` 返回注销函数。"""
     registry = RuntimeStatusRegistry()
     with pytest.raises(ValueError, match='must not be empty'):
         registry.register('', lambda session: 'x')
+    with pytest.raises(TypeError, match='must be callable'):
+        registry.register('bad', 'not-a-function')       # type: ignore[arg-type]
     registry.register('todo', lambda session: 'x')
     with pytest.raises(ValueError, match='already registered'):
         registry.register('todo', lambda session: 'y')
@@ -697,6 +699,61 @@ def test_runtime_status_registry_is_strict_and_unregisterable():
     assert registry.names == ('todo', 'other')
     unregister()
     assert registry.names == ('todo',)
+    unregister()                                          # 幂等：再调一次不炸
+    assert registry.names == ('todo',)
+
+
+def test_runtime_status_collect_takes_a_snapshot():
+    """求值期间注册/注销**本轮不生效**（快照），下一请求生效。
+
+    为什么要快照：直接迭代 `self._builders.items()` 时，贡献者在自己的 `build` 里
+    注册/注销会让字典在迭代中改变大小——`RuntimeError` 由**迭代器**抛出，绕过 collect
+    里那个 try，于是"坏一个不炸对话"这句话不成立（实测过：异常会一路逃出回合）。
+    """
+    registry = RuntimeStatusRegistry()
+    session = Session(id='snapshot')
+
+    def mutates(session):
+        if 'late' not in registry.names:      # 只注册一次（第二次求值时它已经在表里了）
+            registry.register('late', lambda s: 'LATE')
+        return 'FIRST'
+
+    registry.register('first', mutates)
+    first = registry.collect(session)
+    assert first == (('first', 'FIRST'),)                 # 本轮看不到 late（快照）
+    assert registry.names == ('first', 'late')
+    second = registry.collect(session)
+    assert second == (('first', 'FIRST'), ('late', 'LATE'))   # 下一请求生效
+
+
+def test_runtime_status_non_string_return_is_reported_and_skipped(caplog):
+    """契约是 `str | None`：返回非字符串 → 记 ERROR 并跳过（不炸回合、也不静默）。"""
+    import logging
+
+    registry = RuntimeStatusRegistry()
+    registry.register('bad', lambda session: 42)          # type: ignore[return-value]
+    registry.register('good', lambda session: 'OK')
+
+    with caplog.at_level(logging.ERROR, logger='runtime_status'):
+        assert registry.collect(Session(id='non-str')) == (('good', 'OK'),)
+    assert any('expected str' in record.getMessage() for record in caplog.records), caplog.records
+
+
+def test_runtime_status_contributor_cancellation_propagates():
+    """贡献者抛 `CancelledError`（`BaseException`）必须**原样穿透**，不被"坏一个不炸"吞掉。
+
+    `except Exception` 不捕 `BaseException`，所以取消/中断照常传播——这正是
+    "`CancelledError` 沿 await 链单向传播"那条不变式在这里的落点。没有用例钉住的话，
+    将来有人把它写成 `except BaseException`，151 条测试会全绿而取消已经被吞了。
+    """
+    registry = RuntimeStatusRegistry()
+
+    def cancel_now(session):
+        raise asyncio.CancelledError()
+
+    registry.register('cancel', cancel_now)
+    with pytest.raises(asyncio.CancelledError):
+        registry.collect(Session(id='cancel'))
 
 
 @pytest.mark.asyncio

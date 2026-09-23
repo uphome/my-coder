@@ -58,12 +58,16 @@ class RuntimeStatusRegistry:
     def register(self, name: str, build: StatusBuilder) -> Callable[[], None]:
         """注册一个状态源，返回注销函数。
 
-        重名 / 空名**当场抛错**（宁炸勿静默）：重名意味着两个来源抢同一个审计键，
-        到了 `request/header` 里只会剩一个，而且谁也说不清是哪个——这种错误在注册时刻
-        就暴露，比在日志里发现"状态栏怎么不对"便宜得多。
+        重名 / 空名 / `build` 不可调用**当场抛错**（宁炸勿静默）：重名意味着两个来源抢
+        同一个审计键，到了 `request/header` 里只会剩一个，而且谁也说不清是哪个；不可调用
+        则在求值时才会炸，被 `collect` 的兜底吞成一条日志、**永久静默跳过**——两种都该在
+        装配时刻暴露，比在日志里发现"状态栏怎么不对"便宜得多。
         """
         if not name:
             raise ValueError('runtime status name must not be empty')
+        if not callable(build):
+            raise TypeError(
+                f'runtime status {name!r}: build must be callable, got {type(build).__name__}')
         if name in self._builders:
             raise ValueError(f'runtime status {name!r} is already registered')
         self._builders[name] = build
@@ -74,25 +78,44 @@ class RuntimeStatusRegistry:
         return unregister
 
     def collect(self, session: Session) -> tuple[tuple[str, str], ...]:
-        """按注册顺序求值，只收**非空**的 `(name, text)`。
+        """按注册顺序求值，只收**非空字符串**的 `(name, text)`。
 
         每次请求现算（状态是"此刻的事实"）：同一个会话在同一 step 里多次组请求
         （重试路径）会拿到最新的状态；`build` 必须是纯函数或至少是"读日志算"的纯投影，
         这样"模型可见 ⟺ 可重建"仍成立。
 
-        **单个贡献者抛异常不炸对话**：记一条 ERROR 日志、跳过它——这一轮就是"没有这份
-        状态"。判据是这条通道的定位：它是**可选的状态展示**，坏了不该让整个回合作废
-        （对照：工具失败必须降级成 is_error 结果，因为那是模型输入可能不合法的通道；
-        这里连"结果"都不给，审计映射只列**真的被告知模型**的项，失败只进日志）。
-        与"注册时刻的错误（空名/重名）当场抛"并不矛盾：那是宿主写错了代码，早在
-        装配时就该响（宁炸勿静默）。
+        **契约：`build` 返回 `str | None`**——`None` 表示"这一轮没有这份状态"（不出现，
+        也不进审计）；返回**非字符串**视为写坏了，记一条 ERROR 日志并跳过（见下）。
+
+        **单个贡献者坏掉不炸对话**：求值抛异常、返回非字符串，都记 ERROR 日志、跳过它——
+        这一轮就是"没有这份状态"。判据是这条通道的定位：它是**可选的状态展示**，坏了不该
+        让整个回合作废（对照：工具失败必须降级成 is_error 结果，因为那是模型输入可能不
+        合法的通道；这里连"结果"都不给，审计映射只列**真的被告知模型**的项，失败只进日志）。
+        与"注册时刻的错误（空名/重名/不可调用）当场抛"并不矛盾：那是宿主写错了代码，
+        早在装配时就该响（宁炸勿静默）。
+
+        注意两件容易写错的事：
+        - 迭代的是**快照**（`tuple(...)`）：贡献者在求值期间注册/注销会把字典改大改小，
+          直接迭代 `items()` 会由**迭代器**抛 `RuntimeError`——它逃得过下面的 try，于是
+          "坏一个不炸对话"就不成立了。快照同时给出一句明确语义：**求值期间的增删本轮
+          不生效，下一请求生效**。
+        - `except Exception` **不捕 `BaseException`**：`CancelledError` / `KeyboardInterrupt`
+          照常穿透，所以"取消单向传播"这条不变式不被这条兜底破坏（有用例钉住）。
         """
         out: list[tuple[str, str]] = []
-        for name, build in self._builders.items():
+        for name, build in tuple(self._builders.items()):
             try:
                 text = build(session)
             except Exception:  # noqa: BLE001 - 见 docstring：可选状态坏了不该炸回合
                 log.exception('runtime status %r failed; skipped for this request', name)
+                continue
+            if text is None:
+                continue
+            if not isinstance(text, str):
+                # 非字符串一旦混进 messages / 审计，`bytes` 之类要到落盘序列化时才炸（离现场
+                # 很远）；这里当面报出来并跳过——仍然不炸回合
+                log.error('runtime status %r returned %s, expected str; skipped',
+                          name, type(text).__name__)
                 continue
             if text:
                 out.append((name, text))
