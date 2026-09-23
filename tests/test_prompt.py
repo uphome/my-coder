@@ -73,7 +73,7 @@ async def test_system_prompt_carries_general_discipline(tmp_path):
 
     为什么守这条：system 是唯一"每轮都生效"的通道，文档（AGENTS.md）只有愿意读的
     agent 才看得到——反复被踩的坑如果不提成 system 里的通用规则，agent 每次都要
-    重新踩一遍。四条纪律（范围 / 成本 / 自证 / 项目指令）与具体工具无关，所以放在
+    重新踩一遍。五条纪律（范围 / 成本 / 自证 / 收尾 / 项目指令）与具体工具无关，所以放在
     通用段（identity/persona/discipline）而不是某个 tool:* 段；这里断言它们真的
     渲染进了 system，且位置在工具段之前（顺序错位会让"通用性"名存实亡）。
     """
@@ -91,11 +91,18 @@ async def test_system_prompt_carries_general_discipline(tmp_path):
     assert headers, 'expected a request/header event'
     system = headers[0]['system']
 
-    for label in ('Scope:', 'Economy:', 'Evidence:', 'Instructions:'):
+    for label in ('Scope:', 'Economy:', 'Evidence:', 'Cleanup:', 'Instructions:'):
         assert label in system, f'通用纪律缺 {label}（应提成 system 规则，而不是只写在文档里）'
     # 通用段排在工具段之前；且"验证"不再等同于"执行"（理解代码不必跑命令）
     assert system.index('Scope:') < system.index('Use bash')
     assert 'reading code needs no execution' in system
-    # Evidence 的后半句：临时脚本/产物要自己收尾（真被踩过——一次会话在仓库根留下三个
-    # `_tmp_*` 扫描脚本，用户得先分辨哪些是垃圾才能看 diff）
-    assert 'clean up after yourself' in system
+    # Cleanup 要钉**可执行内容与安全半边**，不能只钉一个引子：变异测试实测（把整句砍到只剩
+    # 四个词、或删掉"绝不删"那一句）曾经照样全绿——四个词根本代表不了这条规则。
+    for fragment in (
+        'obviously-named',                           # 落进工作区时的收拢办法
+        'Never delete a file you did not create',    # 安全护栏：别人的文件
+        'a file tracked by git',                     # 安全护栏：版本库跟踪的文件
+        'a session log',                             # 安全护栏：`.sessions/` 被 gitignore，看不见但不可再生
+        'git status',                                # 可核对的收尾判据（"我清干净了"本身无法自证）
+    ):
+        assert fragment in system, f'Cleanup 少了关键片段：{fragment!r}'
