@@ -34,9 +34,12 @@ system 前缀缓存）；opencode 的 SystemContext 则提供"不可用"的第�
 """
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 
 from .session import Session
+
+log = logging.getLogger('runtime_status')
 
 # 贡献者签名：拿到会话（日志投影），返回要叠给模型的原文；无内容返回 None
 StatusBuilder = Callable[[Session], 'str | None']
@@ -76,10 +79,21 @@ class RuntimeStatusRegistry:
         每次请求现算（状态是"此刻的事实"）：同一个会话在同一 step 里多次组请求
         （重试路径）会拿到最新的状态；`build` 必须是纯函数或至少是"读日志算"的纯投影，
         这样"模型可见 ⟺ 可重建"仍成立。
+
+        **单个贡献者抛异常不炸对话**：记一条 ERROR 日志、跳过它——这一轮就是"没有这份
+        状态"。判据是这条通道的定位：它是**可选的状态展示**，坏了不该让整个回合作废
+        （对照：工具失败必须降级成 is_error 结果，因为那是模型输入可能不合法的通道；
+        这里连"结果"都不给，审计映射只列**真的被告知模型**的项，失败只进日志）。
+        与"注册时刻的错误（空名/重名）当场抛"并不矛盾：那是宿主写错了代码，早在
+        装配时就该响（宁炸勿静默）。
         """
         out: list[tuple[str, str]] = []
         for name, build in self._builders.items():
-            text = build(session)
+            try:
+                text = build(session)
+            except Exception:  # noqa: BLE001 - 见 docstring：可选状态坏了不该炸回合
+                log.exception('runtime status %r failed; skipped for this request', name)
+                continue
             if text:
                 out.append((name, text))
         return tuple(out)

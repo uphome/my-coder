@@ -9,7 +9,7 @@ Python 复刻 deepseek-harness 架构的教学 demo（agent 框架本身，不�
 # 质量门：ruff + mypy + pytest 三绿才可提交（pyproject.toml 已配好）
 conda run -n agent-demo python -m ruff check agent_demo tests
 conda run -n agent-demo python -m mypy agent_demo
-conda run -n agent-demo python -m pytest        # 150 个测试（3 条平台相关：Windows 建不了符号链接时 skip）
+conda run -n agent-demo python -m pytest        # 151 个测试（3 条平台相关：Windows 建不了符号链接时 skip）
 
 # CLI（可 pip install -e . 后直接 agent-demo；或模块方式跑）
 conda run --no-capture-output -n agent-demo python -m agent_demo.cli --workspace . --fake "read README.md and summarize"
@@ -122,6 +122,10 @@ conda run --no-capture-output -n agent-demo python -m agent_demo.web --workspace
     （issue #3）也在这里各加一行。
   - **`build` 必须是日志投影的纯函数**（同一段日志 → 同一份状态，符合"模型可见 ⟺ 可重建"），
     且要便宜：**每个模型请求都会求值一次**。
+  - **坏一个不炸对话**：单个贡献者在求值时抛异常 → 记一条 ERROR 日志（带名字）并跳过它，
+    这一轮就是"没有这份状态"；审计映射只列**真的被告知模型**的项。判据：这是可选的状态
+    展示通道（对照：工具失败要降级成 is_error 结果——那是模型输入可能不合法的通道；而
+    **注册时刻**的空名/重名仍然当场抛，那是宿主写错了代码）。
 - **恢复要自愈"悬空工具调用"**（落地时遵循；实测证据与 400 原文见
   `ARCHITECTURE.md` §3.16）：取消路径能补记账，但**进程被 kill / 断电 / OOM** 时
   没有任何代码有机会跑——日志会停在 `tool/call`（痕迹已落）与 `tool/result`

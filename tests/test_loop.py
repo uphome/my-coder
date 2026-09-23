@@ -652,6 +652,37 @@ async def test_runtime_status_is_collected_per_request():
     assert len(counts) == 2 and counts[0] != counts[1], counts
 
 
+@pytest.mark.asyncio
+async def test_runtime_status_contributor_failure_does_not_kill_the_turn(caplog):
+    """贡献者抛异常：记 ERROR 日志并跳过它，回合照常跑完，审计只列真被告知的项。
+
+    判据（见 `state/runtime_status.py` 的 `collect` docstring）：这条通道是**可选的状态
+    展示**，坏了不该让整个回合作废——但也不能静默，日志里必须有名字。
+    """
+    import logging
+
+    from agent_demo.state.runtime_status import RuntimeStatusRegistry as _Registry
+
+    agent, llm = _record_agent('rs-broken')
+
+    def boom(session):
+        raise RuntimeError('贡献者自己坏了')
+
+    agent.runtime_status = _Registry()
+    agent.runtime_status.register('broken', boom)
+    agent.runtime_status.register('good', lambda session: 'GOOD 状态')
+
+    with caplog.at_level(logging.ERROR, logger='runtime_status'):
+        agent.followup('还能干活吗')
+        await agent.when_idle()
+
+    header = next(e.data for e in agent.session.events if e.type == 'request/header')
+    assert header['runtime_status'] == {'good': 'GOOD 状态'}      # 坏的那个不进审计
+    assert llm.seen[0] == ['还能干活吗', 'GOOD 状态']              # 回合照常、好状态照叠
+    assert any('broken' in record.getMessage() or 'broken' in str(record.args)
+               for record in caplog.records), caplog.records
+
+
 def test_runtime_status_registry_is_strict_and_unregisterable():
     """注册时刻严格校验（空名/重名当场抛错），`register` 返回注销函数。"""
     registry = RuntimeStatusRegistry()

@@ -671,6 +671,11 @@ workspace 沙箱）；DSH 式沙箱承诺又把可读范围锁在工作区内。
 3. **多来源是一个映射，不是一堆平铺字段**：`runtime_status: {名字: 原文}`——加来源不必改
    审计形态，"这一轮模型被告知了哪些运行时状态"永远能用同一句话回答。
 
+两条失败判据（容易搞反，单列）：**注册时刻**的空名/重名**当场抛**（宿主写错了代码，装配时
+就该响）；**求值时刻**某个贡献者抛异常则**记 ERROR 日志并跳过它**（这一轮就是"没有这份
+状态"，审计只列真的被告知模型的项）——这条通道是可选的状态展示，坏了不该让整个回合作废。
+对照：工具失败必须降级成 `is_error` 结果，因为那是"模型输入可能不合法"的通道。
+
 与 DSH/opencode 的对照见 `agent.md` §4（DSH 的 runtime-context contributor 把动态上下文渲染成
 user 角色以保住 system 前缀缓存；opencode 的 SystemContext 强调"不可用"的第三态——我们用
 `None` 表达"这一轮没有"）。
@@ -737,7 +742,7 @@ user 角色以保住 system 前缀缓存；opencode 的 SystemContext 强调"不
 | `web/` | Web 宿主（入口层）：`app.py` FastAPI 路由 + `init_web` + `main`；`state.py` `Seat`/`WebState`/`state`；`sessions.py` seat 生命周期 + 会话文件 + 审批钩子 + **每会话工作区**（解析、落 `session/workspace` 事件、从日志读回）；`titles.py` 自动会话标题；`payload.py` 纯函数投影（不依赖 FastAPI）。seat 化并发隔离（每 seat 一份 `args`，**只有 workspace 不同**）；事件透传 turn/step + turn_start/user_message（带 message_id/rpc_id）/queue_update 帧供前端投影；队列项操作 `POST /queue/update`；`POST /sessions/new` 可带 `{"workspace": "…"}` |
 | `app/compaction.py` | 上下文压缩引擎（四步事务 + checkpoint + 会话 token 累计账） |
 | `show_memory.py` | 教学脚本：重放日志展示"记忆 = 投影" |
-| `tests/` | 150 个架构测试，**按关注点分文件**（2026-09 从单文件 `test_demo.py` 拆出）：`test_values_session.py` 值/日志投影、`test_inbox.py` 队列、`test_prompt.py` 提示词、`test_llm.py` LLM 客户端/wire 格式、`test_loop.py` 框架循环（含运行时状态贡献者）、`test_tools.py` 工具、`test_todo.py`、`test_recovery.py` 自愈、`test_compaction.py` 压缩、`test_instructions.py` / `test_skills.py` 宿主直读、`test_web_search.py`、`test_web.py` Web 宿主（含每对话工作区）、`test_cli.py`；跨文件 helper 在 `conftest.py`；**`test_architecture.py`**（2 条：依赖方向 = 包结构——下层 import 上层当场红，白名单里的例外必须仍然真实存在，不许长僵尸）。3 条平台相关（Windows 建不了符号链接时 skip） |
+| `tests/` | 151 个架构测试，**按关注点分文件**（2026-09 从单文件 `test_demo.py` 拆出）：`test_values_session.py` 值/日志投影、`test_inbox.py` 队列、`test_prompt.py` 提示词、`test_llm.py` LLM 客户端/wire 格式、`test_loop.py` 框架循环（含运行时状态贡献者）、`test_tools.py` 工具、`test_todo.py`、`test_recovery.py` 自愈、`test_compaction.py` 压缩、`test_instructions.py` / `test_skills.py` 宿主直读、`test_web_search.py`、`test_web.py` Web 宿主（含每对话工作区）、`test_cli.py`；跨文件 helper 在 `conftest.py`；**`test_architecture.py`**（2 条：依赖方向 = 包结构——下层 import 上层当场红，白名单里的例外必须仍然真实存在，不许长僵尸）。3 条平台相关（Windows 建不了符号链接时 skip） |
 
 ---
 
