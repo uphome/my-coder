@@ -16,8 +16,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ..registry import ToolRegistry
-from ..skills import SkillTable
+from ..app.skills import SkillTable
+from ..state.registry import ToolRegistry
 from . import file_io, search, shell, skill, todo, web_search
 
 

@@ -11,9 +11,9 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from ..constants import BASH_MAX_OUTPUT_CHARS
-from ..registry import ToolOutcome, ToolSpec
-from ..sandbox import resolve_in_workspace
+from ..app.constants import BASH_MAX_OUTPUT_CHARS
+from ..app.sandbox import resolve_in_workspace
+from ..state.registry import ToolOutcome, ToolSpec
 
 
 async def _run_command(command: str, cwd: Path) -> tuple[int, str]:

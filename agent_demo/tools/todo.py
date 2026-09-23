@@ -12,7 +12,7 @@ todo/write 快照注入 prompt 上下文，模型每轮都看到当前清单、�
 """
 from __future__ import annotations
 
-from ..registry import ToolOutcome, ToolSpec
+from ..state.registry import ToolOutcome, ToolSpec
 
 # 合法状态：pending（未开始）/ in_progress（正在做）/ completed（已完成）
 TODO_STATUSES = ('pending', 'in_progress', 'completed')

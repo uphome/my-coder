@@ -10,18 +10,18 @@ import json
 
 import pytest
 
-from agent_demo.llm import FakeLlm
-from agent_demo.persistence import load_events, save_event
-from agent_demo.prompt import PromptRegistry
-from agent_demo.registry import ToolSpec
-from agent_demo.session import Session
+from agent_demo.capability.llm import FakeLlm
+from agent_demo.state.prompt import PromptRegistry
+from agent_demo.state.registry import ToolSpec
+from agent_demo.state.session import Session
 from agent_demo.tools import build_tools
+from agent_demo.values.persistence import load_events, save_event
 
 
 def test_todo_write_folds_and_injects_into_prompt(tmp_path):
     """todo_write 全链路：写整表 → 折叠读回 → 作为 live 段注入下次请求的 system。"""
 
-    from agent_demo.session import Session
+    from agent_demo.state.session import Session
     from agent_demo.tools import build_tools
     from agent_demo.tools.todo import fold_todos
 
@@ -102,8 +102,8 @@ async def test_todo_status_bar_in_messages(tmp_path):
     """
     from argparse import Namespace
 
-    from agent_demo.factory import build_agent
-    from agent_demo.session import Session
+    from agent_demo.app.factory import build_agent
+    from agent_demo.state.session import Session
 
     session = Session(id='todo-status')
     args = Namespace(fake=True, model='fake-model', workspace=tmp_path, hide_reasoning=False,
@@ -217,7 +217,7 @@ def test_todo_fold_persists_across_turns(tmp_path):
     assert all_completed(fold_todos(s)) is True
 
     # resume 重放语义一致：adopt 同样的序列得到同样的折叠
-    from agent_demo.session import Session as S2
+    from agent_demo.state.session import Session as S2
     path = tmp_path / 'turn.jsonl'
     for e in s.events:
         save_event(path, e)

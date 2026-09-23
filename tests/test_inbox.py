@@ -7,9 +7,9 @@ from __future__ import annotations
 
 import pytest
 
-from agent_demo.inbox import Inbox
-from agent_demo.session import Session
-from agent_demo.values import TextBlock, create_user_message
+from agent_demo.state.inbox import Inbox
+from agent_demo.state.session import Session
+from agent_demo.values.messages import TextBlock, create_user_message
 
 
 def test_inbox_durable_first_then_replay():

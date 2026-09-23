@@ -11,8 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from agent_demo.llm import FakeLlm
-from agent_demo.session import Session
+from agent_demo.capability.llm import FakeLlm
+from agent_demo.state.session import Session
 from agent_demo.tools import build_tools
 
 
@@ -23,7 +23,7 @@ def test_skill_catalog_scan_and_format(tmp_path, capsys):
     - format_catalog：纯文本目录行，**不列路径**（取正文走 skill 工具按名字）
     - 正文绝不进目录（正文由 skill 工具按需取，见后面的测试）
     """
-    from agent_demo.skills import format_catalog, scan_skills
+    from agent_demo.app.skills import format_catalog, scan_skills
 
     skills_dir = tmp_path / 'skills'
     skills_dir.mkdir()
@@ -87,8 +87,8 @@ async def test_skill_catalog_injected_into_system(tmp_path):
     """
     from argparse import Namespace
 
-    from agent_demo.factory import build_agent
-    from agent_demo.session import Session
+    from agent_demo.app.factory import build_agent
+    from agent_demo.state.session import Session
 
     skills_dir = tmp_path / 'skills'
     skills_dir.mkdir()
@@ -122,13 +122,13 @@ async def test_skill_catalog_injected_into_system(tmp_path):
 
 # ---------------------------------------------------------------------------
 # 技能两个来源：bundled（随 agent 发布，包内）→ workspace（同名覆盖）
-# 背景与取舍见 agent_demo/skills.py 的模块 docstring（issue #22）
+# 背景与取舍见 agent_demo/app/skills.py 的模块 docstring（issue #22）
 # ---------------------------------------------------------------------------
 
 
 def test_bundled_skills_reach_an_arbitrary_workspace(tmp_path):
     """自带技能必须跟着 agent 走：工作区里**没有** skills/ 也要看得到目录。"""
-    from agent_demo.skills import BUNDLED, load_skills
+    from agent_demo.app.skills import BUNDLED, load_skills
 
     skills = load_skills(tmp_path)
     names = [skill.name for skill in skills]
@@ -138,14 +138,14 @@ def test_bundled_skills_reach_an_arbitrary_workspace(tmp_path):
     assert bundled.source == BUNDLED
     assert bundled.path.is_relative_to(tmp_path) is False      # 正文在包内，工作区之外
 
-    from agent_demo.skills import format_catalog
+    from agent_demo.app.skills import format_catalog
     catalog = format_catalog(skills)
     assert 'project-instructions' in catalog
 
 
 def test_workspace_skill_overrides_bundled_by_name(tmp_path):
     """同名时 workspace 覆盖 bundled：目录里只出现一次，且是项目自己那份。"""
-    from agent_demo.skills import WORKSPACE, load_skills, read_skill_body, resolve_skill
+    from agent_demo.app.skills import WORKSPACE, load_skills, read_skill_body, resolve_skill
 
     skills_dir = tmp_path / 'skills'
     skills_dir.mkdir()
@@ -171,7 +171,7 @@ async def test_skill_tool_loads_bundled_body_from_outside_the_workspace(tmp_path
     assert '---\nname:' not in skill.content               # frontmatter 已剥离
 
     # 对照：同一个文件用 read_file 读 → 沙箱拒绝（所以必须走 skill 工具）
-    from agent_demo.skills import BUNDLED_SKILLS_DIR
+    from agent_demo.app.skills import BUNDLED_SKILLS_DIR
     denied = await registry.execute(
         'read_file', {'file_path': str(BUNDLED_SKILLS_DIR / 'project-instructions.md')}, None)
     assert denied.is_error is True
@@ -187,7 +187,7 @@ def test_workspace_skill_pointing_outside_the_workspace_is_not_a_skill(tmp_path,
 
     平台无关做法：直接换掉 `resolve` 的返回值（真符号链接那条见下一条，Windows 会 skip）。
     """
-    from agent_demo.skills import SkillTable, format_catalog, load_skills
+    from agent_demo.app.skills import SkillTable, format_catalog, load_skills
 
     body = '---\nname: leak\ndescription: 外面的技能\n---\nSECRET_OUTSIDE_WORKSPACE\n'
     outside = tmp_path / 'outside' / 'secret.md'
@@ -233,7 +233,7 @@ def test_workspace_skill_symlink_outside_is_skipped(tmp_path):
     except (OSError, NotImplementedError):
         pytest.skip('symlink not permitted on this platform')
 
-    from agent_demo.skills import load_skills
+    from agent_demo.app.skills import load_skills
 
     names = [skill.name for skill in load_skills(workspace)]
     assert 'leak' not in names
@@ -258,8 +258,8 @@ def test_web_skill_catalog_survives_reload(tmp_path):
     """
     from argparse import Namespace
 
-    from agent_demo.factory import build_agent
-    from agent_demo.session import Session
+    from agent_demo.app.factory import build_agent
+    from agent_demo.state.session import Session
 
     skills_dir = tmp_path / 'skills'
     skills_dir.mkdir()
@@ -290,7 +290,7 @@ def test_skill_catalog_is_live_for_new_edited_and_deleted_skills(tmp_path):
     """
     from argparse import Namespace
 
-    from agent_demo.factory import build_agent
+    from agent_demo.app.factory import build_agent
 
     args = Namespace(fake=True, model='fake-model', workspace=tmp_path, hide_reasoning=False,
                      session='id', sessions=str(tmp_path), prompt='x', resume=False, verbose=False)
@@ -331,7 +331,7 @@ def test_skill_table_rescans_only_when_files_change(tmp_path, monkeypatch):
     每文件 `stat`（~70 µs）每次请求都做也没关系。指纹来自"名单 + (mtime, size)"，
     所以增删改名与改写内容都判得出来。
     """
-    from agent_demo import skills as skills_module
+    from agent_demo.app import skills as skills_module
 
     scans: list[Path] = []
     original = skills_module.scan_skills
@@ -374,7 +374,7 @@ def test_skill_table_refresh_is_serialized_across_threads(tmp_path, monkeypatch)
     """
     import threading
 
-    from agent_demo import skills as skills_module
+    from agent_demo.app import skills as skills_module
 
     table = skills_module.SkillTable(tmp_path)
     table.skills()                                          # 建立缓存（此时还没有技能目录）
@@ -419,7 +419,7 @@ def test_skill_fingerprint_covers_every_file_scan_skills_finds(tmp_path):
     让指纹变化，目录永远停在旧描述（正是本 PR 要治的病换了条路回来）。现在指纹改用
     `fnmatch.fnmatch`（glob 内部就是这套 `os.path.normcase` 语义）。
     """
-    from agent_demo.skills import SkillTable, _dir_signature, scan_skills
+    from agent_demo.app.skills import SkillTable, _dir_signature, scan_skills
 
     skills_dir = tmp_path / 'skills'
     skills_dir.mkdir()

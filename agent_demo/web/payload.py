@@ -14,9 +14,9 @@ from __future__ import annotations
 
 from typing import cast
 
-from ..compaction import cache_hit_rate, estimate_context_tokens, session_token_totals
-from ..constants import MODEL_CONTEXT_WINDOW
-from ..session import Session
+from ..app.compaction import cache_hit_rate, estimate_context_tokens, session_token_totals
+from ..app.constants import MODEL_CONTEXT_WINDOW
+from ..state.session import Session
 
 # 工具结果预览上限：展开卡片想看到全文（对齐 CLI 的 BASH_MAX_OUTPUT_CHARS 量级），
 # 只在真正超长时截断；chars/lines/truncated 让前端能显示统计与截断徽标。

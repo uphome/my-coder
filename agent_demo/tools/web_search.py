@@ -39,7 +39,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from ..constants import (
+from ..app.constants import (
     WEB_SEARCH_BASE_URL,
     WEB_SEARCH_MAX_QUERIES,
     WEB_SEARCH_MAX_RESULTS,
@@ -48,7 +48,7 @@ from ..constants import (
     WEB_SEARCH_SUMMARY_MAX_CHARS,
     WEB_SEARCH_TIMEOUT_S,
 )
-from ..registry import ToolOutcome, ToolSpec
+from ..state.registry import ToolOutcome, ToolSpec
 
 # 生成预算：一次搜索 = 一个完整模型轮次（服务端工具要真去搜，还要写答复），
 # 4096 对齐 DSH 的 DEEPSEEK_DEFAULT_MAX_TOKENS。思维链也吃这个预算，给足。

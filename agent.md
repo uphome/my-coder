@@ -201,7 +201,7 @@ agent-demo 现状：Python 四层单向架构、日志唯一事实源、已有 r
 
 ### 3.3 候选实现面（落地时照此评估，具体以 AGENTS.md/实现为准）
 
-- `agent_demo/skills.py`：`Skill` 值对象（frozen dataclass：name/description/
+- `agent_demo/app/skills.py`：`Skill` 值对象（frozen dataclass：name/description/
   path/model_invocable）+ `scan_skills(dir)`（dir 参数化，为多 agent 留缝）+
   `format_catalog()`（纯文本目录行）
 - `factory.py build_agent`：注册 `prompt.section('skill:catalog', order<100,
@@ -327,9 +327,9 @@ SystemContext 的形态一致，todo 只是通用状态栏的第一个贡献者�
 - 改动清单：
   - `agent_demo/tools/todo.py`：新增 `build_todo_status(session)`——fold 出
     清单 → XML `<todo_status>` 块；无清单或 `all_completed` 返回 None
-  - `agent_demo/loop.py _run_step`：组 messages 时若 `build_todo_status` 非
+  - `agent_demo/runtime/loop.py _run_step`：组 messages 时若 `build_todo_status` 非
     None 则 append 一条 `create_user_message([TextBlock(text=status)])`
-  - `agent_demo/factory.py`：删 `todo:state` live section + `_todo_context`
+  - `agent_demo/app/factory.py`：删 `todo:state` live section + `_todo_context`
     （todo 离开 system；注释同步）
   - `web/index.html`：不改——前端 dock 由 todo_update 帧驱动，状态栏只影响
     模型上下文
@@ -667,7 +667,7 @@ snippet 永远空；② 摘要无法做"句句有据"的引用；③ 摘要正�
 4. **回合号/状态本身没坏**（`_last_turn` 恢复正确、status=idle），所以表面上"看着
    还挺正常"，问题要到下一次发送才暴露。
 
-### 8.3 修法（`agent_demo/recovery.py`）
+### 8.3 修法（`agent_demo/state/recovery.py`）
 
 恢复（重放）之后扫一遍**投影**，给缺结果的调用补一条 `is_error` 合成结果，并**先落
 一条 `session/repaired` 痕迹**。两个刻意的选择：
@@ -818,6 +818,6 @@ instructions（live system 段，order 20） ← C：确定性探测 + 正文/�
   时第二条断言必失败）；**issue #17 补的三条**（撕裂读的半截不进缓存——两次渲染都报
   "读不到"、第三次重读拿到完整内容；断链符号链接算"读不到"而不是"不存在"，平台无关版 +
   真符号链接集成版）
-- 门禁：`ruff` / `mypy` 干净、`pytest 129 passed, 3 skipped`（共 132 条；3 条 skip =
-  Windows 建不了符号链接时跳过）
+- 门禁：`ruff` / `mypy` 干净、`pytest 131 passed, 3 skipped`（共 134 条；3 条 skip =
+  Windows 建不了符号链接时跳过。132 → 134 是分层重构补的两条依赖方向测试）
 

@@ -9,9 +9,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ..constants import READ_FILE_DEFAULT_LIMIT, READ_FILE_MAX_CHARS, READ_FILE_MAX_LIMIT
-from ..registry import ToolOutcome, ToolSpec
-from ..sandbox import occurrence_lines, resolve_in_workspace
+from ..app.constants import READ_FILE_DEFAULT_LIMIT, READ_FILE_MAX_CHARS, READ_FILE_MAX_LIMIT
+from ..app.sandbox import occurrence_lines, resolve_in_workspace
+from ..state.registry import ToolOutcome, ToolSpec
 
 
 def register(registry, workspace: Path) -> None:

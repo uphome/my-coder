@@ -25,24 +25,24 @@ harness 的四个核心设计：
 ```
 入口层  cli.py / web/         CLI 与 Web 两个入口（经 factory.build_agent 组装）
         │
-循环层  agent.py      被动状态机：send → inbox → wake → driver → idle
-        loop.py       turn/step 两级循环 + 三个钩子
+循环层  runtime/agent.py      被动状态机：send → inbox → wake → driver → idle
+        runtime/loop.py       turn/step 两级循环 + 三个钩子
         │
-状态层  session.py    追加式事件日志（唯一事实源）+ derive_messages 投影
-        inbox.py      双队列 pending 消息（spliced 事件的持久化投影 + queued_items 队列投影）
-        prompt.py     sections 按 order 拼接 + {{变量}} 严格插值
-        registry.py   工具类型：ToolSpec（schema + executor + 模式）
+状态层  state/session.py    追加式事件日志（唯一事实源）+ derive_messages 投影
+        state/inbox.py      双队列 pending 消息（spliced 事件的持久化投影 + queued_items 队列投影）
+        state/prompt.py     sections 按 order 拼接 + {{变量}} 严格插值
+        state/registry.py   工具类型：ToolSpec（schema + executor + 模式）
         │
-能力层  llm.py        OpenAI 兼容 SSE 流式客户端 + 可脚本化 FakeLlm
-        hooks.py      三个决策钩子的类型（属循环层接口）
+能力层  capability/llm.py        OpenAI 兼容 SSE 流式客户端 + 可脚本化 FakeLlm
+        capability/hooks.py      三个决策钩子的类型（属循环层接口）
         │
-值 层  values.py      不可变 Message/SessionEvent + JSONL 编解码
-        persistence.py JSONL 追加写 + 重放读（横切状态层的 I/O 通道）
+值 层  values/messages.py      不可变 Message/SessionEvent + JSONL 编解码
+        values/persistence.py JSONL 追加写 + 重放读（横切状态层的 I/O 通道）
 ```
 
 依赖方向只有一条：上层依赖下层，下层不感知上层。工具在 `tools/` 包
-（应用内容，依赖状态层与 registry）、渲染在 `ui.py`、路径边界在
-`sandbox.py`、上下文压缩在 `compaction.py`——都是"应用内容"，框架
+（应用内容，依赖状态层与 registry）、渲染在 `app/ui.py`、路径边界在
+`app/sandbox.py`、上下文压缩在 `app/compaction.py`——都是"应用内容"，框架
 四层不感知它们。
 
 ---
@@ -56,7 +56,7 @@ harness 的四个核心设计：
 > **模型的记忆 = 日志的投影 = derive_messages() 的输出 = 下次 request 的 messages**
 
 "记忆"不是一份独立存储的对话状态——它根本没被存下来。每次发起模型
-请求前，循环实时地从日志折叠出来（`loop.py` 调 `session.derive_messages()`）：
+请求前，循环实时地从日志折叠出来（`runtime/loop.py` 调 `session.derive_messages()`）：
 
 - 删掉日志 → 记忆消失
 - 重放日志 → 记忆完整还原
@@ -229,12 +229,12 @@ demo 运行时挂的第一个钩子是 `request_error`（上下文压缩的溢�
 
 | 失败发生在哪 | 谁在兜底 |
 |---|---|
-| 坏 JSON（模型给了坏参数） | loop.py——连 execute 都不进 |
-| 参数校验失败（缺 required / 多参数） | registry.py 抛 ValueError → loop.py 捕获降级 |
-| 工具执行抛异常 | loop.py 捕获降级 |
+| 坏 JSON（模型给了坏参数） | runtime/loop.py——连 execute 都不进 |
+| 参数校验失败（缺 required / 多参数） | state/registry.py 抛 ValueError → runtime/loop.py 捕获降级 |
+| 工具执行抛异常 | runtime/loop.py 捕获降级 |
 | 工具卡死超时 | tools/ 包 wait_for 兜底（**同步阻塞的 executor 要先声明 `offload`，否则 wait_for 的定时器永远不会触发**，见 §3.15） |
-| 用户取消（组执行中途） | loop.py 给已请求但没结果的调用补一条 is_error 合成结果——失败要降级成结果，取消也不例外（见 §3.15） |
-| 进程被 kill / 断电（没有任何代码有机会跑） | 恢复时自愈：`recovery.py` 补 is_error 合成结果 + `session/repaired` 痕迹（见 §3.16） |
+| 用户取消（组执行中途） | runtime/loop.py 给已请求但没结果的调用补一条 is_error 合成结果——失败要降级成结果，取消也不例外（见 §3.15） |
+| 进程被 kill / 断电（没有任何代码有机会跑） | 恢复时自愈：`state/recovery.py` 补 is_error 合成结果 + `session/repaired` 痕迹（见 §3.16） |
 
 模型看到 `ValueError: missing required argument` 这类结果，自己知道怎么
 改。**任何异常都不能越过 `_run_one` 炸掉循环**，唯一能打断的只有用户
@@ -256,7 +256,7 @@ _run_one → _run_group（补记账）→ _execute_tool_calls（补记账）
 
 ### 3.10 能力层：双向翻译 + StreamChunk 契约
 
-能力层（llm.py）是内部词汇表和外部协议之间的**双向翻译器**：
+能力层（capability/llm.py）是内部词汇表和外部协议之间的**双向翻译器**：
 
 ```
 出站: 内部 Message/Block ──build_payload/_to_wire_messages──▶ wire JSON
@@ -282,8 +282,8 @@ _run_one → _run_group（补记账）→ _execute_tool_calls（补记账）
 
 ### 3.11 JSONL 编解码：tagged dict 方案
 
-`values.py` 负责"单个事件 ↔ JSON"的纯转换（**没有文件 I/O**），
-`persistence.py` 才是碰文件的通道。分工：Session 管状态、persistence
+`values/messages.py` 负责"单个事件 ↔ JSON"的纯转换（**没有文件 I/O**），
+`values/persistence.py` 才是碰文件的通道。分工：Session 管状态、persistence
 管 I/O、values 管类型转换。三者分开的理由：纯函数 vs 副作用分离、
 存储后端可替换（harness 里是抽象）、单向依赖。
 
@@ -326,10 +326,10 @@ JSON 没有类型信息，用 `$xxx` 前缀 key 做类型标记：`$text`/`$tool
   维护动作是单向的：**反复被踩的坑从文档上移到通用段**（文档只有愿意读的 agent
   才看得到，system 才是每轮都生效的通道）
 - **prompt sections 用 order 数值排序**：主序按 order 升序、平局按名字；
-  factory.py 用 -100/0/110 间隔留插队空间。排序本身是架构性的（插件插队），
+  app/factory.py 用 -100/0/110 间隔留插队空间。排序本身是架构性的（插件插队），
   长提示词下首因/近因效应才变成真实的调优手段
 - **usage 进日志 → 成本是日志的投影**：`assistant/message` 落 usage 后，
-  会话累计消耗 token / 缓存命中率只需扫日志求和（`compaction.py` 的
+  会话累计消耗 token / 缓存命中率只需扫日志求和（`app/compaction.py` 的
   `session_token_totals`），运行时不需要第二份记账状态——"记忆机制的直接受益"
 - **模型是否每次看到全部工具**：是。每次请求全量携带 tools 清单
 
@@ -442,7 +442,7 @@ HTTP 400 An assistant message with 'tool_calls' must be followed by tool message
 出路——新建会话（丢掉上下文）或手改 JSONL。UI 上还有一个更早的征兆：那条工具行
 会**永远转圈**（前端建卡片时一律 `state:'running'`，只有拿到 `tool_result` 才翻）。
 
-**修法**（`recovery.py`，恢复入口调用）：重放之后扫一遍投影，给缺结果的调用补一条
+**修法**（`state/recovery.py`，恢复入口调用）：重放之后扫一遍投影，给缺结果的调用补一条
 `is_error` 合成结果，并**先落一条 `session/repaired` 痕迹**说明这次自愈。两个刻意的
 选择：
 
@@ -469,7 +469,7 @@ HTTP 400 An assistant message with 'tool_calls' must be followed by tool message
 ——会话结束后日志里那些发现（怎么跑测试、依赖方向、用户偏好）不会自动变成下个会话
 的约定。
 
-**注入通道的决定**：正文直接进 **system 的 live 段**（`instructions.py` + `factory.py`
+**注入通道的决定**：正文直接进 **system 的 live 段**（`app/instructions.py` + `app/factory.py`
 的 order 20），而不是像 todo 那样作为 messages 末尾的合成消息。判据是"变化的频率"：
 
 | 内容 | 变化频率 | 通道 | 为什么 |
@@ -600,7 +600,7 @@ workspace 沙箱）；DSH 式沙箱承诺又把可读范围锁在工作区内。
 
 ### 3.19 宿主直读文件的两条边界：越界 + 三态
 
-`instructions.py`（指令文件）与 `skills.py`（工作区来源的技能）是**宿主自己发现并读取**
+`app/instructions.py`（指令文件）与 `app/skills.py`（工作区来源的技能）是**宿主自己发现并读取**
 工作区文件的两条路——它们不经过工具沙箱（模型没参与，也没给路径），所以**边界要自己
 守**。两条规则相同，实现也共用：
 
@@ -613,7 +613,7 @@ workspace 沙箱）；DSH 式沙箱承诺又把可读范围锁在工作区内。
 **system prompt**（指令文件正文）、一条进**对话**（技能正文）——都是"工作区里的文本
 直接变成模型的输入"。persona 明写"工作区外不可读"，工具层也已经用
 `sandbox.resolve_in_workspace` 拦住了模型给路径那条路；宿主直读这条路不自己拦，就等于
-在后门留了同一个洞。（与 `sandbox.py` 同级：hardlink / TOCTOU 不设防，这是"防误用
+在后门留了同一个洞。（与 `app/sandbox.py` 同级：hardlink / TOCTOU 不设防，这是"防误用
 保险"，不是 OS 级沙箱。）
 
 ---
@@ -653,29 +653,29 @@ workspace 沙箱）；DSH 式沙箱承诺又把可读范围锁在工作区内。
 
 | 文件 | 角色 |
 |---|---|
-| `values.py` | 值层：不可变 Message/SessionEvent + tagged dict 编解码 |
-| `session.py` | 日志 + surface 折叠投影（append / derive_messages / adopt / request_header） |
-| `inbox.py` | 双队列（next-turn / next-step）+ claim 语义 + 持久化重放 + `queued_items()` 队列投影 |
-| `prompt.py` | sections 按 order 拼接 + `{{var}}` 严格插值 |
-| `registry.py` | 工具类型（ToolSpec：schema + executor + 并发模式 + 卸载声明 + 超时 + requires_approval） |
-| `llm.py` | 能力层：SSE 流式客户端 + FakeLlm + wire 双向翻译（含思维链字段解析） |
-| `hooks.py` | 三个决策钩子的类型 |
-| `loop.py` | turn/step 两级循环 + 流组装 + 工具分组执行（自限池/有序提交/取消补记）+ 思维链痕迹落盘 + 四层兜底 |
-| `agent.py` | 被动状态机：wake / kick / when_idle / cancel |
-| `persistence.py` | JSONL 追加写 + 重放读 |
-| `recovery.py` | 会话自愈：恢复时给崩溃留下的悬空工具调用补 is_error 合成结果 + `session/repaired` 痕迹 |
-| `instructions.py` | 工作区项目指令文件（AGENTS.md/CLAUDE.md）：子目录清单扫描（每回合）+ 根文件三态探测（每请求；`lstat`/`stat` 分开 + 读完校验缓存键）+ 字符预算 + system live 段渲染 |
-| `skills.py` | 按需技能：**两来源合并**（包内 `bundled_skills/` + `<workspace>/skills/`，workspace 同名覆盖，按名字排序）+ `SkillTable`（stat 键控缓存）+ 目录文本 + 按名字解析正文 + **工作区来源的越界检查**（`boundary`） |
+| `values/messages.py` | 值层：不可变 Message/SessionEvent + tagged dict 编解码 |
+| `state/session.py` | 日志 + surface 折叠投影（append / derive_messages / adopt / request_header） |
+| `state/inbox.py` | 双队列（next-turn / next-step）+ claim 语义 + 持久化重放 + `queued_items()` 队列投影 |
+| `state/prompt.py` | sections 按 order 拼接 + `{{var}}` 严格插值 |
+| `state/registry.py` | 工具类型（ToolSpec：schema + executor + 并发模式 + 卸载声明 + 超时 + requires_approval） |
+| `capability/llm.py` | 能力层：SSE 流式客户端 + FakeLlm + wire 双向翻译（含思维链字段解析） |
+| `capability/hooks.py` | 三个决策钩子的类型 |
+| `runtime/loop.py` | turn/step 两级循环 + 流组装 + 工具分组执行（自限池/有序提交/取消补记）+ 思维链痕迹落盘 + 四层兜底 |
+| `runtime/agent.py` | 被动状态机：wake / kick / when_idle / cancel |
+| `values/persistence.py` | JSONL 追加写 + 重放读 |
+| `state/recovery.py` | 会话自愈：恢复时给崩溃留下的悬空工具调用补 is_error 合成结果 + `session/repaired` 痕迹 |
+| `app/instructions.py` | 工作区项目指令文件（AGENTS.md/CLAUDE.md）：子目录清单扫描（每回合）+ 根文件三态探测（每请求；`lstat`/`stat` 分开 + 读完校验缓存键）+ 字符预算 + system live 段渲染 |
+| `app/skills.py` | 按需技能：**两来源合并**（包内 `bundled_skills/` + `<workspace>/skills/`，workspace 同名覆盖，按名字排序）+ `SkillTable`（stat 键控缓存）+ 目录文本 + 按名字解析正文 + **工作区来源的越界检查**（`boundary`） |
 | `bundled_skills/` | 随 agent 发布的技能正文（`pyproject` 的 package-data）；自带能力必须跟着 agent 走，不能跟着工作区走 |
 | `tools/` | 应用工具（file_io 读写/编辑、search grep/glob、shell bash、todo、**web_search 联网搜索**、**skill 按名字取技能正文**）+ `build_tools(workspace, skills=…)` |
-| `sandbox.py` | workspace 路径边界：工具入参的轻量沙箱（归一化 + 前缀匹配）+ **宿主直读文件的越界判据**（`workspace_escape_reason`，指令文件与技能共用） |
-| `ui.py` | 终端渲染（_render_event / _paint，UI 是日志投影） |
-| `factory.py` | build_agent / load_env（CLI 与 Web 共用组装） |
+| `app/sandbox.py` | workspace 路径边界：工具入参的轻量沙箱（归一化 + 前缀匹配）+ **宿主直读文件的越界判据**（`workspace_escape_reason`，指令文件与技能共用） |
+| `app/ui.py` | 终端渲染（_render_event / _paint，UI 是日志投影） |
+| `app/factory.py` | build_agent / load_env（CLI 与 Web 共用组装） |
 | `cli.py` | CLI 入口（单次任务 / 无任务参数进 REPL） |
 | `web/` | Web 宿主（入口层）：`app.py` FastAPI 路由 + `init_web` + `main`；`state.py` `Seat`/`WebState`/`state`；`sessions.py` seat 生命周期 + 会话文件 + 审批钩子；`titles.py` 自动会话标题；`payload.py` 纯函数投影（不依赖 FastAPI）。seat 化并发隔离；事件透传 turn/step + turn_start/user_message（带 message_id/rpc_id）/queue_update 帧供前端投影；队列项操作 `POST /queue/update` |
-| `compaction.py` | 上下文压缩引擎（四步事务 + checkpoint + 会话 token 累计账） |
+| `app/compaction.py` | 上下文压缩引擎（四步事务 + checkpoint + 会话 token 累计账） |
 | `show_memory.py` | 教学脚本：重放日志展示"记忆 = 投影" |
-| `tests/` | 132 个架构测试，**按关注点分文件**（2026-09 从单文件 `test_demo.py` 拆出）：`test_values_session.py` 值/日志投影、`test_inbox.py` 队列、`test_prompt.py` 提示词、`test_loop.py` 框架循环、`test_tools.py` 工具、`test_todo.py`、`test_recovery.py` 自愈、`test_compaction.py` 压缩、`test_instructions.py` / `test_skills.py` 宿主直读、`test_web_search.py`、`test_web.py` Web 宿主、`test_cli.py`；跨文件 helper 在 `conftest.py`。3 条平台相关（Windows 建不了符号链接时 skip） |
+| `tests/` | 134 个架构测试，**按关注点分文件**（2026-09 从单文件 `test_demo.py` 拆出）：`test_values_session.py` 值/日志投影、`test_inbox.py` 队列、`test_prompt.py` 提示词、`test_llm.py` LLM 客户端/wire 格式、`test_loop.py` 框架循环、`test_tools.py` 工具、`test_todo.py`、`test_recovery.py` 自愈、`test_compaction.py` 压缩、`test_instructions.py` / `test_skills.py` 宿主直读、`test_web_search.py`、`test_web.py` Web 宿主、`test_cli.py`；跨文件 helper 在 `conftest.py`；**`test_architecture.py`**（2 条：依赖方向 = 包结构——下层 import 上层当场红，白名单里的例外必须仍然真实存在，不许长僵尸）。3 条平台相关（Windows 建不了符号链接时 skip） |
 
 ---
 
@@ -689,7 +689,7 @@ workspace 沙箱）；DSH 式沙箱承诺又把可读范围锁在工作区内。
 - 节奏：一步步来，每步先讲设计再动手
 - 定位：教学 demo → **个人工具 / 求职作品**（工程化重构规划见 NEXT_STEPS.md
   "架构重构（求职作品级）"——框架四层不动，拆 main.py 的应用内容为
-  tools/ 包 + ui.py + sandbox.py，补打包 / lint / typecheck / CI）
+  tools/ 包 + app/ui.py + app/sandbox.py，补打包 / lint / typecheck / CI）
 
 ### 阶段一：真实工具集（先能干活）
 
@@ -719,7 +719,7 @@ workspace 沙箱）；DSH 式沙箱承诺又把可读范围锁在工作区内。
 | 任务 | 说明 | 状态 |
 |---|---|---|
 | max-tokens 粘性续写 | finish_reason=length 时自动继续（当前只记 max-tokens 收尾） | ⬜ 待做 |
-| token 计数与成本显示 | usage 已落日志，重放日志即可统计——记忆机制的直接受益 | ✅ 会话累计消耗 token + Web 圆环显示（compaction.py 的 `session_token_totals`） |
+| token 计数与成本显示 | usage 已落日志，重放日志即可统计——记忆机制的直接受益 | ✅ 会话累计消耗 token + Web 圆环显示（app/compaction.py 的 `session_token_totals`） |
 | compaction 触发 | 上下文超限时压缩历史（harness 的 surface replace 区间遮蔽是方向） | ✅ 全套已完成：自动阈值 + 溢出恢复 + 手动按钮 |
 | request_error 钩子启用 | RATE_LIMIT 退避重试——钩子插座插上第一个电器 | ✅ 溢出恢复（上下文过长 → 压缩重试）已占用该钩子；RATE_LIMIT 退避未做 |
 

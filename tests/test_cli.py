@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from agent_demo.persistence import load_events
+from agent_demo.values.persistence import load_events
 
 
 def test_cli_repl_runs_multiple_turns(tmp_path):

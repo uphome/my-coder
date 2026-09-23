@@ -9,13 +9,13 @@ import json
 
 import pytest
 
-from agent_demo.agent import Agent
-from agent_demo.constants import READ_FILE_MAX_CHARS, READ_FILE_MAX_LIMIT, TOOL_RESULT_MAX_CHARS
-from agent_demo.hooks import Hooks
-from agent_demo.llm import FakeLlm
-from agent_demo.prompt import PromptRegistry
-from agent_demo.registry import ToolOutcome, ToolRegistry, ToolSpec
-from agent_demo.session import Session
+from agent_demo.app.constants import READ_FILE_MAX_CHARS, READ_FILE_MAX_LIMIT, TOOL_RESULT_MAX_CHARS
+from agent_demo.capability.hooks import Hooks
+from agent_demo.capability.llm import FakeLlm
+from agent_demo.runtime.agent import Agent
+from agent_demo.state.prompt import PromptRegistry
+from agent_demo.state.registry import ToolOutcome, ToolRegistry, ToolSpec
+from agent_demo.state.session import Session
 from agent_demo.tools import build_tools
 
 

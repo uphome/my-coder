@@ -25,12 +25,12 @@ from pathlib import Path
 
 from fastapi import HTTPException
 
-from ..factory import build_agent
-from ..hooks import Hooks
-from ..persistence import load_events
-from ..recovery import repair_dangling_tool_calls
-from ..session import Session
+from ..app.factory import build_agent
+from ..capability.hooks import Hooks
+from ..state.recovery import repair_dangling_tool_calls
+from ..state.session import Session
 from ..tools.todo import fold_todos
+from ..values.persistence import load_events
 from .payload import context_payload, history_payloads, queue_rows
 from .state import Seat, state
 
@@ -93,7 +93,7 @@ def open_session_seat(sid: str, *, allow_missing: bool) -> Seat:
             session.adopt(event)
     session.bind_store(log_path)  # 追加式实时落盘（没有状态不进日志）
     # 崩溃/被 kill 留下的"悬空工具调用"在这里自愈：不修的话模型记忆里会留下
-    # "请求了工具却没有结果"的 assistant 消息，之后每次发送都是 400（见 recovery.py）
+    # "请求了工具却没有结果"的 assistant 消息，之后每次发送都是 400（见 state/recovery.py）
     repaired = repair_dangling_tool_calls(session)
     if repaired:
         print(f'[repair] session {sid}: {len(repaired)} dangling tool call(s) repaired',

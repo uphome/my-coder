@@ -10,9 +10,9 @@ import fnmatch
 import re
 from pathlib import Path
 
-from ..constants import GLOB_MAX_RESULTS, GREP_MAX_MATCHES
-from ..registry import ToolOutcome, ToolSpec
-from ..sandbox import iter_files, resolve_in_workspace
+from ..app.constants import GLOB_MAX_RESULTS, GREP_MAX_MATCHES
+from ..app.sandbox import iter_files, resolve_in_workspace
+from ..state.registry import ToolOutcome, ToolSpec
 
 
 def register(registry, workspace: Path) -> None:

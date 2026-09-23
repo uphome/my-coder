@@ -12,14 +12,14 @@ import time
 import pytest
 from conftest import make_agent
 
-from agent_demo import loop as loop_module
-from agent_demo.agent import Agent
-from agent_demo.hooks import Hooks, PreStepContext, RequestErrorContext
-from agent_demo.llm import FakeLlm, StreamChunk
-from agent_demo.prompt import PromptRegistry
-from agent_demo.registry import ToolOutcome, ToolRegistry, ToolSpec
-from agent_demo.session import Session
-from agent_demo.values import TextBlock, ToolCallBlock, ToolResultBlock, create_user_message
+from agent_demo.capability.hooks import Hooks, PreStepContext, RequestErrorContext
+from agent_demo.capability.llm import FakeLlm, StreamChunk
+from agent_demo.runtime import loop as loop_module
+from agent_demo.runtime.agent import Agent
+from agent_demo.state.prompt import PromptRegistry
+from agent_demo.state.registry import ToolOutcome, ToolRegistry, ToolSpec
+from agent_demo.state.session import Session
+from agent_demo.values.messages import TextBlock, ToolCallBlock, ToolResultBlock, create_user_message
 
 
 @pytest.mark.asyncio
@@ -420,10 +420,10 @@ async def test_steer_inserts_and_runs_as_next_turn():
     绝不会丢——when_idle 收敛后 inbox.has_pending 为假、两条用户消息都
     进了模型记忆。
     """
-    from agent_demo.agent import Agent
-    from agent_demo.prompt import PromptRegistry
-    from agent_demo.registry import ToolRegistry
-    from agent_demo.session import Session
+    from agent_demo.runtime.agent import Agent
+    from agent_demo.state.prompt import PromptRegistry
+    from agent_demo.state.registry import ToolRegistry
+    from agent_demo.state.session import Session
 
     session = Session(id='s')
     agent = Agent(
@@ -451,11 +451,11 @@ async def test_steer_while_running_becomes_next_step_of_same_turn():
     - 出现 ≥2 次 step/start（steer 消息作为本回合的下一步被处理）
     - 插队文本在模型可见记忆里
     """
-    from agent_demo.agent import Agent
-    from agent_demo.llm import StreamChunk
-    from agent_demo.prompt import PromptRegistry
-    from agent_demo.registry import ToolRegistry
-    from agent_demo.session import Session
+    from agent_demo.capability.llm import StreamChunk
+    from agent_demo.runtime.agent import Agent
+    from agent_demo.state.prompt import PromptRegistry
+    from agent_demo.state.registry import ToolRegistry
+    from agent_demo.state.session import Session
 
     class HoldingLlm:
         """第一步：stream 挂起（等 steer 入队窗口）再 yield 文本。
@@ -510,7 +510,7 @@ async def test_steer_absorbed_at_next_request_inside_tool_loop():
     - 第 2 次请求（工具循环仍在继续）的 messages 里**已经有**它
     - 日志里 step 数与请求数一一对应
     """
-    from agent_demo.llm import ToolCallDelta
+    from agent_demo.capability.llm import ToolCallDelta
 
     calls = []
 
