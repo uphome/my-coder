@@ -100,6 +100,14 @@ def violations() -> set[tuple[str, str]]:
 
 
 def test_layers_only_depend_downwards():
+    # 先钉住"扫描面"本身，否则这条断言会**静默通过**：`PACKAGE_ROOT` 指错时 `rglob` 扫不到
+    # 文件 → `violations()` 是空集 → 下面两条断言全绿。实测（把 root 指到不存在的目录）：
+    # `2 passed`——门无声地没了。包改名/搬目录正好会造出这种"root 指错"，所以这一步不能省。
+    scanned = len(list(PACKAGE_ROOT.rglob('*.py'))) if PACKAGE_ROOT.is_dir() else 0
+    assert scanned >= 30, (
+        f'包目录或扫描面不对：{PACKAGE_ROOT}（扫到 {scanned} 个模块）——'
+        '扫不到文件时本文件的两个依赖断言都会静默全绿，所以这里要响亮地炸。'
+    )
     found = violations()
     unexpected = sorted(found - set(KNOWN_VIOLATIONS))
     assert not unexpected, (
