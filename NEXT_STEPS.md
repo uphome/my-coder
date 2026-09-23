@@ -527,12 +527,14 @@ agent_demo/               包结构（取代平铺）
     ├── shell.py          bash + _run_command 执行后端
     └── todo.py           todo_write
 pyproject.toml            打包 + ruff / mypy / pytest 配置 + console scripts
-.github/workflows/ci.yml  CI（ruff + mypy + pytest × 3.11/3.12/3.13 + CLI 冒烟）
+（CI 不信 GitHub Actions：曾在 `447564c` 接过、又在 `eca8d98`（2026-09-05）移除——
+理由是 Python 3.12 的 pathlib `**` 语义差异让 glob 测试云端红，而单人本地开发收益低。
+要恢复先把跨版本 glob 语义问题修掉）
 ```
 
 - 步骤 1 模块化 ✅（38 测试全绿，git 全程识别 rename 保留历史）
 - 步骤 2 打包 ✅（`pip install -e .`，`agent-demo` / `agent-demo-web` 命令）
-- 步骤 3 工程化 ✅（ruff 清零 / mypy 清零 / CI workflow；质量门三绿才提交）
+- 步骤 3 工程化 ✅（ruff 清零 / mypy 清零；质量门三绿才提交。**CI 已按上面的理由移除**）
 - 步骤 4 功能：上下文压缩全套 + Web ContextMeter + Web 会话并发隔离 +
   steer 插队 + CLI REPL（已完成，见下节）；阶段四工程化打磨（配置/日志
   查看器）仍未开始
