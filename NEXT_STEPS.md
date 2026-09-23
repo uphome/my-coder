@@ -625,6 +625,33 @@ agent_demo/
 | 允许"路径不存在就 mkdir -p"（DSH 的裸 cwd 路径会建目录） | 我们只有一条路径（显式选择）→ 选"严格"：打错字当场 400，而不是在别处造一个空目录 |
 | CLI 的每会话工作区 | CLI 一次一个会话，`--workspace` 就是它的边界；`--resume` 别人的日志时按 CLI 参数走（文档已说明） |
 
+## 运行时状态：注册制贡献者（2026-09 已落地，issue #19）
+
+**动机**：`runtime/loop.py` 原先直接 `from ..tools.todo import build_todo_status` —— 框架层
+反向依赖应用层工具（依赖方向评审里那条唯一的白名单例外）。加一个状态源（L0 会话目录、
+M2 预算水位）就得改循环，`request/header` 的审计字段也只能一个来源一个平铺字段。
+
+**做法**（三处，循环不认识任何具体来源）：
+
+1. `state/runtime_status.py`（新）：`RuntimeStatusRegistry` —— 一个状态源 = 名字 +
+   `build(session) -> str | None`（**无内容返回 None**）；`register` 对空名/重名当场抛错，
+   返回注销函数；`collect(session)` 按注册顺序求值，只收非空。
+2. `runtime/loop.py`：每请求 `collect()` → 非空者**各贴一条合成 user 消息**在 messages 末尾
+   （不进日志、不进 `derive_messages`）→ 审计字段变成**映射** `request/header.runtime_status
+   = {名字: 原文}`（原来是平铺的 `todo_status`）。
+3. `app/factory.py`：`_runtime_status()` 里一行 `register('todo', build_todo_status)`。
+   **加一个状态源 = 这里一行，循环一行都不用改**（这就是这条改造的意义）。
+
+**落地时的证据**：改造完成的同一刻，`tests/test_architecture.py` 的
+`test_known_violations_are_still_real` **主动报红**（"这些例外已经不再越界了，请删掉"）
+——按"白名单不许长僵尸"的规矩删掉最后一条，白名单现在是**空的**。
+
+**明确不做**：DSH 的"内容变化才 append 新快照"（它靠 `retained.text === snapshot` 去重，
+因为快照会**留在历史里**）；我们每请求现算、不进历史，所以不需要去重账——同一个效果
+（前缀稳定）由"贴尾 + 不落事件"达成。opencode 的 baseline/update 双形态同理不做。
+真要做"状态进入历史"（例如 compaction 后要把状态栏一起折叠），那是另一条改造，前提是先
+回答"状态栏算不算对话内容"。
+
 ## 实施约定（延续项目哲学）
 
 1. 新增状态一律落日志——"没有状态不进日志"不变式不能破

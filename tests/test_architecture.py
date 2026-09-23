@@ -14,6 +14,7 @@
 
 白名单只收**带 issue 号**的例外，并且**断言它们仍然存在**——修好之后必须同步删掉条目，
 不然白名单会悄悄长成一张废纸（僵尸条目 = 测试在替一段已经不存在的代码开脱）。
+**现在白名单是空的**：两条历史例外都已按规矩清掉（见 `KNOWN_VIOLATIONS` 上方注释）。
 """
 from __future__ import annotations
 
@@ -36,13 +37,14 @@ ENTRY_LAYER = 5
 
 # 已知例外：(源模块, 目标模块) → 为什么留着
 #
-# 曾经的第二条是 `state.registry → app.constants`（状态层要用应用层的
-# `TOOL_RESULT_MAX_CHARS`）：第 4 步把它下沉到 `values/limits.py` 之后就不再越界，
-# 于是按"白名单不许长僵尸"的规矩从这里删掉了——这条注释就是那次删除留下的记录。
-KNOWN_VIOLATIONS = {
-    ('agent_demo.runtime.loop', 'agent_demo.tools.todo'):
-        'issue #19：把"每轮叠给模型的状态"做成注册制贡献者之后清掉',
-}
+# **现在是空的**（2026-09，issue #19 落地后）。两条曾经的例外都按"修好即删"的规矩清掉了：
+# - `state.registry → app.constants`（状态层要用应用层的 `TOOL_RESULT_MAX_CHARS`）：
+#   第 4 步把常量下沉到 `values/limits.py`；
+# - `runtime.loop → tools.todo`（框架循环直接 import 应用层工具来叠 todo 状态栏）：
+#   issue #19 把这条通道改成**注册制贡献者**（`state/runtime_status.py`，贡献者由
+#   `app/factory.py` 注册），循环不再认识任何具体状态源。
+# 两条删除记录都留在注释里——将来再往这里加例外，同样要带 issue 号，且修好即删。
+KNOWN_VIOLATIONS: dict[tuple[str, str], str] = {}
 
 
 def module_name(path: Path) -> str:

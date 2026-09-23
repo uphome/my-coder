@@ -101,6 +101,10 @@ def build_todo_status(session) -> str | None:
     日志 fold 现算，作为一条 user 合成消息叠在 messages 末尾——模型每轮都
     看到最新状态，且不污染历史（不进 derive_messages）。
 
+    **调用方是"运行时状态注册表"而不是循环**（issue #19 之后）：本函数在
+    `app/factory.py` 的 `_runtime_status()` 里以名字 `'todo'` 注册，
+    `runtime/loop.py` 只负责收集与贴尾，不再直接 import 本模块。
+
     两个"不叠"条件：
     - 从未写过 todo / 清单为空 → 无状态可报
     - 全部 completed → 任务收尾，状态栏关闭（与前端 dock 自动隐藏同一语义）

@@ -18,6 +18,7 @@ from agent_demo.runtime import loop as loop_module
 from agent_demo.runtime.agent import Agent
 from agent_demo.state.prompt import PromptRegistry
 from agent_demo.state.registry import ToolRegistry, ToolSpec
+from agent_demo.state.runtime_status import RuntimeStatusRegistry
 from agent_demo.state.session import Session
 from agent_demo.values.messages import (
     TextBlock,
@@ -582,3 +583,186 @@ async def test_steer_absorbed_at_next_request_inside_tool_loop():
     assert claimed_seq < headers[1], (claimed_seq, headers)
     assert session.events[-1].type == 'turn/end'
     assert session.events[-1].data['reason'] == 'completed'
+
+
+# ---------------------------------------------------------------------------
+# 运行时状态贡献者（issue #19）：注册制、按注册顺序贴尾、审计字段是映射
+# ---------------------------------------------------------------------------
+
+class _RecordingLlm:
+    """记下每次请求收到的 user 文本，然后一句收尾（一次请求就结束回合）。"""
+
+    def __init__(self):
+        self.seen: list[list[str]] = []
+
+    async def stream(self, request, signal=None):  # noqa: ARG002
+        self.seen.append([m.content[0].text for m in request.messages
+                          if m.role == 'user' and m.content
+                          and getattr(m.content[0], 'type', '') == 'text'])
+        yield StreamChunk(text='done', finish_reason='stop')
+
+
+def _record_agent(session_id: str) -> tuple[Agent, _RecordingLlm]:
+    llm = _RecordingLlm()
+    agent = Agent(
+        session=Session(id=session_id), llm=llm, prompt=PromptRegistry(),
+        tools=ToolRegistry(), options={'provider': 'fake', 'model': 'fake-model'},
+    )
+    return agent, llm
+
+
+@pytest.mark.asyncio
+async def test_runtime_status_contributors_are_appended_and_audited():
+    """非空贡献者各贴一条合成 user 消息（按注册顺序），审计字段是 `{名字: 原文}` 映射。
+
+    这就是 issue #19 要的形状：循环只认"贡献者"这个概念，不认识 todo——
+    所以加一个状态源不需要改 `loop.py`（由 `app/factory.py` 注册）。
+    """
+    agent, llm = _record_agent('rs')
+    agent.runtime_status.register('alpha', lambda session: 'ALPHA 状态')
+    agent.runtime_status.register('silent', lambda session: None)   # 无内容 → 不叠、不入审计
+    agent.runtime_status.register('beta', lambda session: 'BETA 状态')
+
+    agent.followup('做点事')
+    await agent.when_idle()
+
+    header = next(e.data for e in agent.session.events if e.type == 'request/header')
+    assert header['runtime_status'] == {'alpha': 'ALPHA 状态', 'beta': 'BETA 状态'}
+    # 贴在 derive_messages 之后（纯追加，历史不动），顺序 = 注册顺序
+    assert llm.seen[0] == ['做点事', 'ALPHA 状态', 'BETA 状态'], llm.seen[0]
+    # 状态不进日志、不进模型记忆（derive_messages 里没有它们）
+    derived = [block.text for m in agent.session.derive_messages() for block in m.content
+               if getattr(block, 'type', '') == 'text']
+    assert not any('状态' in text for text in derived), derived
+
+
+@pytest.mark.asyncio
+async def test_runtime_status_is_collected_per_request():
+    """每次请求现算：贡献者读到的是**当下**的会话投影（状态是"此刻的事实"，不是快照）。"""
+    agent, _ = _record_agent('rs-per-request')
+    agent.runtime_status.register('count', lambda session: f'事件数 {len(session.events)}')
+
+    agent.followup('一')
+    await agent.when_idle()
+    agent.followup('二')
+    await agent.when_idle()
+
+    counts = [e.data['runtime_status']['count'] for e in agent.session.events
+              if e.type == 'request/header']
+    assert len(counts) == 2 and counts[0] != counts[1], counts
+
+
+@pytest.mark.asyncio
+async def test_runtime_status_contributor_failure_does_not_kill_the_turn(caplog):
+    """贡献者抛异常：记 ERROR 日志并跳过它，回合照常跑完，审计只列真被告知的项。
+
+    判据（见 `state/runtime_status.py` 的 `collect` docstring）：这条通道是**可选的状态
+    展示**，坏了不该让整个回合作废——但也不能静默，日志里必须有名字。
+    """
+    import logging
+
+    from agent_demo.state.runtime_status import RuntimeStatusRegistry as _Registry
+
+    agent, llm = _record_agent('rs-broken')
+
+    def boom(session):
+        raise RuntimeError('贡献者自己坏了')
+
+    agent.runtime_status = _Registry()
+    agent.runtime_status.register('broken', boom)
+    agent.runtime_status.register('good', lambda session: 'GOOD 状态')
+
+    with caplog.at_level(logging.ERROR, logger='runtime_status'):
+        agent.followup('还能干活吗')
+        await agent.when_idle()
+
+    header = next(e.data for e in agent.session.events if e.type == 'request/header')
+    assert header['runtime_status'] == {'good': 'GOOD 状态'}      # 坏的那个不进审计
+    assert llm.seen[0] == ['还能干活吗', 'GOOD 状态']              # 回合照常、好状态照叠
+    assert any('broken' in record.getMessage() or 'broken' in str(record.args)
+               for record in caplog.records), caplog.records
+
+
+def test_runtime_status_registry_is_strict_and_unregisterable():
+    """注册时刻严格校验（空名/重名/不可调用当场抛错），`register` 返回注销函数。"""
+    registry = RuntimeStatusRegistry()
+    with pytest.raises(ValueError, match='must not be empty'):
+        registry.register('', lambda session: 'x')
+    with pytest.raises(TypeError, match='must be callable'):
+        registry.register('bad', 'not-a-function')       # type: ignore[arg-type]
+    registry.register('todo', lambda session: 'x')
+    with pytest.raises(ValueError, match='already registered'):
+        registry.register('todo', lambda session: 'y')
+    assert registry.names == ('todo',)
+
+    unregister = registry.register('other', lambda session: 'y')
+    assert registry.names == ('todo', 'other')
+    unregister()
+    assert registry.names == ('todo',)
+    unregister()                                          # 幂等：再调一次不炸
+    assert registry.names == ('todo',)
+
+
+def test_runtime_status_collect_takes_a_snapshot():
+    """求值期间注册/注销**本轮不生效**（快照），下一请求生效。
+
+    为什么要快照：直接迭代 `self._builders.items()` 时，贡献者在自己的 `build` 里
+    注册/注销会让字典在迭代中改变大小——`RuntimeError` 由**迭代器**抛出，绕过 collect
+    里那个 try，于是"坏一个不炸对话"这句话不成立（实测过：异常会一路逃出回合）。
+    """
+    registry = RuntimeStatusRegistry()
+    session = Session(id='snapshot')
+
+    def mutates(session):
+        if 'late' not in registry.names:      # 只注册一次（第二次求值时它已经在表里了）
+            registry.register('late', lambda s: 'LATE')
+        return 'FIRST'
+
+    registry.register('first', mutates)
+    first = registry.collect(session)
+    assert first == (('first', 'FIRST'),)                 # 本轮看不到 late（快照）
+    assert registry.names == ('first', 'late')
+    second = registry.collect(session)
+    assert second == (('first', 'FIRST'), ('late', 'LATE'))   # 下一请求生效
+
+
+def test_runtime_status_non_string_return_is_reported_and_skipped(caplog):
+    """契约是 `str | None`：返回非字符串 → 记 ERROR 并跳过（不炸回合、也不静默）。"""
+    import logging
+
+    registry = RuntimeStatusRegistry()
+    registry.register('bad', lambda session: 42)          # type: ignore[return-value]
+    registry.register('good', lambda session: 'OK')
+
+    with caplog.at_level(logging.ERROR, logger='runtime_status'):
+        assert registry.collect(Session(id='non-str')) == (('good', 'OK'),)
+    assert any('expected str' in record.getMessage() for record in caplog.records), caplog.records
+
+
+def test_runtime_status_contributor_cancellation_propagates():
+    """贡献者抛 `CancelledError`（`BaseException`）必须**原样穿透**，不被"坏一个不炸"吞掉。
+
+    `except Exception` 不捕 `BaseException`，所以取消/中断照常传播——这正是
+    "`CancelledError` 沿 await 链单向传播"那条不变式在这里的落点。没有用例钉住的话，
+    将来有人把它写成 `except BaseException`，151 条测试会全绿而取消已经被吞了。
+    """
+    registry = RuntimeStatusRegistry()
+
+    def cancel_now(session):
+        raise asyncio.CancelledError()
+
+    registry.register('cancel', cancel_now)
+    with pytest.raises(asyncio.CancelledError):
+        registry.collect(Session(id='cancel'))
+
+
+@pytest.mark.asyncio
+async def test_agent_without_contributors_changes_nothing():
+    """默认注册表为空：不叠消息、不带 `runtime_status` 字段（与加这条通道之前一致）。"""
+    agent, llm = _record_agent('rs-empty')
+    agent.followup('只有我一条')
+    await agent.when_idle()
+
+    header = next(e.data for e in agent.session.events if e.type == 'request/header')
+    assert 'runtime_status' not in header
+    assert llm.seen[0] == ['只有我一条']
