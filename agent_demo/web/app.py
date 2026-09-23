@@ -4,7 +4,8 @@
 一行不改），`session.on_event` 订阅事件，经 `asyncio.Queue` 桥接成 SSE 流推给浏览器。
 CLI 是终端投影，Web 是 DOM 投影，同一份日志。
 
-功能：多会话（左侧栏列出 `.sessions/*.jsonl`，可新建/切换/删除/改名）+ 自动会话标题
+功能：多会话（左侧栏列出 `.sessions/*.jsonl`，可新建/切换/删除/改名）+ **每个对话
+自己的工作区**（新建时选，写进日志，见 `app/workspace.py` 与 `/sessions/new`）+ 自动会话标题
 （对齐 harness session-title 的三级来源）+ 流式输出 + 思考折叠 + 工具卡片（变体图标/
 状态点/摘要，仿 harness ui-tool）+ Markdown 渲染 + approval 按钮（钩子推送
 approval_request 到 SSE，浏览器批准/拒绝）。
@@ -54,6 +55,9 @@ def init_web(workspace: Path, fake: bool = False, model: str = 'deepseek-v4-flas
              compact_at: int | None = None) -> None:
     """初始化宿主状态（测试可注入 workspace / fake / sessions_dir / compact_at）。
 
+    `workspace` 是**默认**工作区：新建对话没指定工作区时用它。每个对话的工作区存在
+    自己的 Seat 上（`Seat.args.workspace`），并在创建时落一条 `session/workspace` 事件。
+
     Seat 注册表是宿主级缓存：每次 init_web 都清空重来（`state.reset`）——测试每个用例
     用独立 sessions_dir，若不清空，旧目录的 seat（同 sid，如 'web'）会被复用，把上个
     会话的内存日志带进新初始化。
@@ -74,12 +78,20 @@ def index() -> FileResponse:
 
 @app.get('/meta')
 def meta() -> dict:
-    """前端元信息：workspace 根（工具路径相对化显示用）+ 模型名 + fake 标记。"""
+    """前端元信息：默认工作区 + 相对路径解析基准 + 模型名 + fake 标记。
+
+    `workspace` 是**宿主默认**（`--workspace`）：新建对话不指定工作区时用它，也是
+    前端输入框的预填值；每个会话**实际**用哪个工作区由 `/sessions` 与
+    `/sessions/*/switch|new` 的响应带回来（工作区可以按对话指定）。
+    `cwd` 是服务进程的当前目录：用户输入相对路径时按它解析（与 shell 直觉一致），
+    前端拿它给输入框做提示。
+    """
     _check_init()
     args = state.args
     assert args is not None  # init_web 已初始化（_check_init 保证）
     return {
         'workspace': str(Path(args.workspace).resolve()),  # 绝对路径，前端剥前缀显示相对路径
+        'cwd': str(Path.cwd()),
         'model': args.model,
         'fake': bool(args.fake),
     }
@@ -92,11 +104,51 @@ def sessions() -> list[dict]:
 
 
 @app.post('/sessions/new')
-def new_session() -> dict:
-    """新建会话并切换（id 带时间戳；首条消息才落盘）。"""
+async def new_session(request: Request) -> dict:
+    """新建会话并切换；可选 `{"workspace": "<目录>"}` 指定这个对话的工作区。
+
+    - 不带 body（旧前端/测试）→ 用宿主默认工作区；
+    - 带 `workspace`：必须是**字符串**（别的类型直接 400，不做隐式 `str()`），
+      只校验"存在 + 是目录"（策略见 `app/workspace.py`），校验失败 400 并说明原因；
+    - id 在同秒内保证唯一（`web-<ts>`，撞了就加 `-2`/`-3`…）：两个对话被塞进同一个
+      sid 会**静默复用**上一个会话，而工作区在创建时固定——撞车时第二次选择还会被
+      "workspace is fixed" 拒掉，看起来像功能坏了。
+    """
     _check_init()
-    sid = f'web-{int(time.time())}'
-    return open_session(sid, allow_missing=True)
+    raw = await request.body()
+    workspace = None
+    if raw:
+        try:
+            body = json.loads(raw)
+        except json.JSONDecodeError as error:
+            raise HTTPException(400, 'invalid JSON body') from error
+        if body is not None and not isinstance(body, dict):
+            raise HTTPException(400, 'body must be a JSON object')
+        workspace = (body or {}).get('workspace')
+        if workspace is not None and not isinstance(workspace, str):
+            # 严格校验：`{"workspace": 123}` 若被 `str()` 化会变成"路径 123 不存在"这种
+            # 误导性报错，还可能被非字符串假值（`0`/`[]`）绕过"已固定"的守卫
+            raise HTTPException(400, 'workspace must be a string')
+    return open_session(_fresh_sid(), allow_missing=True, workspace=workspace)
+
+
+def _fresh_sid() -> str:
+    """`web-<秒级时间戳>`，同秒撞车就顺延 `-2`/`-3`…（会话 id = 日志文件名）。
+
+    判据同时看**磁盘文件**与**内存里的 seat**：只看文件时，"文件刚被删掉但 seat 还在"
+    或"另一个 worker 已经建了 seat 但文件还没落盘"都可能选出一个已在用的 id，
+    而 `open_session_seat` 命中已有 seat 会**静默复用**它（响应与真实座位的工作区对不上）。
+    真正防并发的是 `open_session_seat` 里的 `exist_ok=False` 原子占坑，这里只是把
+    两条已知来源都躲开。
+    """
+    directory = state.sessions_dir or Path('.sessions')
+    base = f'web-{int(time.time())}'
+    index = 1
+    while True:
+        candidate = base if index == 1 else f'{base}-{index}'
+        if candidate not in state.seats and not (directory / f'{candidate}.jsonl').exists():
+            return candidate
+        index += 1
 
 
 @app.post('/sessions/{sid}/switch')
@@ -150,6 +202,8 @@ def history(sid: str | None = None) -> dict:
     if seat is None:
         raise HTTPException(404, f'session {target_sid!r} not open — switch to it first')
     return {
+        'id': target_sid,
+        'workspace': str(seat.args.workspace),     # 本会话的工作区（顶栏/相对路径显示用）
         'history': history_payloads(seat.session),
         'todos': fold_todos(seat.session) or [],
         'queue': queue_rows(seat.agent),
@@ -387,7 +441,9 @@ async def approval_respond(request: Request) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser(description='agent-demo Web UI (DeepSeek-style chat)')
     parser.add_argument('--workspace', type=Path, required=True,
-                        help='workspace root directory — tools may only read/write inside it (required)')
+                        help='default workspace root — new conversations use it unless they '
+                             'pick another one (tools may only read/write inside the '
+                             'conversation\'s workspace)')
     parser.add_argument('--fake', action='store_true', help='offline scripted model (architecture demo)')
     parser.add_argument('--model', default='deepseek-v4-flash', help='model id for the OpenAI-compatible API')
     parser.add_argument('--host', default='127.0.0.1', help='bind host (default 127.0.0.1)')

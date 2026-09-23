@@ -56,11 +56,17 @@ Web 前端也是"投影架构"：页面只持有一份从日志重建的投影�
 
 ```sh
 # 启动 Web 服务（默认 http://127.0.0.1:8000）
+# --workspace 是**默认**工作区：新建对话时不另外指定，就用它
 conda run -n agent-demo python -m agent_demo.web --workspace . --fake    # 离线（不需要 key）
 conda run -n agent-demo python -m agent_demo.web --workspace .           # 真实模型
 ```
 
 浏览器打开 http://127.0.0.1:8000：
+- **每个对话可以有自己的工作区**（对齐 DSH 的 `SessionHeader.cwd`）：点「＋ 新建会话」
+  会先让你填目录（预填宿主默认 + 最近用过的工作区），工具只能读写这个目录；
+  选择被写成一条 `session/workspace` 痕迹事件，**切换会话/重启服务都回到同一个目录**。
+  工作区在创建时固定——想换目录就新建一个对话（半个对话换了沙箱根，前几轮读 A、
+  后几轮写 B，语义上说不清楚）。本功能之前建的会话跟随宿主默认工作区。
 - 流式输出、可折叠"已深度思考"、工具调用卡片（变体图标/状态点/摘要）
 - 会话可新建/切换/删除/**双击改名**（自动标题：首条消息后由模型概括起名，
   逐字复读会被拒绝退回摘要）
@@ -215,10 +221,11 @@ issue 号的例外。
 | `app/sandbox.py` | workspace 路径边界：工具入参的轻量沙箱（归一化 + 前缀匹配）+ **宿主直读文件的越界判据**（指令文件与技能共用） |
 | `app/ui.py` | 终端渲染（_render_event / _paint，UI 是日志投影） |
 | `app/factory.py` | build_agent / load_env（CLI 与 Web 共用组装） |
+| `app/workspace.py` | **工作区选择策略**：把用户输入的目录解析成绝对路径（空→宿主默认、相对路径按进程 cwd、`~` 展开），显式路径必须存在且是目录；Web 的"每对话一个工作区"就从这里进 |
 | `cli.py` | CLI 入口（单次任务 / 无任务参数进 REPL） |
-| `web/` | Web 宿主：`app.py` 路由+装配 / `state.py` Seat+宿主状态 / `sessions.py` 会话生命周期 / `titles.py` 自动标题 / `payload.py` 纯函数投影（FastAPI + SSE：会话/标题/approval/手动压缩/steer 插队） |
+| `web/` | Web 宿主：`app.py` 路由+装配 / `state.py` Seat+宿主状态 / `sessions.py` 会话生命周期（含**每会话工作区**的解析与落日志）/ `titles.py` 自动标题 / `payload.py` 纯函数投影（FastAPI + SSE：会话/标题/approval/手动压缩/steer 插队） |
 | `app/compaction.py` | 上下文压缩引擎（四步事务 + checkpoint + 会话 token 累计账） |
-| `tests/` | 134 个架构测试，按关注点分 14 个文件（值/日志投影、inbox、prompt、loop、llm、tools、todo、recovery、compaction、instructions、skills、web_search、web、cli）+ `conftest.py`（跨文件 helper）+ **`test_architecture.py`**（2 条：依赖方向 = 包结构，白名单不许长僵尸） |
+| `tests/` | 146 个架构测试，按关注点分 14 个文件（值/日志投影、inbox、prompt、loop、llm、tools、todo、recovery、compaction、instructions、skills、web_search、web、cli）+ `conftest.py`（跨文件 helper）+ **`test_architecture.py`**（2 条：依赖方向 = 包结构，白名单不许长僵尸） |
 
 > `web_search` 与 `skill` 是两个"读工作区之外"的工具：搜索由 **DeepSeek 官方在服务端**
 > 执行（Anthropic 兼容端点 + 原生服务端工具 `web_search_20250305`），我们只发请求、
@@ -258,10 +265,17 @@ issue 号的例外。
 
 ## 安全警告
 
-所有文件工具被限制在 `--workspace` 指定的目录内（**必填**，越界读写返回
-`path outside workspace` 错误结果）——这是**纯用户态的路径边界**（归一化 +
-前缀匹配，对齐 harness 的 fs-sandbox 思路），**不是 OS 级沙箱**：工作区内
-任意读写、TOCTOU 竞态（校验与访问之间的时间窗）、符号链接竞态都不设防。
+所有文件工具被限制在**当前对话的工作区**内（CLI 是 `--workspace`，**必填**；Web 是每个
+对话各自选的目录，见上文），越界读写返回 `path outside workspace` 错误结果——这是
+**纯用户态的路径边界**（归一化 + 前缀匹配，对齐 harness 的 fs-sandbox 思路），
+**不是 OS 级沙箱**：工作区内任意读写、TOCTOU 竞态（校验与访问之间的时间窗）、
+符号链接竞态都不设防。
 `bash` 工具**没有命令级沙箱**（命令可以删除工作区外的文件），刹车只有
 两道：`cwd` 限制 + approval 确认门（执行前人工确认，默认拒绝）。
+
+**Web 的工作区选择是"信任界面使用者"模型**（对齐 DSH 的本地工具形态）：只校验
+"路径存在 + 是目录"，**没有白名单**——能点这个界面的人，本来就等于把该目录的读写
+交给 agent（Web 默认只绑 `127.0.0.1`，且不校验来源，所以**不要**把它暴露到网络上）。
+想收紧的话，判据只有一处（`agent_demo/app/workspace.py` 的 `resolve_workspace`），
+在那里加白名单即可，调用方不用改。
 只用于本地学习，不要暴露给不可信的输入。

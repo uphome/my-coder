@@ -146,3 +146,18 @@ class Session:
             if event.type == 'request/header':
                 return cast(dict, event.data)
         return None
+
+    def workspace(self) -> str | None:
+        """本会话选定的工作区路径（最后一条 `session/workspace` 事件）。
+
+        与 `request_header` 同一个模式：**配置事实从日志里读回来**，不另存一份状态
+        （"日志是唯一事实源"）。返回 None = 这个会话没记录过工作区——旧会话（本功能
+        落地前建的）与 CLI 会话都属这一类，调用方回退到宿主默认工作区。
+
+        注意它是**痕迹事件**：不进 `derive_messages`（不变式 ②），但随日志重放，
+        所以换个进程、隔几天再打开，这个会话仍然回到自己的工作区。
+        """
+        for event in reversed(self._log):
+            if event.type == 'session/workspace':
+                return cast(dict, event.data).get('workspace')
+        return None
