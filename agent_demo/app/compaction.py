@@ -4,7 +4,7 @@
 compaction/start → summary → replace → end 四步事务；选段策略借鉴
 "保留最近 N 个回合"的直觉（简化 dsh 的 token 预算 + PI 的回合切分）。
 
-关键语义（见 session.py 的 surface replace）：
+关键语义（见 state/state/session.py 的 surface replace）：
 - 遮蔽区间按 surface 的【位置】切，不是 seq 数值——引擎基于当前 surface
   投影选区，两端 seq 必然是 surface 成员
 - 遮蔽边界尽量落在回合边界上（不切开正在进行的工作）
@@ -16,9 +16,9 @@ import uuid
 from dataclasses import dataclass
 from typing import cast
 
-from .llm import LlmRequest
-from .session import Session
-from .values import Message, TextBlock, create_user_message
+from ..capability.llm import LlmRequest
+from ..state.session import Session
+from ..values.messages import Message, TextBlock, create_user_message
 
 # ---- 压缩提示词（融合 dsh 8 段骨架 + PI 的 Progress 三态 / 有序 Next Steps）----
 # 文件清单由代码拼入（extract_file_ops），模型只负责提炼对话本身，

@@ -534,10 +534,44 @@ pyproject.toml            打包 + ruff / mypy / pytest 配置 + console scripts
   查看器）仍未开始
 
 **测试拆分**（蓝图里的 tests/ 按主题拆分）✅ **已完成（2026-09）**：单文件
-`tests/test_demo.py`（4293 行 / 132 用例）按关注点拆成 13 个测试文件 + `conftest.py`
-（值/日志、inbox、prompt、loop、tools、todo、recovery、compaction、instructions、skills、
+`tests/test_demo.py`（4293 行 / 132 用例）按关注点拆成 14 个测试文件 + `conftest.py`
+（值/日志、inbox、prompt、llm、loop、tools、todo、recovery、compaction、instructions、skills、
 web_search、web、cli），**只搬家不改断言**，用例总数不变。起因：单文件已经 4293 行，
 定位慢、review diff 噪声大；拆分同时让 26 处函数内冗余 import 暴露出来（ruff F401/F811）。
+
+## 分层重构（目录 = 层，2026-09 已完成）
+
+**动机**：功能攒到 21 个模块平铺在一层之后，"谁是层、谁是应用内容、谁只能 import 谁"
+只能靠文件名猜；依赖方向只写在 `AGENTS.md` 里靠纪律维持，实测真的长出了两处反向依赖
+（`loop → tools.todo`、`registry → constants`）；`web_app.py` 993 行、测试文件 4300 行。
+
+**做法**：按四层目录化，并把"依赖方向"从文档约定变成可执行断言。
+
+```text
+agent_demo/
+├── values/        层1 值：messages.py（消息/事件词汇表）+ persistence.py
+├── capability/    层2 能力：llm.py / hooks.py
+├── state/         层3 状态：session / inbox / prompt / registry / recovery
+├── runtime/       层4 框架循环：agent（状态机）/ loop（turn-step）
+├── app/           应用内容：factory / constants / sandbox / instructions / skills /
+│                  compaction / ui
+├── web/           入口：Web 宿主（app / state / sessions / titles / payload）
+├── cli.py         入口：CLI
+├── tools/         应用工具
+└── bundled_skills/ 随包技能正文（与代码包同级，`pyproject` package-data 按此声明）
+```
+
+配套：`tests/test_architecture.py`（约 20 行 `ast` 解析）机械检查"只能 import 同层或
+更低层"，白名单只收带 issue 号的例外并断言它们仍然真实（不许长僵尸）。
+
+**落地时的三个坑（都已修，留作记录）**：
+
+1. **相对 import 的点数要按"文件的新位置"算**：源文件自己搬进子包时，即使目标模块没搬，
+   `from .tools.todo` 也必须变成 `from ..tools.todo`（第 3 步第一版漏了这条，测试直接
+   报 `No module named 'agent_demo.runtime.tools'`）；
+2. **函数体内的局部 import 要保留缩进**：替换文本顶到行首会把 `if` 块掏空（语法错误）；
+3. **`Path(__file__).parent` 类路径会随层数变化**：`app/skills.py` 找包内 `bundled_skills/`
+   要用 `parents[1]`——写错时表现是"技能表静默变空"（7 条测试红，不是崩溃）。
 
 ## 实施约定（延续项目哲学）
 

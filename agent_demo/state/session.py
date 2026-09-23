@@ -14,7 +14,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import cast
 
-from .values import Message, SessionEvent, new_event
+from ..values.messages import Message, SessionEvent, new_event
 
 # 唯一能"浮上水面变成模型消息"的三类事件。
 # surface_op 校验：这三类必须带 surface_op（'append' 或 'replace'），
@@ -60,7 +60,7 @@ class Session:
 
     def bind_store(self, path):
         """把后续事件实时追加落盘（listener 在 append 提交后触发）。返回解绑函数。"""
-        from .persistence import save_event
+        from ..values.persistence import save_event
 
         path.parent.mkdir(parents=True, exist_ok=True)
         return self.on_event(lambda event: save_event(path, event))

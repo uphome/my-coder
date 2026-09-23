@@ -10,8 +10,8 @@ import json
 import httpx
 import pytest
 
-from agent_demo.registry import ToolRegistry
-from agent_demo.session import Session
+from agent_demo.state.registry import ToolRegistry
+from agent_demo.state.session import Session
 
 # ============================================================
 # web_search —— DeepSeek 官方原生搜索（Anthropic 兼容 Messages 端点）

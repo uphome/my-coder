@@ -16,8 +16,8 @@
 """
 from __future__ import annotations
 
-from ..registry import ToolOutcome, ToolSpec
-from ..skills import SkillTable, read_skill_body, resolve_skill
+from ..app.skills import SkillTable, read_skill_body, resolve_skill
+from ..state.registry import ToolOutcome, ToolSpec
 
 
 def register(registry, skills: SkillTable) -> None:

@@ -17,8 +17,8 @@ import asyncio
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..agent import Agent
-from ..session import Session
+from ..runtime.agent import Agent
+from ..state.session import Session
 
 
 @dataclass

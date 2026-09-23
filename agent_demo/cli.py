@@ -14,11 +14,11 @@ import asyncio
 import logging
 from pathlib import Path
 
-from .factory import build_agent, load_env
-from .persistence import load_events
-from .recovery import repair_dangling_tool_calls
-from .session import Session
-from .ui import render_event
+from .app.factory import build_agent, load_env
+from .app.ui import render_event
+from .state.recovery import repair_dangling_tool_calls
+from .state.session import Session
+from .values.persistence import load_events
 
 
 async def _prepare(args) -> tuple[Session, dict]:
@@ -40,7 +40,7 @@ async def _prepare(args) -> tuple[Session, dict]:
         print(f'resumed {args.session}: {len(session.events)} events restored')
     session.bind_store(session_path)
     # 恢复即自愈：上次跑到一半被 kill 掉的话，日志里会留下"请求了工具却没有结果"
-    # 的悬空调用——不补记的话之后每次请求都是 400（见 recovery.py）
+    # 的悬空调用——不补记的话之后每次请求都是 400（见 state/state/recovery.py）
     repaired = repair_dangling_tool_calls(session)
     if repaired:
         print(f'repaired {len(repaired)} tool call(s) left dangling by an interrupted run')
@@ -82,7 +82,7 @@ async def run_repl(args) -> None:
         if text == '/exit':
             break
         if text == '/compact':
-            from .compaction import run_compaction as do_compact
+            from .app.compaction import run_compaction as do_compact
             ok = await do_compact(session, agent.llm, keep_turns=1,
                                   model=agent.options.get('model', ''))
             print('[compact]', '完成' if ok else '无可压缩内容或失败')

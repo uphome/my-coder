@@ -15,9 +15,9 @@ from __future__ import annotations
 
 import asyncio
 
-from ..llm import LlmRequest
-from ..session import Session
-from ..values import TextBlock, create_user_message
+from ..capability.llm import LlmRequest
+from ..state.session import Session
+from ..values.messages import TextBlock, create_user_message
 from .state import Seat, state
 
 TITLE_MAX_CHARS = 40

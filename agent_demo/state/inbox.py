@@ -13,8 +13,8 @@ from __future__ import annotations
 
 from typing import cast
 
+from ..values.messages import Message, QueuedItem, QueuedPlacement, with_text
 from .session import Session
-from .values import Message, QueuedItem, QueuedPlacement, with_text
 
 # 两个队列：
 # next-turn=普通输入（等本轮干完再处理），

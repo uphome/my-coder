@@ -7,11 +7,10 @@ from __future__ import annotations
 
 import json
 
-from agent_demo.llm import _to_wire_messages
-from agent_demo.persistence import load_events, save_event
-from agent_demo.recovery import dangling_tool_calls, repair_dangling_tool_calls
-from agent_demo.session import Session
-from agent_demo.values import (
+from agent_demo.capability.llm import _to_wire_messages
+from agent_demo.state.recovery import dangling_tool_calls, repair_dangling_tool_calls
+from agent_demo.state.session import Session
+from agent_demo.values.messages import (
     TextBlock,
     ToolCallBlock,
     ToolResultBlock,
@@ -19,6 +18,7 @@ from agent_demo.values import (
     create_tool_result_message,
     create_user_message,
 )
+from agent_demo.values.persistence import load_events, save_event
 
 # ---------------------------------------------------------------------------
 # 崩溃自愈：进程被 kill / 断电留下的"悬空工具调用"（恢复时补记，见 recovery.py）

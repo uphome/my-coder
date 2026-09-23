@@ -10,14 +10,14 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from .agent import Agent
+from ..capability.llm import FakeLlm, OpenAiCompatibleLlm
+from ..runtime.agent import Agent
+from ..state.prompt import PromptRegistry
+from ..state.session import Session
+from ..tools import build_tools
 from .constants import DEFAULT_COMPACT_TOKENS, DEMO_SCRIPT
 from .instructions import InstructionLoader
-from .llm import FakeLlm, OpenAiCompatibleLlm
-from .prompt import PromptRegistry
-from .session import Session
 from .skills import SkillTable, format_catalog
-from .tools import build_tools
 from .ui import render_event
 
 

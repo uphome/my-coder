@@ -8,8 +8,8 @@ from __future__ import annotations
 import pytest
 from conftest import make_agent
 
-from agent_demo.llm import FakeLlm, LlmRequest, _delta_reasoning, build_payload
-from agent_demo.values import (
+from agent_demo.capability.llm import FakeLlm, LlmRequest, _delta_reasoning, build_payload
+from agent_demo.values.messages import (
     TextBlock,
     ToolCallBlock,
     create_assistant_message,

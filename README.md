@@ -107,25 +107,31 @@ conda run -n agent-demo python -m agent_demo.web --workspace .           # 真�
 ## 架构：四层单向依赖
 
 ```
-入口层  cli.py / web/         CLI 与 Web 两个入口（经 factory.build_agent 组装）
-        factory.py          组装：prompt + llm（fake/真实）+ 工具 + 渲染订阅
-        │
-循环层  agent.py      被动状态机：send → inbox → wake → driver → idle
-        │
-状态层  loop.py       turn/step 两级循环 + 三个钩子
-        session.py    追加式事件日志（唯一事实源）+ derive_messages 投影
-        inbox.py      双队列 pending 消息（spliced 事件的持久化投影）
-        prompt.py     sections 按 order 拼接 + {{变量}} 严格插值
-        registry.py   工具类型：ToolSpec（schema + executor + 模式）
-        │
-值 层  values.py      不可变 Message/SessionEvent + JSONL 编解码
-应用内容：tools/（read_file/list_files/grep/glob/edit/write_file/bash/
-todo_write + build_tools 组装）、sandbox.py（workspace 路径边界）、
-ui.py（终端渲染）、constants.py（预算/颜色/demo 脚本）、
-compaction.py（上下文压缩引擎）
+入口层   cli.py / web/        CLI 与 Web 两个入口（经 app/factory.build_agent 组装）
+         │
+框架循环 runtime/agent.py     被动状态机：send → inbox → wake → driver → idle
+         runtime/loop.py      turn/step 两级循环 + 三个钩子
+         │
+状态层   state/session.py     追加式事件日志（唯一事实源）+ derive_messages 投影
+         state/inbox.py       双队列 pending 消息（spliced 事件的持久化投影）
+         state/prompt.py      sections 按 order 拼接 + {{变量}} 严格插值
+         state/registry.py    工具类型：ToolSpec（schema + executor + 模式）
+         state/recovery.py    悬空工具调用自愈（崩溃后重放时补记）
+         │
+能力层   capability/llm.py    LLM 客户端（OpenAI 兼容流式 + FakeLlm）
+         capability/hooks.py  三个决策钩子的类型
+         │
+值 层    values/messages.py   不可变 Message/SessionEvent + tagged dict 编解码
+         values/persistence.py JSONL 追加写 + 重放读
+
+应用内容（可整层替换）：app/factory.py 组装 + app/{constants,sandbox,ui,compaction,
+instructions,skills}.py + tools/（read_file/list_files/grep/glob/edit/write_file/
+bash/todo_write/web_search/skill）
 ```
 
-依赖方向只有一条：上层依赖下层，下层不感知上层。
+依赖方向只有一条：上层依赖下层，下层不感知上层。**这条不再只靠纪律**——
+`tests/test_architecture.py` 按包结构机械检查（下层 import 上层当场红），只留两条带
+issue 号的例外。
 
 ## 一次回合的数据流
 
@@ -150,7 +156,7 @@ compaction.py（上下文压缩引擎）
 > 往返内**生效（见 `ARCHITECTURE.md` §3.6 的实测教训）。
 
 所有事件追加写入 `.sessions/<id>.jsonl`；恢复 = 重放（+ 自愈：补上崩溃留下的悬空
-工具调用，见 `recovery.py`），零额外状态代码。
+工具调用，见 `state/recovery.py`），零额外状态代码。
 
 ## 五条不变式
 
@@ -189,28 +195,28 @@ compaction.py（上下文压缩引擎）
 
 | 文件 | 角色 |
 |---|---|
-| `values.py` | 值层：不可变 Message/SessionEvent + JSONL 编解码 |
-| `session.py` | 日志 + surface 折叠投影（append / derive_messages / adopt / request_header） |
-| `inbox.py` | 双队列（next-turn / next-step）+ claim 语义 + 持久化重放 |
-| `prompt.py` | sections 按 order 拼接 + `{{var}}` 严格插值（未注册/无值抛错） |
-| `registry.py` | 工具类型（ToolSpec：schema + executor + 并发模式 + 卸载声明 + 超时 + requires_approval） |
-| `llm.py` | OpenAI 兼容 SSE 流式客户端 + 可脚本化 FakeLlm + wire 格式纯函数（含思维链字段解析） |
-| `hooks.py` | pre_step / request / request_error 三钩子 + approval 钩子的类型 |
-| `loop.py` | turn/step 两级循环 + 流组装 + 工具分组执行 + 思维链痕迹落盘 |
-| `agent.py` | 被动状态机：wake / kick / when_idle / cancel |
-| `persistence.py` | JSONL 追加写 + 重放读 |
-| `recovery.py` | 会话自愈：恢复时给崩溃留下的悬空工具调用补 is_error 合成结果 + 修复痕迹 |
-| `instructions.py` | 工作区项目指令文件（AGENTS.md/CLAUDE.md）：子目录清单（每回合重扫）+ 根文件**三态**探测（每请求；`lstat`/`stat` 分开 + 读完校验缓存键）+ 字符预算 + system live 段 |
-| `skills.py` | 按需技能：两来源（包内 `bundled_skills/` + 工作区 `skills/`）按名字合并、workspace 同名覆盖；目录文本 + 按名字解析正文；`SkillTable` 按内容指纹缓存（目录段是 live 段——技能文件改了，下一次请求就生效）+ **工作区来源的越界检查** |
+| `values/messages.py` | 值层：不可变 Message/SessionEvent + JSONL 编解码 |
+| `state/session.py` | 日志 + surface 折叠投影（append / derive_messages / adopt / request_header） |
+| `state/inbox.py` | 双队列（next-turn / next-step）+ claim 语义 + 持久化重放 |
+| `state/prompt.py` | sections 按 order 拼接 + `{{var}}` 严格插值（未注册/无值抛错） |
+| `state/registry.py` | 工具类型（ToolSpec：schema + executor + 并发模式 + 卸载声明 + 超时 + requires_approval） |
+| `capability/llm.py` | OpenAI 兼容 SSE 流式客户端 + 可脚本化 FakeLlm + wire 格式纯函数（含思维链字段解析） |
+| `capability/hooks.py` | pre_step / request / request_error 三钩子 + approval 钩子的类型 |
+| `runtime/loop.py` | turn/step 两级循环 + 流组装 + 工具分组执行 + 思维链痕迹落盘 |
+| `runtime/agent.py` | 被动状态机：wake / kick / when_idle / cancel |
+| `values/persistence.py` | JSONL 追加写 + 重放读 |
+| `state/recovery.py` | 会话自愈：恢复时给崩溃留下的悬空工具调用补 is_error 合成结果 + 修复痕迹 |
+| `app/instructions.py` | 工作区项目指令文件（AGENTS.md/CLAUDE.md）：子目录清单（每回合重扫）+ 根文件**三态**探测（每请求；`lstat`/`stat` 分开 + 读完校验缓存键）+ 字符预算 + system live 段 |
+| `app/skills.py` | 按需技能：两来源（包内 `bundled_skills/` + 工作区 `skills/`）按名字合并、workspace 同名覆盖；目录文本 + 按名字解析正文；`SkillTable` 按内容指纹缓存（目录段是 live 段——技能文件改了，下一次请求就生效）+ **工作区来源的越界检查** |
 | `bundled_skills/` | **随 agent 发布的技能正文**（`project-instructions.md`：怎么写 AGENTS.md）；`pyproject` package-data 保证装到别处也在 |
 | `tools/` | 应用工具（file_io.py 读/写/编辑、search.py grep/glob、shell.py bash、todo.py、**web_search.py 联网搜索**、**skill.py 按名字取技能正文**）+ `build_tools(workspace, skills=…)` 组装 |
-| `sandbox.py` | workspace 路径边界：工具入参的轻量沙箱（归一化 + 前缀匹配）+ **宿主直读文件的越界判据**（指令文件与技能共用） |
-| `ui.py` | 终端渲染（_render_event / _paint，UI 是日志投影） |
-| `factory.py` | build_agent / load_env（CLI 与 Web 共用组装） |
+| `app/sandbox.py` | workspace 路径边界：工具入参的轻量沙箱（归一化 + 前缀匹配）+ **宿主直读文件的越界判据**（指令文件与技能共用） |
+| `app/ui.py` | 终端渲染（_render_event / _paint，UI 是日志投影） |
+| `app/factory.py` | build_agent / load_env（CLI 与 Web 共用组装） |
 | `cli.py` | CLI 入口（单次任务 / 无任务参数进 REPL） |
 | `web/` | Web 宿主：`app.py` 路由+装配 / `state.py` Seat+宿主状态 / `sessions.py` 会话生命周期 / `titles.py` 自动标题 / `payload.py` 纯函数投影（FastAPI + SSE：会话/标题/approval/手动压缩/steer 插队） |
-| `compaction.py` | 上下文压缩引擎（四步事务 + checkpoint + 会话 token 累计账） |
-| `tests/` | 132 个架构测试，按关注点分 13 个文件（值/日志投影、inbox、prompt、loop、tools、todo、recovery、compaction、instructions、skills、web_search、web、cli）+ `conftest.py`（跨文件 helper） |
+| `app/compaction.py` | 上下文压缩引擎（四步事务 + checkpoint + 会话 token 累计账） |
+| `tests/` | 134 个架构测试，按关注点分 14 个文件（值/日志投影、inbox、prompt、loop、llm、tools、todo、recovery、compaction、instructions、skills、web_search、web、cli）+ `conftest.py`（跨文件 helper）+ **`test_architecture.py`**（2 条：依赖方向 = 包结构，白名单不许长僵尸） |
 
 > `web_search` 与 `skill` 是两个"读工作区之外"的工具：搜索由 **DeepSeek 官方在服务端**
 > 执行（Anthropic 兼容端点 + 原生服务端工具 `web_search_20250305`），我们只发请求、

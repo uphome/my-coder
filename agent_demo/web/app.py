@@ -25,24 +25,11 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from ..compaction import run_compaction, select_compact_range
-from ..factory import load_env
+from ..app.compaction import run_compaction, select_compact_range
+from ..app.factory import load_env
 from ..tools.todo import fold_todos
-from .payload import (
-    context_payload,
-    event_to_payload,
-    first_text_of,
-    history_payloads,
-    queue_rows,
-)
-from .sessions import (
-    append_title,
-    open_session,
-    open_session_seat,
-    scan_sessions,
-    spawn,
-    validate_sid,
-)
+from .payload import context_payload, event_to_payload, first_text_of, history_payloads, queue_rows
+from .sessions import append_title, open_session, open_session_seat, scan_sessions, spawn, validate_sid
 from .state import state
 from .titles import auto_title, clean_title, first_user_message_just_landed
 

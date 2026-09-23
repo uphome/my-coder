@@ -11,17 +11,17 @@ import json
 import httpx
 import pytest
 
-from agent_demo.constants import MODEL_CONTEXT_WINDOW
-from agent_demo.llm import StreamChunk
-from agent_demo.persistence import load_events, save_event
-from agent_demo.session import Session
-from agent_demo.values import (
+from agent_demo.app.constants import MODEL_CONTEXT_WINDOW
+from agent_demo.capability.llm import StreamChunk
+from agent_demo.state.session import Session
+from agent_demo.values.messages import (
     TextBlock,
     ToolCallBlock,
     create_assistant_message,
     create_tool_result_message,
     create_user_message,
 )
+from agent_demo.values.persistence import load_events, save_event
 
 
 def test_web_chat_streams_events(tmp_path):
@@ -229,7 +229,7 @@ def test_auto_title_trigger_conditions(tmp_path):
 def test_session_title_event_is_trace_not_surface(tmp_path):
     """session/title 是痕迹事件：不进模型记忆（derive_messages），但重放保留。"""
     from agent_demo import web
-    from agent_demo.session import Session
+    from agent_demo.state.session import Session
 
     web.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
     s = Session(id='t')
@@ -292,7 +292,7 @@ def test_web_checkpoint_role_and_context_payload(tmp_path):
     from fastapi.testclient import TestClient
 
     from agent_demo import web
-    from agent_demo.values import TextBlock, create_user_message
+    from agent_demo.values.messages import TextBlock, create_user_message
 
     web.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
     client = TestClient(web.app)
@@ -327,7 +327,7 @@ def test_web_context_session_totals_accumulate(tmp_path):
     from fastapi.testclient import TestClient
 
     from agent_demo import web
-    from agent_demo.values import TextBlock, create_assistant_message, create_user_message
+    from agent_demo.values.messages import TextBlock, create_assistant_message, create_user_message
 
     web.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
     client = TestClient(web.app)
@@ -393,7 +393,7 @@ def test_web_manual_compact_endpoint(tmp_path):
     from fastapi.testclient import TestClient
 
     from agent_demo import web
-    from agent_demo.values import TextBlock, create_assistant_message, create_user_message
+    from agent_demo.values.messages import TextBlock, create_assistant_message, create_user_message
 
     # fake 模式：脚本模型不能生成摘要 → 400 拒绝
     web.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
@@ -624,7 +624,7 @@ async def test_web_steer_interrupts_open_sse_stream(tmp_path):
     """
 
     from agent_demo import web
-    from agent_demo.llm import StreamChunk
+    from agent_demo.capability.llm import StreamChunk
 
     class HoldLlm:
         """第一次 stream 挂起（started 置位等 release）；放行后给第一轮回答。
@@ -734,7 +734,7 @@ async def test_web_sse_disconnect_cancels_agent(tmp_path):
     """
 
     from agent_demo import web
-    from agent_demo.llm import StreamChunk
+    from agent_demo.capability.llm import StreamChunk
 
     class HoldLlm:
         def __init__(self):
@@ -789,7 +789,7 @@ def test_web_history_marks_same_turn_steer(tmp_path):
     from fastapi.testclient import TestClient
 
     from agent_demo import web
-    from agent_demo.values import TextBlock, create_assistant_message, create_user_message
+    from agent_demo.values.messages import TextBlock, create_assistant_message, create_user_message
 
     web.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
     client = TestClient(web.app)

@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
-from .values import Message
+from ..values.messages import Message
 
 
 @dataclass(frozen=True)

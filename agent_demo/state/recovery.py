@@ -27,8 +27,8 @@
 """
 from __future__ import annotations
 
+from ..values.messages import ToolCallBlock, ToolResultBlock, create_tool_result_message
 from .session import Session
-from .values import ToolCallBlock, ToolResultBlock, create_tool_result_message
 
 # 修复痕迹事件的 reason（审计用：一眼看出这段记忆里有几条是人造的）
 REPAIR_REASON = 'dangling-tool-call'

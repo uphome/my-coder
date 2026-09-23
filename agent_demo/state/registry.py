@@ -24,7 +24,7 @@ from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from typing import Any
 
-from .constants import TOOL_RESULT_MAX_CHARS
+from ..app.constants import TOOL_RESULT_MAX_CHARS
 
 # 合法的执行模式：parallel=可与其他调用并发；sequential=独占（也是默认值）。
 EXECUTION_MODES = frozenset({'parallel', 'sequential'})
