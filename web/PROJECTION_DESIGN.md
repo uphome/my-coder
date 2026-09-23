@@ -85,7 +85,7 @@ DOM 节点上、只服务"最后一个 assistant 的文本块如何平滑更新"
 ## 6. 后端配合
 
 1. SSE 帧补结构标记：`chunk/reasoning/tool_call` 带 `turn`/`step`
-   （`event.data` 里已有 turn/step——web_app 的 event_to_payload 现在没透传）
+   （`event.data` 里已有 turn/step——`web/payload.py` 的 event_to_payload 现在没透传）
 2. 新增 `turn_start` 帧（现在前端看不到 turn/start，靠 addUserMessage 猜新回合）
    ——或改为 user 消息帧：更干净的是在 SSE 里把"真人 user 消息"也发一帧
    `user_message {turn, text}`，替代前端本地 addUserMessage 渲染 + turnNo 自数。

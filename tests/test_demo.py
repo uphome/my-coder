@@ -11,6 +11,7 @@ import pytest
 from agent_demo import loop as loop_module
 from agent_demo.agent import Agent
 from agent_demo.constants import (
+    MODEL_CONTEXT_WINDOW,
     READ_FILE_MAX_CHARS,
     READ_FILE_MAX_LIMIT,
     TOOL_RESULT_MAX_CHARS,
@@ -677,12 +678,12 @@ def test_web_opening_a_crash_damaged_session_repairs_it(tmp_path):
     """入口级验证：打开会话（/sessions/<id>/switch）时自愈，UI 拿到的是失败结果。"""
     from fastapi.testclient import TestClient
 
-    from agent_demo import web_app
+    from agent_demo import web
 
     sessions_dir = tmp_path / 'sess'
-    web_app.init_web(tmp_path, fake=True, sessions_dir=sessions_dir)
+    web.init_web(tmp_path, fake=True, sessions_dir=sessions_dir)
     _write_crash_log(sessions_dir / 'crashed.jsonl')
-    client = TestClient(web_app.app)
+    client = TestClient(web.app)
 
     switched = client.post('/sessions/crashed/switch').json()
     assert switched['id'] == 'crashed'
@@ -1211,11 +1212,11 @@ async def test_approval_gate_approves_and_skips(tmp_path):
 def test_web_chat_streams_events(tmp_path):
     from fastapi.testclient import TestClient
 
-    from agent_demo import web_app
+    from agent_demo import web
 
     # SSE 流全链路（--fake 离线验证；sessions_dir 隔离，不污染真实会话）
-    web_app.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
-    client = TestClient(web_app.app)
+    web.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
+    client = TestClient(web.app)
 
     assert client.get('/').status_code == 200          # 页面可访问
     h = client.get('/history').json()
@@ -1258,11 +1259,11 @@ def test_history_projects_reasoning_per_request(tmp_path):
     """
     from fastapi.testclient import TestClient
 
-    from agent_demo import web_app
+    from agent_demo import web
 
-    web_app.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
-    client = TestClient(web_app.app)
-    session = web_app._session
+    web.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
+    client = TestClient(web.app)
+    session = web.state.session
 
     # 手工落一轮：两次请求（同 turn/step，模拟工具循环），各带思维链
     session.append('turn/start', {'turn': 1})
@@ -1304,10 +1305,10 @@ def test_history_projects_reasoning_per_request(tmp_path):
 def test_web_session_management(tmp_path):
     from fastapi.testclient import TestClient
 
-    from agent_demo import web_app
+    from agent_demo import web
 
-    web_app.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
-    client = TestClient(web_app.app)
+    web.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
+    client = TestClient(web.app)
 
     # 隔离目录初始化即含空的 web 会话（"会话存在 = 有文件"）；
     # 聊天后摘要更新为首条用户消息
@@ -1350,10 +1351,10 @@ def test_web_session_title_endpoint(tmp_path):
     """手动改名：append session/title（user）→ 列表 summary 以标题优先，重放可恢复。"""
     from fastapi.testclient import TestClient
 
-    from agent_demo import web_app
+    from agent_demo import web
 
-    web_app.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
-    client = TestClient(web_app.app)
+    web.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
+    client = TestClient(web.app)
 
     # 聊天产生内容 → fallback 摘要为首条消息
     client.post('/chat', json={'message': 'hello rename me'})
@@ -1383,40 +1384,40 @@ def test_web_session_title_endpoint(tmp_path):
 
 def test_auto_title_trigger_conditions(tmp_path):
     """自动起名只在 真模型 + 无标题 + 首条消息 时触发（fake 一律跳过）。"""
-    from agent_demo import web_app
+    from agent_demo import web
     from agent_demo.session import Session
 
-    web_app.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
+    web.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
     s = Session(id='x')
     # fake 模式：不自动起名（没有真模型可调）
-    assert web_app._should_auto_title(s) is False
+    assert web.titles.should_auto_title(s) is False
 
     # 已有标题：不重复起名
     from argparse import Namespace
-    web_app._args = Namespace(
+    web.state.args = Namespace(
         fake=False, model='m', workspace=tmp_path, hide_reasoning=False,
         session='x', sessions=str(tmp_path / 'sess'), prompt='', resume=False, verbose=False,
     )
     s.append('session/title', {'title': 't', 'source': 'user'})
-    assert web_app._should_auto_title(s) is False
+    assert web.titles.should_auto_title(s) is False
 
     # 已有用户消息（resume 继续对话）：不再自动起名（标题应基于第一条）
     s2 = Session(id='x')
     s2.append('user/message', create_user_message([TextBlock(text='hi')]), surface_op='append')
-    assert web_app._should_auto_title(s2) is False
+    assert web.titles.should_auto_title(s2) is False
 
     # 干净会话 + 真模型：触发
     s3 = Session(id='x')
-    assert web_app._should_auto_title(s3) is True
+    assert web.titles.should_auto_title(s3) is True
 
 
 def test_session_title_event_is_trace_not_surface(tmp_path):
     """session/title 是痕迹事件：不进模型记忆（derive_messages），但重放保留。"""
-    from agent_demo import web_app
+    from agent_demo import web
     from agent_demo.persistence import save_event
     from agent_demo.session import Session
 
-    web_app.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
+    web.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
     s = Session(id='t')
     s.append('session/title', {'title': '我的标题', 'source': 'user'})
     assert [e.type for e in s.events] == ['session/title']
@@ -1435,11 +1436,11 @@ def test_session_title_event_is_trace_not_surface(tmp_path):
 
 def test_auto_title_rejects_verbatim_copy():
     """自动起名逐字复读首条消息 → 判定为失败（不落 auto 事件，退回 fallback）。"""
-    from agent_demo import web_app
-    assert web_app._is_verbatim_copy('你好', '你好') is True
-    assert web_app._is_verbatim_copy('总结README', '请帮我总结README') is True   # 子串
-    assert web_app._is_verbatim_copy('代码审查', '请帮我审查这段代码') is False  # 概括 ≠ 复读
-    assert web_app._is_verbatim_copy('问候', '你好') is False
+    from agent_demo import web
+    assert web.titles.is_verbatim_copy('你好', '你好') is True
+    assert web.titles.is_verbatim_copy('总结README', '请帮我总结README') is True   # 子串
+    assert web.titles.is_verbatim_copy('代码审查', '请帮我审查这段代码') is False  # 概括 ≠ 复读
+    assert web.titles.is_verbatim_copy('问候', '你好') is False
 
 @pytest.mark.asyncio
 async def test_identity_prompt_is_neutral(tmp_path):
@@ -2517,13 +2518,13 @@ def test_web_todo_dock_payloads(tmp_path):
     """todo dock 的数据通道：SSE 帧 todo_update + /history 附带 todos + 会话切换恢复。"""
     from fastapi.testclient import TestClient
 
-    from agent_demo import web_app
+    from agent_demo import web
 
-    web_app.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
-    client = TestClient(web_app.app)
+    web.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
+    client = TestClient(web.app)
 
     # fake 会话默认脚本不含 todo_write；先直接往日志写 todo，模拟已有清单
-    s = web_app._session
+    s = web.state.session
     s.append('todo/write', {'todos': [
         {'content': '读代码', 'status': 'completed'},
         {'content': '写修复', 'status': 'in_progress'},
@@ -3116,14 +3117,14 @@ def test_web_checkpoint_role_and_context_payload(tmp_path):
     """checkpoint 消息标记 role=checkpoint；history/会话响应带 context。"""
     from fastapi.testclient import TestClient
 
-    from agent_demo import web_app
+    from agent_demo import web
     from agent_demo.values import TextBlock, create_user_message
 
-    web_app.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
-    client = TestClient(web_app.app)
+    web.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
+    client = TestClient(web.app)
 
     # 直接往当前会话写 checkpoint 形态的 user/message（带 compacted-summary 标签）
-    s = web_app._session
+    s = web.state.session
     s.append('turn/start', {'turn': 1})
     s.append('user/message', create_user_message([TextBlock(text='Q1')]), surface_op='append')
     s.append('turn/end', {'turn': 1, 'reason': 'completed'})
@@ -3151,12 +3152,12 @@ def test_web_context_session_totals_accumulate(tmp_path):
     """真实 usage 多条 → 会话级累计账（消耗 token 求和、缓存命中率 token 加权）。"""
     from fastapi.testclient import TestClient
 
-    from agent_demo import web_app
+    from agent_demo import web
     from agent_demo.values import TextBlock, create_assistant_message, create_user_message
 
-    web_app.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
-    client = TestClient(web_app.app)
-    s = web_app._session
+    web.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
+    client = TestClient(web.app)
+    s = web.state.session
     s.append('turn/start', {'turn': 1})
     s.append('user/message', create_user_message([TextBlock(text='Q1')]), surface_op='append')
     # 两次真实请求：usage 必须各自落账，命中率是 Σ 比值而非单次、也非简单平均
@@ -3178,7 +3179,7 @@ def test_web_context_session_totals_accumulate(tmp_path):
     ctx = hist['context']
     # 快照仍取最后一条真实 usage（圆环语义不变）
     assert ctx['used'] == 1000
-    assert ctx['percent'] == round(1000 * 100 / web_app.MODEL_CONTEXT_WINDOW)
+    assert ctx['percent'] == round(1000 * 100 / MODEL_CONTEXT_WINDOW)
     # 会话级累计账：消耗 = Σ input + Σ output；命中率 = Σhit / Σ(hit+miss)
     session = ctx['session']
     assert session['input_tokens'] == 3000            # 2000 + 1000
@@ -3192,7 +3193,7 @@ def test_web_context_session_totals_accumulate(tmp_path):
     s2 = client.post('/sessions/new').json()
     sid = s2['id']
     client.post(f'/sessions/{sid}/switch')
-    s = web_app._session
+    s = web.state.session
     s.append('turn/start', {'turn': 1})
     s.append('assistant/message', {
         'turn': 1, 'step': 1,
@@ -3217,19 +3218,19 @@ def test_web_manual_compact_endpoint(tmp_path):
     os.environ['DEEPSEEK_API_KEY'] = 'sk-placeholder'
     from fastapi.testclient import TestClient
 
-    from agent_demo import web_app
+    from agent_demo import web
     from agent_demo.values import TextBlock, create_assistant_message, create_user_message
 
     # fake 模式：脚本模型不能生成摘要 → 400 拒绝
-    web_app.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
-    client = TestClient(web_app.app)
+    web.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
+    client = TestClient(web.app)
     assert client.post('/compact').status_code == 400
 
     # 真实模式 + stub llm：跑一轮完整旧回合，手动压缩应落 checkpoint
-    web_app.init_web(tmp_path, fake=False, sessions_dir=tmp_path / 'sess2',
+    web.init_web(tmp_path, fake=False, sessions_dir=tmp_path / 'sess2',
                      model='deepseek-v4-flash')
-    s = web_app._session
-    agent = web_app._agent
+    s = web.state.session
+    agent = web.state.agent
 
     class CompactLlm:
         async def stream(self, request, signal=None):
@@ -3278,10 +3279,10 @@ def test_web_sessions_run_in_parallel_isolated(tmp_path):
     """
     from fastapi.testclient import TestClient
 
-    from agent_demo import web_app
+    from agent_demo import web
 
-    web_app.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
-    client = TestClient(web_app.app)
+    web.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
+    client = TestClient(web.app)
     assert _id_of(client) == 'web'
 
     # 建第二个会话（new 返回描述并切为焦点）
@@ -3295,12 +3296,12 @@ def test_web_sessions_run_in_parallel_isolated(tmp_path):
     assert '"type": "turn_end"' in ra.text and '"type": "turn_end"' in rb.text
 
     # 焦点 = 最后切换/操作的会话（兼容旧路由无 sid 语义）
-    assert web_app._current_sid == b['id']
-    assert web_app._session.id == b['id']
+    assert web.state.current_sid == b['id']
+    assert web.state.session.id == b['id']
 
     # 两会话的 agent 是不同实例，各自日志只有自己的消息
-    seat_a = web_app._seats['web']
-    seat_b = web_app._seats[b['id']]
+    seat_a = web.state.seats['web']
+    seat_b = web.state.seats[b['id']]
     assert seat_a.agent is not seat_b.agent          # 独立 agent
     assert seat_a.session is not seat_b.session      # 独立事件日志
 
@@ -3320,15 +3321,15 @@ def test_web_sessions_run_in_parallel_isolated(tmp_path):
 
     # 切回 A：seat 复用（同实例，agent 事件日志延续）——不重建销毁
     switched = client.post('/sessions/web/switch').json()
-    assert web_app._session.id == 'web'
-    assert web_app._seats['web'] is seat_a             # 复用而非重建
+    assert web.state.session.id == 'web'
+    assert web.state.seats['web'] is seat_a             # 复用而非重建
     assert any('任务甲' in (m.get('text') or '') for m in switched['history'])
 
 
 def _id_of(client) -> str:
     """当前焦点会话 id（init 后默认 'web'）。"""
-    from agent_demo import web_app
-    return web_app._current_sid
+    from agent_demo import web
+    return web.state.current_sid
 
 
 @pytest.mark.asyncio
@@ -3511,11 +3512,11 @@ def test_web_queue_actions_endpoint(tmp_path):
     """
     from fastapi.testclient import TestClient
 
-    from agent_demo import web_app
+    from agent_demo import web
 
-    web_app.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
-    client = TestClient(web_app.app)
-    seat = web_app._seats['web']
+    web.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
+    client = TestClient(web.app)
+    seat = web.state.seats['web']
 
     def update(item_id, action):
         resp = client.post('/queue/update',
@@ -3527,7 +3528,7 @@ def test_web_queue_actions_endpoint(tmp_path):
     message = create_user_message([TextBlock(text='这条还没轮到')])
     seat.agent.send(message, 'next-step', wakeup=False)
     queued_id = message.id
-    assert [r['id'] for r in web_app._queue_rows(seat.agent)] == [queued_id]
+    assert [r['id'] for r in web.payload.queue_rows(seat.agent)] == [queued_id]
 
     # /history 与 /steer 一样带 queue（刷新页面也能恢复队列区）
     hist = client.get('/history').json()
@@ -3600,10 +3601,11 @@ def test_inbox_queue_actions_edit_and_promote():
 def test_inbox_queued_items_is_a_session_projection():
     """队列投影在**状态层**：Inbox.queued_items() 与 derive_messages() 并列。
 
-    为什么这条要单独测（架构回归）：投影曾被放在 web_app 里自己重放
-    agent/inbox/spliced——同一事件类型两份折叠（Inbox._apply 一份、web 一份）
-    必然分叉，而且投影绑死在 Web 宿主上（CLI/测试拿不到）。现在只有一份：
-    _state 本身就是重放结果，queued_items() 只是给它贴上 placement 语义。
+    为什么这条要单独测（架构回归）：投影一度被放在 Web 宿主（当时的
+    单文件 `web_app.py`）里自己重放 agent/inbox/spliced——同一事件类型两份折叠
+    （Inbox._apply 一份、web 一份）必然分叉，而且投影绑死在 Web 宿主上
+    （CLI/测试拿不到）。现在只有一份：_state 本身就是重放结果，queued_items()
+    只是给它贴上 placement 语义。
 
     断言三件事：
     - placement 映射：next-turn→queued、next-step→steering，顺序固定
@@ -3639,25 +3641,25 @@ def test_web_queue_rows_serialize_state_projection(tmp_path):
     注意入队走 wakeup=False：这里只测投影，不真跑回合（sync 测试里
     没有事件循环，_wake 会拉不起 driver）。
     """
-    from agent_demo import web_app
+    from agent_demo import web
 
-    web_app.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
-    session, agent = web_app._session, web_app._agent
+    web.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
+    session, agent = web.state.session, web.state.agent
     assert session is not None and agent is not None
 
     first = create_user_message([TextBlock(text='插队一')])
     agent.send(first, 'next-step', wakeup=False)
     second = create_user_message([TextBlock(text='排队二')])
     agent.send(second, 'next-turn', wakeup=False)      # next-turn = 'queued'
-    rows = web_app._queue_rows(agent)
+    rows = web.payload.queue_rows(agent)
     assert [(r['text'], r['placement']) for r in rows] == [
         ('排队二', 'queued'), ('插队一', 'steering')]
 
     agent.unqueue(first.id)
-    assert [(r['text'], r['placement']) for r in web_app._queue_rows(agent)] == [
+    assert [(r['text'], r['placement']) for r in web.payload.queue_rows(agent)] == [
         ('排队二', 'queued')]
     # 序列化 = 投影的镜像（id 集合一致，一一对应）
-    assert [r['id'] for r in web_app._queue_rows(agent)] == [
+    assert [r['id'] for r in web.payload.queue_rows(agent)] == [
         item.id for item in agent.inbox.queued_items()]
 
 
@@ -3665,10 +3667,10 @@ def test_web_steer_requires_active_stream(tmp_path):
     """POST /steer：无活跃对话流（idle）时 409 拒绝；提示用 /chat 开回合。"""
     from fastapi.testclient import TestClient
 
-    from agent_demo import web_app
+    from agent_demo import web
 
-    web_app.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
-    client = TestClient(web_app.app)
+    web.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
+    client = TestClient(web.app)
 
     # 会话刚初始化，无活跃 SSE 流 → 409
     resp = client.post('/steer', json={'message': 'hi'})
@@ -3692,7 +3694,7 @@ async def test_web_steer_interrupts_open_sse_stream(tmp_path):
     """
     import httpx
 
-    from agent_demo import web_app
+    from agent_demo import web
     from agent_demo.llm import StreamChunk
 
     class HoldLlm:
@@ -3715,12 +3717,12 @@ async def test_web_steer_interrupts_open_sse_stream(tmp_path):
             else:
                 yield StreamChunk(text='插队后回答', finish_reason='stop')
 
-    web_app.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
-    seat = web_app._seats['web']
+    web.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
+    seat = web.state.seats['web']
     llm = HoldLlm()
     seat.agent.llm = llm
 
-    transport = httpx.ASGITransport(app=web_app.app)
+    transport = httpx.ASGITransport(app=web.app)
     async with httpx.AsyncClient(transport=transport, base_url='http://test') as client:
         async def read_sse() -> str:
             parts = []
@@ -3803,7 +3805,7 @@ async def test_web_sse_disconnect_cancels_agent(tmp_path):
     """
     import httpx
 
-    from agent_demo import web_app
+    from agent_demo import web
     from agent_demo.llm import StreamChunk
 
     class HoldLlm:
@@ -3816,11 +3818,11 @@ async def test_web_sse_disconnect_cancels_agent(tmp_path):
             await self.release.wait()          # 一直挂到测试放行/取消
             yield StreamChunk(text='never', finish_reason='stop')
 
-    web_app.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
-    seat = web_app._seats['web']
+    web.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
+    seat = web.state.seats['web']
     seat.agent.llm = HoldLlm()
 
-    transport = httpx.ASGITransport(app=web_app.app)
+    transport = httpx.ASGITransport(app=web.app)
     async with httpx.AsyncClient(transport=transport, base_url='http://test') as client:
         async def read_sse() -> None:
             async with client.stream('POST', '/chat',
@@ -3902,12 +3904,12 @@ def test_web_history_marks_same_turn_steer(tmp_path):
     """
     from fastapi.testclient import TestClient
 
-    from agent_demo import web_app
+    from agent_demo import web
     from agent_demo.values import TextBlock, create_assistant_message, create_user_message
 
-    web_app.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
-    client = TestClient(web_app.app)
-    s = web_app._session
+    web.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
+    client = TestClient(web.app)
+    s = web.state.session
 
     # turn 1：首问 → 模型答 → 插队（同回合第二条 user）→ 模型答
     def user(t): return create_user_message([TextBlock(text=t)])

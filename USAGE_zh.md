@@ -35,7 +35,7 @@ conda run --no-capture-output -n agent-demo \
   python -m agent_demo.cli --workspace . "调查这个仓库是干什么的"
 ```
 
-- 想用浏览器：把 `agent_demo.cli` 换成 `agent_demo.web_app`（第 7 章）。
+- 想用浏览器：把 `agent_demo.cli` 换成 `agent_demo.web`（第 7 章）。
 - 感觉 agent 动作危险 → 因为它要你先批 `edit`/`bash`（第 6 章）。
 
 ---
@@ -194,8 +194,8 @@ conda run --no-capture-output -n agent-demo \
 
 ```sh
 conda run --no-capture-output -n agent-demo \
-  python -m agent_demo.web_app --workspace . --fake          # 离线演示
-# python -m agent_demo.web_app --workspace .                # 真实模型
+  python -m agent_demo.web --workspace . --fake          # 离线演示
+# python -m agent_demo.web --workspace .                # 真实模型
 ```
 
 打开 <http://127.0.0.1:8000>：
