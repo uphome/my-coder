@@ -72,6 +72,40 @@ button:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--accent
   cursor: pointer; transition: all .15s ease;
 }
 #new-btn:hover { color: var(--text-1); border-color: var(--accent); background: var(--accent-soft); }
+/* ---- 新建会话时的工作区选择器（每个对话一个工作区，见 agent_demo/app/workspace.py） ---- */
+#ws-picker {
+  margin: 0 12px 10px; padding: 10px; display: flex; flex-direction: column; gap: 8px;
+  border: 1px solid var(--border-strong); border-radius: var(--r-m); background: var(--bg2);
+}
+#ws-picker .ws-title { font-size: 12px; color: var(--text-2); }
+#ws-input {
+  width: 100%; font-size: 12px; font-family: var(--font-mono);
+  background: var(--bg3); color: var(--text-1);
+  border: 1px solid var(--border-strong); border-radius: var(--r-s);
+  padding: 6px 8px; outline: none;
+}
+#ws-input:focus { border-color: var(--accent); }
+#ws-recent { display: flex; flex-wrap: wrap; gap: 4px; }
+.ws-chip {
+  font-size: 11px; font-family: var(--font-mono); max-width: 100%;
+  background: var(--bg3); color: var(--text-2); cursor: pointer;
+  border: 1px solid var(--border); border-radius: 999px; padding: 2px 8px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.ws-chip:hover { color: var(--text-1); border-color: var(--accent); }
+.ws-actions { display: flex; gap: 6px; justify-content: flex-end; }
+.ws-actions button {
+  font-size: 12px; padding: 4px 10px; border-radius: var(--r-s); cursor: pointer;
+  border: 1px solid var(--border-strong); background: none; color: var(--text-2);
+}
+.ws-actions #ws-ok { background: var(--accent); border-color: var(--accent); color: #fff; }
+.ws-actions button:disabled { opacity: .5; cursor: not-allowed; }
+#ws-error { font-size: 11px; color: #e5534b; line-height: 1.5; word-break: break-all; }
+/* 顶栏的当前工作区（每个对话可能不同） */
+#ws-label {
+  font-size: 11px; font-family: var(--font-mono); color: var(--text-3); margin-left: 8px;
+  max-width: 46vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 #session-list { flex: 1; overflow-y: auto; padding: 4px 8px 12px; }
 .session-item {
   position: relative; cursor: pointer;
@@ -585,12 +619,23 @@ footer { padding: 10px 22px 18px; background: var(--bg1); border-top: 1px solid 
 <div id="layout">
   <aside id="sidebar">
     <button id="new-btn">＋ 新建会话</button>
+    <div id="ws-picker" hidden>
+      <div class="ws-title">新对话的工作区（工具只能读写这个目录）</div>
+      <input id="ws-input" type="text" placeholder="目录路径，如 D:\proj\app" spellcheck="false">
+      <div id="ws-recent"></div>
+      <div id="ws-error" hidden></div>
+      <div class="ws-actions">
+        <button type="button" id="ws-cancel">取消</button>
+        <button type="button" id="ws-ok">开始对话</button>
+      </div>
+    </div>
     <div id="session-list"></div>
   </aside>
   <section id="main-col">
     <header>
       <h1>agent<span class="dot">.</span>demo</h1>
       <span id="model-label" title="模型">…</span>
+      <span id="ws-label" title="当前对话的工作区"></span>
     </header>
     <main id="messages">
       <div class="hint">选择一个会话，或新建会话开始对话。<br>模型可以读文件、搜索代码、执行命令；敏感操作需要你点「批准」。</div>
@@ -658,6 +703,13 @@ const stopBtn = document.getElementById('stop');
 const sessionListEl = document.getElementById('session-list');
 const newBtn = document.getElementById('new-btn');
 const modelLabel = document.getElementById('model-label');
+const wsLabel = document.getElementById('ws-label');            // 顶栏：当前对话的工作区
+const wsPicker = document.getElementById('ws-picker');
+const wsInput = document.getElementById('ws-input');
+const wsRecentEl = document.getElementById('ws-recent');
+const wsOk = document.getElementById('ws-ok');
+const wsCancel = document.getElementById('ws-cancel');
+const wsError = document.getElementById('ws-error');
 const todoDockEl = document.getElementById('todo-dock');
 const queueDockEl = document.getElementById('queue-dock');
 const inputHintEl = document.getElementById('input-hint');
@@ -680,7 +732,9 @@ let currentSid = 'web';       // 当前会话 id（服务端 init 默认 'web'�
 let busy = false;             // 请求进行中（禁发、显示停止）
 let streaming = false;        // SSE 流进行中（工具活动块自动展开）
 let controller = null;
-let wsRoot = '';              // workspace 根（/meta 拉取，路径相对化显示用）
+let wsRoot = '';              // 当前对话的工作区（每个对话可能不同，随会话切换更新）
+let defaultWs = '';           // 宿主默认工作区（/meta 拉取：新建对话时的预填值）
+let hostCwd = '';             // 服务进程当前目录（相对路径按它解析，给输入框做提示）
 let stickBottom = true;       // 用户是否贴着底部（智能滚动）
 let currentTodos = null;      // 当前 todo 清单（null = 无清单，dock 隐藏）
 let todoOpen = false;         // dock 是否展开（默认折叠）
@@ -1778,7 +1832,9 @@ async function loadSessions() {
       // 双击标题就地改名（title 事件落日志；user 手动覆盖 auto 自动）
       title.addEventListener('dblclick', (e) => { e.stopPropagation(); startRename(item, s); });
       const meta = el('div', 'meta');
-      meta.textContent = `${s.id} · ${s.events} 事件`;
+      // 每个对话自己的工作区（短名显示，全路径在 title 里）——"这个对话在哪个目录"一眼可见
+      meta.textContent = `${s.id} · ${s.events} 事件${s.workspace ? ` · ${shortWs(s.workspace)}` : ''}`;
+      if (s.workspace) meta.title = s.workspace;
       item.appendChild(title);
       item.appendChild(meta);
       item.addEventListener('click', () => switchSession(s.id));
@@ -1833,13 +1889,7 @@ async function switchSession(sid) {
   try {
     const res = await fetch(`/sessions/${encodeURIComponent(sid)}/switch`, { method: 'POST' });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
-    currentSid = data.id;
-    setTodos(data.todos);
-    setQueue(data.queue);
-    setCtxOpen(false);          // 切会话：收起上个会话展开的明细面板
-    updateContext(data.context);
-    renderHistory(data.history);
+    applySession(await res.json());
     loadSessions();
   } catch (e) { console.error('switch session failed', e); }
 }
@@ -1855,20 +1905,87 @@ async function deleteSession(sid) {
     loadSessions();
   } catch (e) { console.error('delete session failed', e); }
 }
-async function newSession() {
+/* 会话打开后的统一落地：焦点 / 工作区标签 / 三个面板 / 历史。
+   新建、切换、以及页面加载时都走这一条路，避免三处各写一遍投影恢复逻辑。 */
+function applySession(data) {
+  currentSid = data.id;
+  setWorkspace(data.workspace);
+  setTodos(data.todos);
+  setQueue(data.queue);
+  setCtxOpen(false);          // 切会话：收起上个会话展开的明细面板
+  updateContext(data.context);
+  renderHistory(data.history);
+}
+/* ---------- 工作区：每个对话一个，选择发生在"新建会话"时 ---------- */
+/* 服务端把工作区写进会话日志（`session/workspace` 痕迹事件），所以切换会话/刷新页面
+   都能从日志读回来；这里只负责"让用户选一个"和"把当前那个显示出来"。 */
+const WS_RECENT_KEY = 'agent-demo.recent-workspaces';
+
+function setWorkspace(path) {
+  wsRoot = path || '';
+  wsLabel.textContent = path ? `· ${path}` : '';
+  wsLabel.title = path ? `当前对话的工作区：${path}` : '';
+}
+function shortWs(path) {
+  if (!path) return '';
+  const parts = path.split(/[\\/]/).filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : path;
+}
+function recentWorkspaces() {
+  try { return JSON.parse(localStorage.getItem(WS_RECENT_KEY) || '[]'); } catch (e) { return []; }
+}
+function rememberWorkspace(path) {
+  if (!path) return;
+  const list = [path, ...recentWorkspaces().filter((p) => p !== path)].slice(0, 5);
+  try { localStorage.setItem(WS_RECENT_KEY, JSON.stringify(list)); } catch (e) { /* 忽略 */ }
+}
+function openWsPicker() {
   if (busy) return;
+  wsError.hidden = true;
+  const recent = recentWorkspaces();
+  wsInput.value = recent[0] || defaultWs || '';
+  wsInput.placeholder = defaultWs ? `留空 = 宿主默认（${defaultWs}）` : '目录路径';
+  wsRecentEl.innerHTML = '';
+  for (const path of recent) {
+    const chip = el('button', 'ws-chip');
+    chip.type = 'button';
+    chip.textContent = shortWs(path);
+    chip.title = path;
+    chip.addEventListener('click', () => { wsInput.value = path; wsInput.focus(); });
+    wsRecentEl.appendChild(chip);
+  }
+  wsPicker.hidden = false;
+  wsInput.focus();
+  wsInput.select();
+}
+function closeWsPicker() { wsPicker.hidden = true; wsError.hidden = true; }
+async function createSession() {
+  if (busy) return;
+  const path = wsInput.value.trim();
+  wsOk.disabled = true;
   try {
-    const res = await fetch('/sessions/new', { method: 'POST' });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const res = await fetch('/sessions/new', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(path ? { workspace: path } : {}),
+    });
+    if (!res.ok) {
+      const detail = await res.json().catch(() => ({}));
+      wsError.textContent = detail.detail || `新建失败（HTTP ${res.status}）`;
+      wsError.hidden = false;
+      return;                    // 路径错了就留在选择器里让用户改，而不是静默用默认
+    }
     const data = await res.json();
-    currentSid = data.id;
-    setTodos(data.todos);
-    setQueue(data.queue);
-    setCtxOpen(false);          // 新建会话同理：面板默认收起
-    updateContext(data.context);
-    renderHistory(data.history);
+    rememberWorkspace(data.workspace || path);
+    closeWsPicker();
+    applySession(data);
     loadSessions();
-  } catch (e) { console.error('new session failed', e); }
+  } catch (e) {
+    wsError.textContent = `新建失败：${e.message || e}`;
+    wsError.hidden = false;
+  } finally {
+    wsOk.disabled = false;
+  }
 }
 
 /* ---------- SSE 事件分发（增量驱动投影） ---------- */
@@ -2138,7 +2255,13 @@ function updateCompactDisabled() {
 }
 
 /* ---------- 事件绑定 ---------- */
-newBtn.addEventListener('click', newSession);
+newBtn.addEventListener('click', openWsPicker);   // 新建会话 = 先选工作区（每对话一个）
+wsOk.addEventListener('click', createSession);
+wsCancel.addEventListener('click', closeWsPicker);
+wsInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); createSession(); }
+  else if (e.key === 'Escape') { e.preventDefault(); closeWsPicker(); }
+});
 sendBtn.addEventListener('click', send);
 stopBtn.addEventListener('click', () => {
   if (controller) controller.abort();
@@ -2214,27 +2337,24 @@ ctxCompactBtn.addEventListener('click', async () => {
 
 /* ---------- 初始化 ---------- */
 (async function init() {
-  // /meta：workspace 根（路径相对化）+ 模型标签
+  // /meta：宿主默认工作区（新建对话的预填值）+ 相对路径基准 + 模型标签
   try {
     const res = await fetch('/meta');
     const meta = await res.json();
-    wsRoot = meta.workspace || '';
+    defaultWs = meta.workspace || '';
+    hostCwd = meta.cwd || '';
     fakeMode = !!meta.fake;
     modelLabel.textContent = meta.fake ? '离线演示（fake）' : meta.model;
     modelLabel.classList.toggle('fake', !!meta.fake);
     modelLabel.title = meta.fake
       ? '离线脚本模型，不需 API key'
-      : `模型 ${meta.model} · workspace: ${wsRoot}`;
+      : `模型 ${meta.model} · 默认工作区: ${defaultWs}`;
     updateCompactDisabled();
   } catch (e) { console.error('load meta failed', e); }
   await loadSessions();
   try {
     const res = await fetch(`/history?sid=${encodeURIComponent(currentSid)}`);
-    const data = await res.json();
-    setTodos(data.todos);
-    setQueue(data.queue);
-    updateContext(data.context);
-    renderHistory(data.history);
+    applySession(await res.json());   // 含本会话的工作区（从日志里的 session/workspace 读回）
   } catch (e) { console.error('load history failed', e); }
 })();
 </script>

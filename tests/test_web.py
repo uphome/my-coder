@@ -300,13 +300,16 @@ def test_web_checkpoint_role_and_context_payload(tmp_path):
     # 直接往当前会话写 checkpoint 形态的 user/message（带 compacted-summary 标签）
     s = web.state.session
     s.append('turn/start', {'turn': 1})
-    s.append('user/message', create_user_message([TextBlock(text='Q1')]), surface_op='append')
+    # 用**事件自己的 seq**做遮蔽区间，而不是写死 (1, 1)：会话日志开头可能已经有别的痕迹
+    # 事件（例如创建时落的 `session/workspace`），seq 不是从 0 数起的固定值——写死会在
+    # 那种会话上指向错误的事件（实测：`1 is not in list`）。
+    q1 = s.append('user/message', create_user_message([TextBlock(text='Q1')]), surface_op='append')
     s.append('turn/end', {'turn': 1, 'reason': 'completed'})
     s.append('turn/start', {'turn': 2})
     cp_text = ('This is an automatically generated checkpoint…\n\n'
                '<compacted-summary>\n## 主要请求\n- 重构\n## 下一步\n1. 测试\n</compacted-summary>')
     s.append('user/message', create_user_message([TextBlock(text=cp_text)]),
-             surface_op='replace', shadowed=(1, 1))
+             surface_op='replace', shadowed=(q1.seq, q1.seq))
     s.append('user/message', create_user_message([TextBlock(text='继续')]), surface_op='append')
 
     hist = client.get('/history').json()
@@ -819,3 +822,246 @@ def test_web_history_marks_same_turn_steer(tmp_path):
     # 同回合两条 user 的 turn 相同（前端据此不画分隔线）；新回合不同
     turns = [t for _, t in users]
     assert turns[0] == turns[1] and turns[1] != turns[2]
+
+
+# ---------------------------------------------------------------------------
+# 每对话工作区：创建时选定 → 写进日志 → 按 seat 隔离沙箱
+# ---------------------------------------------------------------------------
+
+def _tool_texts(client) -> list[str]:
+    """当前会话历史里所有工具结果的正文（断言"读到的是哪个目录的文件"用）。"""
+    out: list[str] = []
+    for message in client.get('/history').json()['history']:
+        for result in message.get('tool_results') or []:
+            out.append(result['content'])
+    return out
+
+
+def test_web_per_session_workspace_isolates_the_sandbox(tmp_path):
+    """每个对话的工作区就是它的沙箱根：同名文件在两个对话里读到各自的内容。
+
+    这是本功能的核心承诺（对齐 DSH 的 `SessionHeader.cwd`）。用 fake 脚本固定读
+    `README.md`，于是**同一句用户消息**在两个会话里读到不同正文——一份日志一个根，
+    `build_tools` 的绑定是 build 时注入的，但每个 seat 各自 build 一次。
+    """
+    from pathlib import Path
+
+    from fastapi.testclient import TestClient
+
+    from agent_demo import web
+
+    root_a = tmp_path / 'a'
+    root_b = tmp_path / 'b'
+    for root, text in ((root_a, '# A\n'), (root_b, '# B\n')):
+        root.mkdir()
+        (root / 'README.md').write_text(text, encoding='utf-8')
+    web.init_web(root_a, fake=True, sessions_dir=tmp_path / 'sess')
+    client = TestClient(web.app)
+
+    # 宿主默认会话（'web'）：没选工作区 → 宿主默认 A
+    client.post('/chat', json={'message': 'read README.md and summarize'})
+    assert any('# A' in text for text in _tool_texts(client))
+
+    # 新对话选 B：同一句消息读到 B 的文件，且看不到 A 的内容
+    fresh = client.post('/sessions/new', json={'workspace': str(root_b)}).json()
+    assert Path(fresh['workspace']) == root_b.resolve()
+    client.post('/chat', json={'message': 'read README.md and summarize'})
+    assert any('# B' in text for text in _tool_texts(client))
+    assert not any('# A' in text for text in _tool_texts(client))
+
+    # seat 级证据：每会话一份 args，**只有 workspace 不同**（fake/model 仍是宿主级）
+    assert Path(web.state.seats['web'].args.workspace) == root_a.resolve()
+    assert Path(web.state.seats[fresh['id']].args.workspace) == root_b.resolve()
+    assert web.state.seats['web'].args.fake is True
+    assert web.state.seats[fresh['id']].args.model == web.state.seats['web'].args.model
+
+    # 列表里每个对话都带自己的工作区（没记录过的显示宿主默认）
+    listing = {item['id']: Path(item['workspace']) for item in client.get('/sessions').json()}
+    assert listing['web'] == root_a.resolve()
+    assert listing[fresh['id']] == root_b.resolve()
+
+
+def test_web_workspace_is_a_trace_event_and_survives_replay(tmp_path):
+    """工作区写进日志（痕迹事件）：不进模型记忆，但换个宿主打开还回到同一个目录。
+
+    与 `session/title` 同构：折叠出来的 `derive_messages()` 里没有它，重放却有它——
+    这正是"日志是唯一事实源"要的形状（配置事实从日志读回来，不另存一份状态）。
+    """
+    from pathlib import Path
+
+    from fastapi.testclient import TestClient
+
+    from agent_demo import web
+    from agent_demo.web.sessions import open_session_seat
+
+    root_a = tmp_path / 'a'
+    root_b = tmp_path / 'b'
+    root_a.mkdir()
+    root_b.mkdir()
+    sessions_dir = tmp_path / 'sess'
+    web.init_web(root_a, fake=True, sessions_dir=sessions_dir)
+    client = TestClient(web.app)
+    sid = client.post('/sessions/new', json={'workspace': str(root_b)}).json()['id']
+
+    events = load_events(sessions_dir / f'{sid}.jsonl')
+    workspace_events = [e for e in events if e.type == 'session/workspace']
+    assert len(workspace_events) == 1
+    assert workspace_events[0].data == {'workspace': str(root_b.resolve()), 'source': 'user'}
+    assert workspace_events[0].surface_op is None           # 痕迹事件：不带 surface_op
+    seat = web.state.seats[sid]
+    assert workspace_events[0].seq not in seat.session.surface  # 不在模型可见投影里
+    assert seat.session.workspace() == str(root_b.resolve())
+
+    # 换个宿主（默认工作区仍是 A）重开这个会话：工作区从日志读回来，不是宿主默认
+    web.init_web(root_a, fake=True, sessions_dir=sessions_dir)
+    reopened = open_session_seat(sid, allow_missing=False)
+    assert Path(reopened.args.workspace) == root_b.resolve()
+
+    # 没选工作区的新对话则记录 source='default'（方便日后分辨"用户选的"与"跟随默认"）
+    default_sid = client.post('/sessions/new').json()['id']
+    default_event = [e for e in load_events(sessions_dir / f'{default_sid}.jsonl')
+                     if e.type == 'session/workspace'][0]
+    assert default_event.data == {'workspace': str(root_a.resolve()), 'source': 'default'}
+
+
+def test_web_legacy_session_follows_host_default_without_rewriting_log(tmp_path):
+    """旧会话（日志里没有 `session/workspace`）跟随宿主默认，且**不回头改写它的日志**。"""
+    from pathlib import Path
+
+    from fastapi.testclient import TestClient
+
+    from agent_demo import web
+
+    root_a = tmp_path / 'a'
+    root_a.mkdir()
+    sessions_dir = tmp_path / 'sess'
+    sessions_dir.mkdir()
+    legacy = Session(id='legacy')
+    legacy.bind_store(sessions_dir / 'legacy.jsonl')
+    legacy.append('user/message', create_user_message([TextBlock(text='旧会话')]),
+                  surface_op='append')
+
+    web.init_web(root_a, fake=True, sessions_dir=sessions_dir)
+    client = TestClient(web.app)
+    switched = client.post('/sessions/legacy/switch').json()
+    assert switched['id'] == 'legacy'
+    assert Path(switched['workspace']) == root_a.resolve()
+    assert switched['history'][0]['text'] == '旧会话'
+    assert [e.type for e in load_events(sessions_dir / 'legacy.jsonl')] == ['user/message']
+
+
+def test_web_workspace_validation_and_immutability(tmp_path):
+    """选择期的校验与"创建后固定"：不存在 / 不是目录 → 400 说清原因；换工作区要新开对话。"""
+    import argparse
+    from pathlib import Path
+
+    import pytest
+    from fastapi import HTTPException
+    from fastapi.testclient import TestClient
+
+    from agent_demo import web
+    from agent_demo.web.sessions import open_session_seat as _open_seat
+
+    root_a = tmp_path / 'a'
+    root_b = tmp_path / 'b'
+    root_a.mkdir()
+    root_b.mkdir()
+    web.init_web(root_a, fake=True, sessions_dir=tmp_path / 'sess')
+    client = TestClient(web.app)
+
+    missing = client.post('/sessions/new', json={'workspace': str(tmp_path / 'nope')})
+    assert missing.status_code == 400
+    assert 'does not exist' in missing.json()['detail']
+
+    a_file = tmp_path / 'plain.txt'
+    a_file.write_text('x', encoding='utf-8')
+    not_dir = client.post('/sessions/new', json={'workspace': str(a_file)})
+    assert not_dir.status_code == 400
+    assert 'not a directory' in not_dir.json()['detail']
+
+    # 空串等价于"不选"→ 宿主默认（前端清空输入框也走这条）
+    blank = client.post('/sessions/new', json={'workspace': '   '})
+    assert blank.status_code == 200
+    assert Path(blank.json()['workspace']) == root_a.resolve()
+
+    # 已有会话的工作区固定：想换就新建对话（直接调 seat API 验这条守卫）
+    sid = client.post('/sessions/new').json()['id']
+    seat = _open_seat(sid, allow_missing=False)
+    with pytest.raises(HTTPException) as error:
+        _open_seat(sid, allow_missing=False, workspace=str(root_b))
+    assert error.value.status_code == 400
+    assert 'fixed' in error.value.detail
+    assert Path(seat.args.workspace) == root_a.resolve()
+    assert isinstance(seat.args, argparse.Namespace)
+
+
+def test_web_reopening_a_session_whose_workspace_is_gone_is_loud(tmp_path):
+    """日志里的工作区不存在了 → 409 说清；**不许**静默换成宿主默认。
+
+    静默回退是最坏情况：工具指向另一个项目，而模型以为自己还在原来的目录里。
+    """
+    from pathlib import Path
+
+    from fastapi.testclient import TestClient
+
+    from agent_demo import web
+
+    root_a = tmp_path / 'a'
+    root_b = tmp_path / 'b'
+    root_a.mkdir()
+    root_b.mkdir()
+    sessions_dir = tmp_path / 'sess'
+    web.init_web(root_a, fake=True, sessions_dir=sessions_dir)
+    client = TestClient(web.app)
+    sid = client.post('/sessions/new', json={'workspace': str(root_b)}).json()['id']
+
+    web.init_web(root_a, fake=True, sessions_dir=sessions_dir)   # 新宿主：seat 注册表清空
+    root_b.rename(tmp_path / 'b-moved')                          # 目录没了（改名/删除都一样）
+    gone = client.post(f'/sessions/{sid}/switch')
+    assert gone.status_code == 409
+    assert 'workspace is gone' in gone.json()['detail']
+    assert Path(web.state.seats['web'].args.workspace) == root_a.resolve()  # 其他会话不受影响
+
+
+def test_resolve_workspace_policy(tmp_path):
+    """`app/workspace.py` 的策略：空 → 默认（不查存在性）；显式路径必须存在 + 是目录。"""
+    from pathlib import Path
+
+    import pytest
+
+    from agent_demo.app.workspace import resolve_workspace
+
+    default = tmp_path / 'default'
+    default.mkdir()
+    assert resolve_workspace(None, default=default) == default.resolve()
+    assert resolve_workspace('  ', default=default) == default.resolve()
+    assert resolve_workspace(str(default), default=tmp_path / 'elsewhere') == default.resolve()
+
+    with pytest.raises(ValueError, match='does not exist'):
+        resolve_workspace(str(tmp_path / 'ghost'), default=default)
+    a_file = tmp_path / 'plain.txt'
+    a_file.write_text('x', encoding='utf-8')
+    with pytest.raises(ValueError, match='not a directory'):
+        resolve_workspace(str(a_file), default=default)
+
+    # 相对路径按**进程当前目录**解析（与 shell 直觉一致，不是相对默认工作区）
+    assert resolve_workspace('.', default=default) == Path.cwd().resolve()
+    # 默认工作区不检查存在性：与 CLI 的 --workspace 行为一致（缺失时工具调用自己报 is_error）
+    assert resolve_workspace(None, default=tmp_path / 'ghost-default') \
+        == (tmp_path / 'ghost-default').resolve()
+
+
+def test_web_new_session_ids_do_not_collide_within_a_second(tmp_path):
+    """同一秒内连开两个对话不能撞 id：撞了会**静默复用**上一个会话（工作区还被拒改）。"""
+    from fastapi.testclient import TestClient
+
+    from agent_demo import web
+
+    web.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
+    client = TestClient(web.app)
+    first = client.post('/sessions/new').json()['id']
+    second = client.post('/sessions/new').json()['id']
+    assert first != second
+    assert second.startswith('web-')
+    assert len(client.get('/sessions').json()) == 3  # 'web' + 两个新会话，都在列表里
+

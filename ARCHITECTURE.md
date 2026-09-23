@@ -616,6 +616,28 @@ workspace 沙箱）；DSH 式沙箱承诺又把可读范围锁在工作区内。
 在后门留了同一个洞。（与 `app/sandbox.py` 同级：hardlink / TOCTOU 不设防，这是"防误用
 保险"，不是 OS 级沙箱。）
 
+### 3.20 每对话一个工作区：不可变、进日志、按 seat 隔离
+
+`--workspace` 过去是**进程级唯一边界**。现在 Web 宿主允许**每个对话各自指定**工作区
+（对齐 DSH 的 `SessionHeader.cwd`；三家对照与取舍见 `agent.md` §10）——这是"一个 Web
+进程里同时开多个项目的对话"的前提。三条规则：
+
+| 规则 | 落地 | 为什么 |
+|---|---|---|
+| **创建时定下，之后不可变** | `POST /sessions/new {"workspace": …}`；已有会话再给 workspace → 400 `workspace is fixed` | 半个对话换了沙箱根，前几轮读 A、后几轮写 B，语义上说不清楚。换目录 = 新建对话（DSH 同样靠 cwd 不可变绕开了"切换后重建什么"） |
+| **写进日志（痕迹事件）** | `session/workspace` + `Session.workspace()` 从日志倒读 | 与 `session/title` 同构：**配置事实也从日志读回来**（"日志是唯一事实源"），于是换进程、隔几天再打开还回到同一个目录。它是 trace：不进 `derive_messages`（不变式 ②） |
+| **每个 seat 一份 args** | `Seat.args`（复制宿主参数，只换 `workspace`） | 工具沙箱、指令探测、技能表、`{{workspace}}` 叙事全是 `build_agent` 当场从 `args.workspace` 派生的——所以"每会话一套"就是"每会话一份 args"，不需要给 Seat 挂派生对象 |
+
+**旧会话与三态**：本功能之前建的会话日志里没有这条事件 → 跟随宿主默认工作区，
+且**不回头改写它的日志**；日志里记着的工作区**不存在了** → 409 + 明确原因
+（`this session's workspace is gone`），**绝不静默回退到宿主默认**——静默回退会让工具指向
+另一个项目，而模型以为自己还在原来的目录里（这正是 DSH `session/conflict` 要防的事）。
+
+**选择策略 = 信任界面使用者**（对齐 DSH：它也没有 allowlist）：只校验"存在 + 是目录"，
+判据集中在 `app/workspace.py` 的 `resolve_workspace`。Web 默认只绑 `127.0.0.1`，
+"能点这个界面的人"本来就等于"把该目录的读写交给 agent"；想收紧就在这一处加白名单，
+调用方不用改。相对路径按**进程当前目录**解析（shell 直觉），空输入 = 宿主默认。
+
 ---
 
 ## 4. 一条消息的完整生命周期
@@ -672,11 +694,12 @@ workspace 沙箱）；DSH 式沙箱承诺又把可读范围锁在工作区内。
 | `app/sandbox.py` | workspace 路径边界：工具入参的轻量沙箱（归一化 + 前缀匹配）+ **宿主直读文件的越界判据**（`workspace_escape_reason`，指令文件与技能共用） |
 | `app/ui.py` | 终端渲染（_render_event / _paint，UI 是日志投影） |
 | `app/factory.py` | build_agent / load_env（CLI 与 Web 共用组装） |
+| `app/workspace.py` | 工作区选择策略：用户输入 → 绝对路径（空 = 宿主默认、相对路径按进程 cwd、`~` 展开、显式路径必须存在且是目录）。Web 的"每个对话一个工作区"唯一入口；想加白名单就加在这一处 |
 | `cli.py` | CLI 入口（单次任务 / 无任务参数进 REPL） |
-| `web/` | Web 宿主（入口层）：`app.py` FastAPI 路由 + `init_web` + `main`；`state.py` `Seat`/`WebState`/`state`；`sessions.py` seat 生命周期 + 会话文件 + 审批钩子；`titles.py` 自动会话标题；`payload.py` 纯函数投影（不依赖 FastAPI）。seat 化并发隔离；事件透传 turn/step + turn_start/user_message（带 message_id/rpc_id）/queue_update 帧供前端投影；队列项操作 `POST /queue/update` |
+| `web/` | Web 宿主（入口层）：`app.py` FastAPI 路由 + `init_web` + `main`；`state.py` `Seat`/`WebState`/`state`；`sessions.py` seat 生命周期 + 会话文件 + 审批钩子 + **每会话工作区**（解析、落 `session/workspace` 事件、从日志读回）；`titles.py` 自动会话标题；`payload.py` 纯函数投影（不依赖 FastAPI）。seat 化并发隔离（每 seat 一份 `args`，**只有 workspace 不同**）；事件透传 turn/step + turn_start/user_message（带 message_id/rpc_id）/queue_update 帧供前端投影；队列项操作 `POST /queue/update`；`POST /sessions/new` 可带 `{"workspace": "…"}` |
 | `app/compaction.py` | 上下文压缩引擎（四步事务 + checkpoint + 会话 token 累计账） |
 | `show_memory.py` | 教学脚本：重放日志展示"记忆 = 投影" |
-| `tests/` | 134 个架构测试，**按关注点分文件**（2026-09 从单文件 `test_demo.py` 拆出）：`test_values_session.py` 值/日志投影、`test_inbox.py` 队列、`test_prompt.py` 提示词、`test_llm.py` LLM 客户端/wire 格式、`test_loop.py` 框架循环、`test_tools.py` 工具、`test_todo.py`、`test_recovery.py` 自愈、`test_compaction.py` 压缩、`test_instructions.py` / `test_skills.py` 宿主直读、`test_web_search.py`、`test_web.py` Web 宿主、`test_cli.py`；跨文件 helper 在 `conftest.py`；**`test_architecture.py`**（2 条：依赖方向 = 包结构——下层 import 上层当场红，白名单里的例外必须仍然真实存在，不许长僵尸）。3 条平台相关（Windows 建不了符号链接时 skip） |
+| `tests/` | 141 个架构测试，**按关注点分文件**（2026-09 从单文件 `test_demo.py` 拆出）：`test_values_session.py` 值/日志投影、`test_inbox.py` 队列、`test_prompt.py` 提示词、`test_llm.py` LLM 客户端/wire 格式、`test_loop.py` 框架循环、`test_tools.py` 工具、`test_todo.py`、`test_recovery.py` 自愈、`test_compaction.py` 压缩、`test_instructions.py` / `test_skills.py` 宿主直读、`test_web_search.py`、`test_web.py` Web 宿主（含每对话工作区）、`test_cli.py`；跨文件 helper 在 `conftest.py`；**`test_architecture.py`**（2 条：依赖方向 = 包结构——下层 import 上层当场红，白名单里的例外必须仍然真实存在，不许长僵尸）。3 条平台相关（Windows 建不了符号链接时 skip） |
 
 ---
 

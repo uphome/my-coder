@@ -9,7 +9,7 @@ Python 复刻 deepseek-harness 架构的教学 demo（agent 框架本身，不�
 # 质量门：ruff + mypy + pytest 三绿才可提交（pyproject.toml 已配好）
 conda run -n agent-demo python -m ruff check agent_demo tests
 conda run -n agent-demo python -m mypy agent_demo
-conda run -n agent-demo python -m pytest        # 134 个测试（3 条平台相关：Windows 建不了符号链接时 skip）
+conda run -n agent-demo python -m pytest        # 141 个测试（3 条平台相关：Windows 建不了符号链接时 skip）
 
 # CLI（可 pip install -e . 后直接 agent-demo；或模块方式跑）
 conda run --no-capture-output -n agent-demo python -m agent_demo.cli --workspace . --fake "read README.md and summarize"
@@ -39,7 +39,7 @@ conda run --no-capture-output -n agent-demo python -m agent_demo.web --workspace
 2 state/        状态：state/session.py（日志，唯一事实源）/ state/inbox.py / state/prompt.py / state/registry.py / state/recovery.py
 3 runtime/      框架循环：runtime/agent.py（被动状态机）、runtime/loop.py（turn/step 两级循环）
 4 app/          应用内容：app/factory.py（组装）+ app/constants.py / app/sandbox.py / app/instructions.py /
-                app/skills.py / app/compaction.py / app/ui.py           ；tools/（工具实现）
+                app/skills.py / app/compaction.py / app/ui.py / app/workspace.py（工作区选择策略）；tools/（工具实现）
 5 web/          入口：Web 宿主（app / state / sessions / titles / payload）；cli.py
 ```
 
@@ -114,6 +114,23 @@ conda run --no-capture-output -n agent-demo python -m agent_demo.web --workspace
   `recovery.repair_dangling_tool_calls`**；修复必须**写进日志**（补 is_error 合成
   结果 + 先落一条 `session/repaired` 痕迹），**禁止在请求构造时静默补占位消息**——
   那会把"这里断过"从唯一事实源里抹掉。函数幂等，可无条件调用
+- **每对话一个工作区**（落地规则，2026-09；DSH 对照与取舍见 `agent.md` §10）：
+  - **创建时定下，之后不可变**：`POST /sessions/new` 可带 `{"workspace": "<目录>"}`；
+    已有会话再给 workspace → 400 `workspace is fixed`。半个对话换沙箱根会让"前几轮读 A、
+    后几轮写 B"说不清楚——**换目录 = 新建对话**（DSH 同样靠 cwd 不可变绕开了"切换后重建什么"）
+  - **写进日志**：落一条 `session/workspace` **痕迹事件**（`{workspace, source}`），
+    由 `Session.workspace()` 从日志倒读——配置事实也从唯一事实源读回来，与 `session/title`
+    同构。**不进 `derive_messages`**（不变式 ②），但重放/换进程/隔几天再开都回到同一个目录
+  - **按 seat 隔离**：`Seat.args` = 复制宿主参数、只换 `workspace`；工具沙箱、指令探测、
+    技能表、`{{workspace}}` 叙事都由 `build_agent` 当场从 `args.workspace` 派生，所以
+    "每会话一套"就是"每会话一份 args"，不必再给 Seat 挂派生对象
+  - **旧会话与三态**：本功能之前建的会话（日志里没有这条事件）**跟随宿主默认工作区**，
+    且**不回头改写它的日志**；日志里记着的工作区**不存在了** → **409 + 明确原因**，
+    **绝不静默回退**（静默回退 = 工具指向另一个项目，而模型以为还在原目录）
+  - **选择策略 = 信任界面使用者**（对齐 DSH，它也没有 allowlist）：只校验"存在 + 是目录"，
+    判据集中在 `app/workspace.py` 的 `resolve_workspace`（相对路径按**进程 cwd**、空 = 宿主
+    默认）。想收紧就只改这一处。Web 默认只绑 `127.0.0.1`，能点界面的人本来就等于把该目录
+    的读写授权给 agent——这条权衡如实写在 README 的安全警告里
 - **工作区项目指令文件的发现与维护**（落地时遵循；DSH 对照与实测见 `agent.md` §9）：
   - **候选与范围**：工作区根的 `AGENTS.md` / `CLAUDE.md`（对齐 DSH
     `DEFAULT_INSTRUCTION_FILE_CANDIDATES`）；子目录里的同名文件**只列路径**
@@ -241,7 +258,7 @@ conda run --no-capture-output -n agent-demo python -m agent_demo.web --workspace
 ## 入口与工具
 
 - `agent_demo/cli.py`：CLI 入口；`--fake` 用脚本化假模型离线跑通全流程（不需要 API key）；`--resume` 演示日志重放恢复
-- `agent_demo/web/`：Web 宿主（入口层，FastAPI + SSE，会话管理/标题/approval）——拆成 `app.py`（路由+装配）/ `state.py`（Seat+宿主状态）/ `sessions.py`（seat 生命周期）/`titles.py`（自动标题）/ `payload.py`（纯函数投影，不依赖 FastAPI）；`python -m agent_demo.web` 是它的入口，`app/factory.py` 的 `build_agent`/`load_env` 被 CLI 与 Web 共用
+- `agent_demo/web/`：Web 宿主（入口层，FastAPI + SSE，会话管理/标题/approval/工作区）——拆成 `app.py`（路由+装配）/ `state.py`（Seat+宿主状态，Seat 带自己的 `args`）/ `sessions.py`（seat 生命周期 + 每会话工作区）/`titles.py`（自动标题）/ `payload.py`（纯函数投影，不依赖 FastAPI）；`python -m agent_demo.web` 是它的入口，`app/factory.py` 的 `build_agent`/`load_env` 被 CLI 与 Web 共用；Web 的 `--workspace` 是**默认**工作区，每个对话可在界面上另选一个（见约定"每对话一个工作区"）
 - `show_memory.py`：教学脚本，重放日志展示"记忆 = 日志投影"
 - 工具在 `agent_demo/tools/`：`build_tools(workspace, skills=…)` 组装（read_file 行号分页 / list_files / grep / glob / edit / write_file / bash / todo_write / web_search / **skill**（按名字取技能正文）），工具类型（`ToolSpec`：schema + executor + 并发模式 + 卸载声明 + 超时 + requires_approval）在 `state/registry.py`；`--workspace` 必填（路径边界，`app/sandbox.py` 实现）；bash/write_file/edit 执行前需人工确认；阶段一实施进度见 `NEXT_STEPS.md`
 - `web_search` 与 `skill` 是两个"读工作区之外"的工具：前者的**搜索能力由 DeepSeek 官方在服务端提供**（Anthropic 兼容 `.../anthropic/v1/messages` + 原生服务端工具 `web_search_20250305`），我们只做"发请求 + 解析结构化块"——绝不自己抓网页、绝不从模型正文里抠 URL；没有结果块要**响亮报错**而不是退化成"没找到"；后者按**名字**（不是路径）取包内/bundled 技能正文，模型没有机会拼出任意路径。两个都不读工作区文件、无副作用，所以**不走 workspace 沙箱、也不需要 approval**（web_search 与 DSH 一致，见 `agent.md` §6）

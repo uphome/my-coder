@@ -821,3 +821,49 @@ instructions（live system 段，order 20） ← C：确定性探测 + 正文/�
 - 门禁：`ruff` / `mypy` 干净、`pytest 131 passed, 3 skipped`（共 134 条；3 条 skip =
   Windows 建不了符号链接时跳过。132 → 134 是分层重构补的两条依赖方向测试）
 
+## 10. 每对话一个工作区：DSH 的 `SessionHeader.cwd` 对照（2026-09 已定稿并落地）
+
+**调查对象**：本机安装的 `@deepseek-ai/dsh`（v0.1.5-rc.2，`lib/*.js` 是保留了 JSDoc 的
+TS 编译产物，符号名未压缩，所以下面的结论都带路径:行，可复核）。这次调查的结论直接决定
+了我们"每对话一个工作区"（NEXT_STEPS 里那条）怎么落地。
+
+### 10.1 DSH 的形状：工作区是**会话头里的不可变 cwd**，不是进程配置
+
+| 维度 | DSH 的实现 | 证据 |
+|---|---|---|
+| 真身 | `SessionHeader.cwd`（每会话一个**不可变**绝对路径），**刻意不进事件流**——原话是"a storage concern, not replayable conversation state" | `dsh-session/lib/types/types.d.ts:68-69`；`dsh-session/lib/types/index.d.ts:109-117` |
+| `workspace` 是另一件事 | 宿主侧的**项目分组注册表**（侧边栏用，对模型零可见、零 token），一个会话只能属于一个 workspace | `dsh-workspace/README.zh.md:64,143,161` |
+| CLI | **没有任何 `--workspace/-w/--cwd`**；默认 = `process.cwd()`；恢复时 cwd 不符报 `session/conflict`，**绝不静默换根** | `lib/bin.js:85`；`dsh-web-app/lib/startup.js:22`；`lib/index.js:269,422,891-893` |
+| Web 新建对话 | 目录选择器（原生 OS 对话框或应用内 Miller 分栏 + **可编辑路径区**）→ `workspace/create` 登记 → `session/create {workspaceId}`；**没有 allowlist** | `dsh-api-workspace-controller/lib/typert.host.js:126-160`；`dsh-host-directory-picker/README.zh.md:32,36`；`dsh-client-ui-workspace/lib/client.js:55` |
+| 校验 | workspace 登记：路径存在且是目录、`realpath` 规范化，失败 `workspace/invalid-path`；裸 `cwd`：只要绝对，**不存在会 `mkdir -p`** | `dsh-workspace/lib/index.js:365-369`；`lib/index.js:440-444,571-593` |
+| 提示词 | `{{cwd}}` **严格插值**进 persona suffix（`Your working directory is {{cwd}}.`），另有沙箱策略 live context | `dsh-agent-loop/lib/index.js:1536`；`dsh-web-app/cordis.patch.yml:16-20` |
+| 隔离 | **每次调用现读** `session.header.cwd`（`@deepseek-ai/*` 里 94 处命中），不是"每会话复制一套工具" | `dsh-tool-fs/lib/index.js:224-258`；`dsh-tool-bash/lib/index.js:177-183` |
+| 存储 | 日志**按 cwd 分目录**：`<root>/--<normalized-cwd>--/<encoded-id>/session.vN.jsonl.zstd` | `dsh-session-persistence-jsonl/README.zh.md:58-70` |
+| 变更 | 没有"工作区切换后重建什么"——**cwd 不可变**，换目录就是换会话；workspace 的变更走 `operationTail` 串行链 | `dsh-workspace/lib/index.js:774-779` |
+
+### 10.2 我们照搬了什么、改了什么
+
+| 决策 | 我们的做法 | 与 DSH 的关系 |
+|---|---|---|
+| 工作区属于会话、创建时定死 | `POST /sessions/new {"workspace": …}`；已有会话再给 → 400 | **照搬**（含"换目录 = 新建对话"这条推论） |
+| 记在哪 | **`session/workspace` 痕迹事件** + `Session.workspace()` 倒读 | **改**：DSH 放物理 header、不进事件流（它的理由是"存储关注点"）；我们的日志没有 header 概念，且不变式①"没有状态不进日志"要求它可重建——**同一目标（重开回到同一目录），不同机制** |
+| 谁能选 | 只校验"存在 + 是目录"，无白名单（`app/workspace.py`） | **照搬**（DSH 也没有 allowlist；权衡写进 README 安全警告） |
+| 相对路径 | 按**进程 cwd**；空 = 宿主默认 | 照搬直觉；DSH 的裸 cwd 会 `mkdir -p`，我们选择**严格报错**（打错字当场 400，不在别处造空目录） |
+| 恢复冲突 | 日志里的目录不存在 → **409 + 明确原因**，绝不回退默认 | **照搬语义**（对应 DSH `session/conflict` / `ApiSessionCwdConflict`） |
+| 隔离方式 | 每 seat 一份 `args`（只有 workspace 不同），工具/指令/技能表由 `build_agent` 当场派生 | **改**：DSH 每次调用现读 `header.cwd`；我们 build 时注入，但**每个会话各自 build 一次**，隔离效果等价且不用改框架层 |
+| 提示词 | persona 里已有 `{{workspace}}`（严格插值） | 早就是等价的（DSH 是 `{{cwd}}`） |
+| 存储布局 | 平铺 `.sessions/<id>.jsonl` + 列表里一列工作区 | **不照搬**分目录（见 NEXT_STEPS 的"明确不做"表） |
+| 旧会话 | 跟随宿主默认、不改写日志 | DSH 的 header 是必需字段，没有这个兼容问题（我们是从"全局工作区"演进过来的） |
+
+**一句话**：DSH 把"这个对话在哪个目录"当成**会话的存储元数据**，我们当成**日志里的一条事实**；
+两者的外部行为（创建时选、之后不可变、恢复必回原目录、冲突就报错）一致——差别只在
+"事实住在 header 还是住在事件流"，而这由各自的日志格式决定。
+
+**没照搬的部分依赖它的基础设施**（如实记下，不假装等价）：Typert RPC 信封与
+`/api/<ns>/<method>` 路由、OS 原生文件夹对话框（本机能力）、workspace 注册表的记账
+（领域 KV / 待定变更两段写 / 归档排序）、`dsh-scope` 的 per-agent 作用域。
+
+**将来若要补**（纯增量，不动现有语义）：`GET /fs/list?path=` + 前端分栏浏览（= DSH 的
+browse 后端）、工作区白名单（判据已收在 `app/workspace.py` 一处）。
+
+

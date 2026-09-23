@@ -18,6 +18,7 @@
 """
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
 import uuid
@@ -26,6 +27,7 @@ from pathlib import Path
 from fastapi import HTTPException
 
 from ..app.factory import build_agent
+from ..app.workspace import resolve_workspace
 from ..capability.hooks import Hooks
 from ..state.recovery import repair_dangling_tool_calls
 from ..state.session import Session
@@ -73,20 +75,36 @@ def approval_for(seat: Seat):
     return approval
 
 
-def open_session_seat(sid: str, *, allow_missing: bool) -> Seat:
+def open_session_seat(sid: str, *, allow_missing: bool,
+                      workspace: str | Path | None = None) -> Seat:
     """取/建一个会话的 Seat（不切换焦点）。
 
     Seat get-or-create 语义：同一 sid 第二次调用复用已有 Seat（其 agent
     若在跑继续跑、事件日志自然延续），而不是重建——这正是并发隔离的要义：
     两会话并行时各自 Seat 独立，互不销毁。首次调用 adopt 重放日志 =
     恢复该会话的记忆。
+
+    **工作区在创建时定下，之后固定**（2026-09 决策，对齐 DSH：一个对话属于一个文件夹）：
+
+    - 新建会话：用调用方给的 `workspace`（空 = 宿主默认），并**落一条
+      `session/workspace` 痕迹事件**——"这个对话属于哪个文件夹"因此成为日志的事实，
+      重开/重启都回到同一个地方；
+    - 打开已有会话：从日志里读回工作区（`session.workspace()`），忽略调用方给的
+      `workspace`（想换工作区就新建对话——半个对话换了沙箱根，前几轮读的是 A、
+      后几轮写的是 B，语义上说不清楚）；
+    - 老会话（本功能之前建的，日志里没有这条事件）：跟随**宿主默认工作区**，
+      并且**不回头改写它的日志**（历史保持原样）。
     """
     log_path = (state.sessions_dir or Path('.sessions')) / f'{sid}.jsonl'
     if not allow_missing and not log_path.exists():
         raise HTTPException(404, f'session {sid!r} not found')
     seat = state.seats.get(sid)
     if seat is not None:
+        if workspace:
+            raise HTTPException(400, 'workspace is fixed when the session is created — '
+                                     'start a new conversation to use another one')
         return seat
+    is_new = not log_path.exists()
     session = Session(id=sid)
     if log_path.exists():
         for event in load_events(log_path):
@@ -98,29 +116,76 @@ def open_session_seat(sid: str, *, allow_missing: bool) -> Seat:
     if repaired:
         print(f'[repair] session {sid}: {len(repaired)} dangling tool call(s) repaired',
               flush=True)
-    if not log_path.exists():
-        # 新会话立即落盘（空文件）：列表可见、可切换——"会话存在 = 有文件"
-        log_path.touch()
-    seat = Seat(sid, session, None)
+    resolved = _resolve_seat_workspace(workspace=workspace if is_new else None,
+                                       logged=session.workspace() if not is_new else None)
+    if is_new:
+        if not log_path.exists():
+            # 新会话立即落盘（空文件）：列表可见、可切换——"会话存在 = 有文件"
+            log_path.touch()
+        # source 用**去掉空白后**是否还有内容来判断：前端清空输入框提交的空串等于"没选"，
+        # 记成 'user' 会让日后分不清"用户选的"与"跟随默认"（判据要落在同一个表示上）
+        session.append('session/workspace', {
+            'workspace': str(resolved),
+            'source': 'user' if str(workspace or '').strip() else 'default',
+        })
+    seat = Seat(sid, session, _args_for_workspace(resolved), None)
     state.seats[sid] = seat  # 先登记：审批钩子闭包引用 seat，创建 agent 前就位
     hooks = Hooks()
     hooks.approval = approval_for(seat)   # Web 版确认：弹本会话的批准/拒绝
     seat.agent = build_agent(
-        session, state.args,
+        session, seat.args,
         {'reasoning_started': False, 'request_no': 0, 'tool_no': 0},
         hooks=hooks,
     )
     return seat
 
 
-def open_session(sid: str, *, allow_missing: bool) -> dict:
+def _args_for_workspace(workspace: Path) -> argparse.Namespace:
+    """复制宿主装配参数并把 workspace 换成这个会话的（其余宿主级，逐字段继承）。
+
+    为什么复制而不是就地改 `state.args.workspace`：宿主默认工作区要留给**后面新建**的
+    对话继续当默认值，改它会把"默认"变成"最近一个会话的工作区"。
+    """
+    assert state.args is not None  # init_web 已初始化（调用方 _check_init 保证）
+    return argparse.Namespace(**{**vars(state.args), 'workspace': workspace})
+
+
+def _resolve_seat_workspace(*, workspace: str | Path | None, logged: str | None) -> Path:
+    """定下这个会话的工作区：显式选择 → 日志记录 → 宿主默认。
+
+    日志里记着的工作区**必须仍然存在**，否则响亮报错：静默回退到宿主默认会让工具
+    指向另一个项目，而模型以为自己还在这个对话原来的目录里——那是"看起来正常、
+    实际读了别的仓库"的最坏情况。用户有两条出路：恢复那个目录，或删掉这个会话。
+    """
+    assert state.args is not None
+    default = Path(state.args.workspace)
+    if workspace:
+        try:
+            return resolve_workspace(workspace, default=default)
+        except ValueError as error:
+            raise HTTPException(400, str(error)) from error
+    if logged:
+        # 日志里记的应该是绝对路径（我们自己写的），但手改过的日志可能有相对路径/`~`——
+        # 统一 resolve 一次再判断，判断与使用落在同一个值上
+        recorded = Path(logged).expanduser().resolve()
+        if not recorded.is_dir():
+            raise HTTPException(
+                409, f'this session\'s workspace is gone: {recorded} — '
+                     'restore it, or delete the session and start a new conversation')
+        return recorded
+    return resolve_workspace(None, default=default)
+
+
+def open_session(sid: str, *, allow_missing: bool,
+                 workspace: str | Path | None = None) -> dict:
     """打开/切换到会话：Seat get-or-create + 设置焦点别名，返回该会话的完整投影。"""
-    seat = open_session_seat(sid, allow_missing=allow_missing)
+    seat = open_session_seat(sid, allow_missing=allow_missing, workspace=workspace)
     state.session = seat.session
     state.agent = seat.agent
     state.current_sid = sid
     return {
         'id': sid,
+        'workspace': str(seat.args.workspace),     # 本会话的工作区（顶栏/相对路径显示用）
         'history': history_payloads(seat.session),
         'todos': fold_todos(seat.session) or [],   # 当前 todo 投影：切换会话时恢复 dock
         'queue': queue_rows(seat.agent),           # 待处理队列投影：切换会话时恢复队列区
@@ -135,18 +200,25 @@ def validate_sid(sid: str) -> None:
 
 
 def scan_sessions() -> list[dict]:
-    """扫描会话目录：id / 事件数 / 更新时间 / 标题 / 首条用户消息摘要。
+    """扫描会话目录：id / 事件数 / 更新时间 / 标题 / 首条用户消息摘要 / 工作区。
 
     磁盘行内快扫（不整包解析）：标题 = 最后一条 session/title 事件的 title
     （user 手动 > auto 自动，按追加顺序后者覆盖）；无标题事件时列表显示
     首条 user/message 摘要作为 fallback（对齐 harness 的三级来源）。
+    工作区同理取最后一条 `session/workspace`（后写覆盖前写）；没有就报宿主默认——
+    列表里因此永远显示"这个对话实际上会用哪个目录"，不会有一栏空着。
     """
+    # 没记录工作区的旧会话显示**宿主默认的绝对路径**（`--workspace .` 要解析成实际目录：
+    # 前端拿它做相对路径显示的前缀，给个 "." 会对不上任何消息里的绝对路径）
+    default_workspace = (str(Path(state.args.workspace).expanduser().resolve())
+                         if state.args is not None else '')
     items: list[dict] = []
     for path in sorted((state.sessions_dir or Path('.sessions')).glob('*.jsonl')):
         events = 0
         summary = ''
         title = ''
         title_source = ''
+        workspace = ''
         with path.open(encoding='utf-8') as fh:
             for line in fh:
                 events += 1
@@ -168,6 +240,13 @@ def scan_sessions() -> list[dict]:
                         title_source = data.get('source', '')
                     except (TypeError, ValueError, KeyError):
                         pass
+                # 最后一条 session/workspace 事件即当前工作区（同上）
+                if '"type": "session/workspace"' in line:
+                    try:
+                        data = (json.loads(line).get('data') or {}).get('$dict') or {}
+                        workspace = data.get('workspace', '')
+                    except (TypeError, ValueError, KeyError):
+                        pass
         items.append({
             'id': path.stem,
             'events': events,
@@ -175,6 +254,7 @@ def scan_sessions() -> list[dict]:
             'title': title or None,
             'title_source': title_source or None,
             'summary': title or summary or '(empty)',  # 标题优先，摘要兜底
+            'workspace': workspace or default_workspace,  # 没记录过 = 跟随宿主默认
         })
     items.sort(key=lambda item: item['updated'], reverse=True)
     return items

@@ -26,6 +26,11 @@ class Seat:
     """一个打开过的会话的运行时资源（**并发隔离的边界**）。"""
     sid: str
     session: Session
+    # 该会话自己的装配参数（**与宿主参数只有一处不同：workspace**）。工作区可以按对话
+    # 指定，而工具沙箱、指令文件探测、技能表、`{{workspace}}` 叙事全都是 build_agent
+    # 当场从 args.workspace 派生的——所以"每会话一个 args"就够，不必给 Seat 挂一堆
+    # 派生对象。fake/model/compact_at 这些仍是宿主级（一个进程一套模型凭据）。
+    args: argparse.Namespace
     agent: Agent | None = None
     # 该会话当前活跃的 SSE 队列（approval 请求经它推给本会话的浏览器）。
     # 每会话同时最多一条活跃对话流（前端单标签页串行使用）；None = 空闲。
@@ -37,6 +42,8 @@ class Seat:
 @dataclass
 class WebState:
     """宿主级单例：装配参数 + seat 注册表 + 焦点别名。"""
+    # 宿主级装配参数（**模板**）：`--workspace` 是"默认工作区"，每个 Seat 会复制一份
+    # 并把自己的 workspace 换进去（见 Seat.args）。
     args: argparse.Namespace | None = None
     sessions_dir: Path | None = None
     seats: dict[str, Seat] = field(default_factory=dict)
