@@ -7,10 +7,10 @@ from __future__ import annotations
 
 import json
 
-from agent_demo.capability.llm import _to_wire_messages
-from agent_demo.state.recovery import dangling_tool_calls, repair_dangling_tool_calls
-from agent_demo.state.session import Session
-from agent_demo.values.messages import (
+from my_coder.capability.llm import _to_wire_messages
+from my_coder.state.recovery import dangling_tool_calls, repair_dangling_tool_calls
+from my_coder.state.session import Session
+from my_coder.values.messages import (
     TextBlock,
     ToolCallBlock,
     ToolResultBlock,
@@ -18,7 +18,7 @@ from agent_demo.values.messages import (
     create_tool_result_message,
     create_user_message,
 )
-from agent_demo.values.persistence import load_events, save_event
+from my_coder.values.persistence import load_events, save_event
 
 # ---------------------------------------------------------------------------
 # 崩溃自愈：进程被 kill / 断电留下的"悬空工具调用"（恢复时补记，见 recovery.py）
@@ -137,7 +137,7 @@ def test_web_opening_a_crash_damaged_session_repairs_it(tmp_path):
     """入口级验证：打开会话（/sessions/<id>/switch）时自愈，UI 拿到的是失败结果。"""
     from fastapi.testclient import TestClient
 
-    from agent_demo import web
+    from my_coder import web
 
     sessions_dir = tmp_path / 'sess'
     web.init_web(tmp_path, fake=True, sessions_dir=sessions_dir)

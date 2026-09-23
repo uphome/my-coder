@@ -7,15 +7,15 @@ Python 复刻 deepseek-harness 架构的教学 demo（agent 框架本身，不�
 ```sh
 # 一切 Python 命令必须走 conda 环境 agent-demo（base 里没有 pytest/httpx）
 # 质量门：ruff + mypy + pytest 三绿才可提交（pyproject.toml 已配好）
-conda run -n agent-demo python -m ruff check agent_demo tests
-conda run -n agent-demo python -m mypy agent_demo
+conda run -n agent-demo python -m ruff check my_coder tests
+conda run -n agent-demo python -m mypy my_coder
 conda run -n agent-demo python -m pytest        # 154 个测试（3 条平台相关：Windows 建不了符号链接时 skip）
 
-# CLI（可 pip install -e . 后直接 agent-demo；或模块方式跑）
-conda run --no-capture-output -n agent-demo python -m agent_demo.cli --workspace . --fake "read README.md and summarize"
+# CLI（可 pip install -e . 后直接 my-coder；或模块方式跑）
+conda run --no-capture-output -n agent-demo python -m my_coder.cli --workspace . --fake "read README.md and summarize"
 
 # Web UI（DeepSeek 风格，默认 http://127.0.0.1:8000；--fake 离线演示）
-conda run --no-capture-output -n agent-demo python -m agent_demo.web --workspace . --fake
+conda run --no-capture-output -n agent-demo python -m my_coder.web --workspace . --fake
 ```
 
 注意：Windows 控制台是 GBK，用 `--no-capture-output` 避免 conda run 二次打印乱码；`conda run` 的 `-c` 参数不支持多行/换行脚本，内联 Python 写到临时文件再跑。
@@ -46,7 +46,7 @@ conda run --no-capture-output -n agent-demo python -m agent_demo.web --workspace
 
 规则：**一个模块只能 import 同层或更低层**。常量同理：只在应用/工具层用的放 `app/constants.py`，**一旦有更低层要用就下沉到 `values/limits.py`**（`TOOL_RESULT_MAX_CHARS` 就是这么搬的）。**依赖白名单现在是空的**：两条历史例外都已按"修好即删"清掉（`registry → app.constants` 靠常量下沉、`runtime.loop → tools.todo` 靠注册制贡献者，见 issue #19）；将来再加例外必须带 issue 号，测试盯着不许长僵尸。
 
-技能正文在 `agent_demo/bundled_skills/`（随包发布，`pyproject` 的 package-data）与 `<workspace>/skills/`（项目自带），两边由 `app/skills.py` 按名字合并、`skill` 工具按名字取；工作区指令文件的发现与注入在 `app/instructions.py`（正文直接进 system，见约定）。上层依赖下层，下层不感知上层。
+技能正文在 `my_coder/bundled_skills/`（随包发布，`pyproject` 的 package-data）与 `<workspace>/skills/`（项目自带），两边由 `app/skills.py` 按名字合并、`skill` 工具按名字取；工作区指令文件的发现与注入在 `app/instructions.py`（正文直接进 system，见约定）。上层依赖下层，下层不感知上层。
 
 **日志（`.sessions/<id>.jsonl`）是唯一事实源**：模型记忆（`derive_messages`）、inbox 队列、回合号、模型路由全部是日志的重放投影。恢复 = 重放（`adopt`）+ **自愈**（补上崩溃留下的悬空工具调用，见 `state/recovery.py`），没有独立的对话状态。本仓库已建 CodeGraph 索引（`.codegraph/`），理解/定位代码先 `codegraph_explore`。
 
@@ -221,7 +221,7 @@ conda run --no-capture-output -n agent-demo python -m agent_demo.web --workspace
   - 技能 = `*.md` 文件 + YAML frontmatter（name/description），正文是操作指南
     （纯指令，不携带执行代码）
   - **两个来源，按名字合并（对齐 DSH 的 project / user / bundled 与"同名覆盖"）**：
-    **bundled** 随 agent 发布，放包内 `agent_demo/bundled_skills/*.md`——agent 自带的
+    **bundled** 随 agent 发布，放包内 `my_coder/bundled_skills/*.md`——agent 自带的
     通用能力（如"怎么写 AGENTS.md"）；**workspace** 放 `<workspace>/skills/*.md`——
     项目自己的约定与工作流。同名时 **workspace 覆盖 bundled**；合并后**按名字排序**，
     目录字节可复现。**自带能力必须跟着 agent 走**：放在工作区里等于"换个工作区就
@@ -288,9 +288,9 @@ conda run --no-capture-output -n agent-demo python -m agent_demo.web --workspace
 
 ## 入口与工具
 
-- `agent_demo/cli.py`：CLI 入口；`--fake` 用脚本化假模型离线跑通全流程（不需要 API key）；`--resume` 演示日志重放恢复
-- `agent_demo/web/`：Web 宿主（入口层，FastAPI + SSE，会话管理/标题/approval/工作区）——拆成 `app.py`（路由+装配）/ `state.py`（Seat+宿主状态，Seat 带自己的 `args`）/ `sessions.py`（seat 生命周期 + 每会话工作区）/`titles.py`（自动标题）/ `payload.py`（纯函数投影，不依赖 FastAPI）；`python -m agent_demo.web` 是它的入口，`app/factory.py` 的 `build_agent`/`load_env` 被 CLI 与 Web 共用；Web 的 `--workspace` 是**默认**工作区，每个对话可在界面上另选一个（见约定"每对话一个工作区"）
+- `my_coder/cli.py`：CLI 入口；`--fake` 用脚本化假模型离线跑通全流程（不需要 API key）；`--resume` 演示日志重放恢复
+- `my_coder/web/`：Web 宿主（入口层，FastAPI + SSE，会话管理/标题/approval/工作区）——拆成 `app.py`（路由+装配）/ `state.py`（Seat+宿主状态，Seat 带自己的 `args`）/ `sessions.py`（seat 生命周期 + 每会话工作区）/`titles.py`（自动标题）/ `payload.py`（纯函数投影，不依赖 FastAPI）；`python -m my_coder.web` 是它的入口，`app/factory.py` 的 `build_agent`/`load_env` 被 CLI 与 Web 共用；Web 的 `--workspace` 是**默认**工作区，每个对话可在界面上另选一个（见约定"每对话一个工作区"）
 - `show_memory.py`：教学脚本，重放日志展示"记忆 = 日志投影"
-- 工具在 `agent_demo/tools/`：`build_tools(workspace, skills=…)` 组装（read_file 行号分页 / list_files / grep / glob / edit / write_file / bash / todo_write / web_search / **skill**（按名字取技能正文）），工具类型（`ToolSpec`：schema + executor + 并发模式 + 卸载声明 + 超时 + requires_approval）在 `state/registry.py`；`--workspace` 在 CLI 是**必填的路径边界**、在 Web 是**默认工作区**（每个对话可另选，见约定"每对话一个工作区"），边界实现同在 `app/sandbox.py`；bash/write_file/edit 执行前需人工确认；阶段一实施进度见 `NEXT_STEPS.md`
+- 工具在 `my_coder/tools/`：`build_tools(workspace, skills=…)` 组装（read_file 行号分页 / list_files / grep / glob / edit / write_file / bash / todo_write / web_search / **skill**（按名字取技能正文）），工具类型（`ToolSpec`：schema + executor + 并发模式 + 卸载声明 + 超时 + requires_approval）在 `state/registry.py`；`--workspace` 在 CLI 是**必填的路径边界**、在 Web 是**默认工作区**（每个对话可另选，见约定"每对话一个工作区"），边界实现同在 `app/sandbox.py`；bash/write_file/edit 执行前需人工确认；阶段一实施进度见 `NEXT_STEPS.md`
 - `web_search` 与 `skill` 是两个"读工作区之外"的工具：前者的**搜索能力由 DeepSeek 官方在服务端提供**（Anthropic 兼容 `.../anthropic/v1/messages` + 原生服务端工具 `web_search_20250305`），我们只做"发请求 + 解析结构化块"——绝不自己抓网页、绝不从模型正文里抠 URL；没有结果块要**响亮报错**而不是退化成"没找到"；后者按**名字**（不是路径）取包内/bundled 技能正文，模型没有机会拼出任意路径。两个都不读工作区文件、无副作用，所以**不走 workspace 沙箱、也不需要 approval**（web_search 与 DSH 一致，见 `agent.md` §6）
 - `.env` 存 `DEEPSEEK_API_KEY`/`DEEPSEEK_BASE_URL`；`.sessions/`、`.codegraph/`、`.env` 均不入库

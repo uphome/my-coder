@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from agent_demo.values.persistence import load_events
+from my_coder.values.persistence import load_events
 
 
 def test_cli_repl_runs_multiple_turns(tmp_path):
@@ -22,11 +22,11 @@ def test_cli_repl_runs_multiple_turns(tmp_path):
     sessions_dir = tmp_path / 'sess'
     sessions_dir.mkdir(exist_ok=True)
     proc = subprocess.Popen(
-        [sys.executable, '-m', 'agent_demo.cli', '--fake',
+        [sys.executable, '-m', 'my_coder.cli', '--fake',
          '--workspace', str(tmp_path), '--session', 'repl-test',
          '--sessions', str(sessions_dir)],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        cwd=Path(__file__).resolve().parent.parent,  # 仓库根（agent_demo 可导入）
+        cwd=Path(__file__).resolve().parent.parent,  # 仓库根（my_coder 可导入）
     )
     out, err = proc.communicate(
         input='第一轮：读 README\n第二轮：列文件\n/exit\n'.encode(),

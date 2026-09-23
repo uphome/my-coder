@@ -496,7 +496,7 @@ closeAssistantNode 清零 `_errCount` 把错误工具红标抹掉 → 删除清�
 
 ## 架构重构（求职作品级，✅ 已完成 2026-09）
 
-> **这是第一次重构的记录：把根目录的 `main.py` 拆成 `agent_demo/` 包**（当时模块仍平铺
+> **这是第一次重构的记录：把根目录的 `main.py` 拆成 `my_coder/` 包**（当时模块仍平铺
 > 在一层）。下面那棵树描述的是**当时**的形状，2026-09 的第二次重构（分层目录化，见下一节）
 > 已经取代它——要查当前结构请看 `AGENTS.md` 的包结构段。
 
@@ -509,7 +509,7 @@ closeAssistantNode 清零 `_errCount` 把错误工具红标抹掉 → 删除清�
 **执行结果**：
 
 ```text
-agent_demo/               包结构（取代平铺）
+my_coder/               包结构（取代平铺）
 ├── cli.py                入口：argparse + run（原 main.py 瘦身 ~80 行）
 ├── web_app.py            Web UI（从根迁入，import 改包内）
 ├── factory.py            build_agent / load_env（CLI 与 Web 共用）
@@ -533,7 +533,7 @@ pyproject.toml            打包 + ruff / mypy / pytest 配置 + console scripts
 ```
 
 - 步骤 1 模块化 ✅（38 测试全绿，git 全程识别 rename 保留历史）
-- 步骤 2 打包 ✅（`pip install -e .`，`agent-demo` / `agent-demo-web` 命令）
+- 步骤 2 打包 ✅（`pip install -e .`，`MyCoder` / `my-coder-web` 命令）
 - 步骤 3 工程化 ✅（ruff 清零 / mypy 清零；质量门三绿才提交。**CI 已按上面的理由移除**）
 - 步骤 4 功能：上下文压缩全套 + Web ContextMeter + Web 会话并发隔离 +
   steer 插队 + CLI REPL（已完成，见下节）；阶段四工程化打磨（配置/日志
@@ -554,7 +554,7 @@ web_search、web、cli），**只搬家不改断言**，用例总数不变。起
 **做法**：按四层目录化，并把"依赖方向"从文档约定变成可执行断言。
 
 ```text
-agent_demo/
+my_coder/
 ├── values/        层1 值：messages.py（消息/事件词汇表）+ persistence.py
 ├── capability/    层2 能力：llm.py / hooks.py
 ├── state/         层3 状态：session / inbox / prompt / registry / recovery
@@ -575,7 +575,7 @@ agent_demo/
 
 1. **相对 import 的点数要按"文件的新位置"算**：源文件自己搬进子包时，即使目标模块没搬，
    `from .tools.todo` 也必须变成 `from ..tools.todo`（第 3 步第一版漏了这条，测试直接
-   报 `No module named 'agent_demo.runtime.tools'`）；
+   报 `No module named 'my_coder.runtime.tools'`）；
 2. **函数体内的局部 import 要保留缩进**：替换文本顶到行首会把 `if` 块掏空（语法错误）；
 3. **`Path(__file__).parent` 类路径会随层数变化**：`app/skills.py` 找包内 `bundled_skills/`
    要用 `parents[1]`——写错时表现是"技能表静默变空"（7 条测试红，不是崩溃）。

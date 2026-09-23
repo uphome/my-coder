@@ -9,13 +9,13 @@ from pathlib import Path
 
 import pytest
 
-from agent_demo.app.instructions import (
+from my_coder.app.instructions import (
     INSTRUCTION_MAX_FILE_CHARS,
     INSTRUCTION_MAX_SOURCE_BYTES,
     InstructionLoader,
 )
-from agent_demo.capability.llm import FakeLlm
-from agent_demo.state.session import Session
+from my_coder.capability.llm import FakeLlm
+from my_coder.state.session import Session
 
 # ---------------------------------------------------------------------------
 # 工作区项目指令文件（AGENTS.md / CLAUDE.md）：发现 + 预算 + live 注入（issue #6）
@@ -304,7 +304,7 @@ def test_instructions_report_a_real_broken_symlink_as_unreadable(tmp_path):
 
 def test_instruction_budget_can_hold_every_candidate():
     """预算自洽：单文件上限 × 候选数 必须塞进总预算，否则多出来的会被静默丢掉。"""
-    from agent_demo.app.instructions import (
+    from my_coder.app.instructions import (
         INSTRUCTION_FILE_CANDIDATES,
         INSTRUCTION_MAX_TOTAL_CHARS,
     )
@@ -344,7 +344,7 @@ def test_nested_instruction_list_refreshes_per_turn(tmp_path, monkeypatch):
     根目录正文是每请求新鲜的（上面那条测过），清单不是——它要一次 `os.walk`，
     比 stat 贵三个数量级，所以拿回合号当刷新纪元。
     """
-    from agent_demo.app import instructions as instructions_module
+    from my_coder.app import instructions as instructions_module
 
     scans: list[Path] = []
     original = instructions_module.scan_nested_instruction_files
@@ -379,7 +379,7 @@ async def test_build_agent_injects_workspace_instructions_before_tool_sections(t
     """factory 级全链路：通用规则（discipline）在前，注入的正文在后，工具段最后。"""
     from argparse import Namespace
 
-    from agent_demo.app import factory
+    from my_coder.app import factory
 
     (tmp_path / 'AGENTS.md').write_text('# 项目约定\n\nRUN: pytest -q\n', encoding='utf-8')
     args = Namespace(fake=True, model='fake-model', workspace=tmp_path, hide_reasoning=False,
@@ -403,7 +403,7 @@ async def test_instruction_section_follows_the_agent_turn_number(tmp_path):
     """
     from argparse import Namespace
 
-    from agent_demo.app.factory import build_agent
+    from my_coder.app.factory import build_agent
 
     args = Namespace(fake=True, model='fake-model', workspace=tmp_path, hide_reasoning=False,
                      session='id', sessions=str(tmp_path), prompt='x', resume=False, verbose=False)

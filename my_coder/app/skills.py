@@ -5,7 +5,7 @@
 
 **两个来源，按名字合并（对齐 DSH 的 project / user / bundled 分层与同名覆盖）**：
 
-- **bundled**：随 agent 发布，包内 `agent_demo/bundled_skills/*.md`——agent 自带的
+- **bundled**：随 agent 发布，包内 `my_coder/bundled_skills/*.md`——agent 自带的
   通用能力（如"怎么写 AGENTS.md"）。它必须跟着 **agent** 走，而不是跟着工作区走：
   换一个工作区就消失的能力不算自带能力。
 - **workspace**：`<workspace>/skills/*.md`——项目自己的约定与工作流（如本仓库的
@@ -53,10 +53,10 @@ from .sandbox import workspace_escape_reason
 # 技能名只允许小写字母/数字/连字符（对齐 Agent Skills 约定的名字规则）。
 _NAME = re.compile(r'^[a-z0-9]+(?:-[a-z0-9]+)*$')
 
-# 包内自带技能目录（`agent_demo/bundled_skills/`，与代码包同级；`pyproject` 的
+# 包内自带技能目录（`my_coder/bundled_skills/`，与代码包同级；`pyproject` 的
 # package-data 也按这个位置声明）。**故意不叫 `skills/`**：那会和同名的 `skills.py`
 # 模块撞名，Python 虽然仍能解析到模块（源码加载器优先于命名空间包），但读者和打包工具会被绕。
-# 注意层级：本模块在 `agent_demo/app/`，包根是 `parents[1]`——**分层重构时这里最容易算错**
+# 注意层级：本模块在 `my_coder/app/`，包根是 `parents[1]`——**分层重构时这里最容易算错**
 # （拆包当天的实测：写成 `.parent` 会让技能表静默变成空表，7 条测试红）。
 BUNDLED_SKILLS_DIR = Path(__file__).resolve().parents[1] / 'bundled_skills'
 

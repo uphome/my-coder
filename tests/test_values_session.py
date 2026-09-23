@@ -8,9 +8,9 @@ from __future__ import annotations
 import pytest
 from conftest import make_agent
 
-from agent_demo.state.session import Session
-from agent_demo.values.messages import TextBlock, create_assistant_message, create_user_message
-from agent_demo.values.persistence import load_events, save_event
+from my_coder.state.session import Session
+from my_coder.values.messages import TextBlock, create_assistant_message, create_user_message
+from my_coder.values.persistence import load_events, save_event
 
 
 def test_session_derive_only_surface_projects():
@@ -68,8 +68,8 @@ async def test_resume_restores_inbox_and_last_turn(tmp_path):
 
 def test_surface_replace_shadows_and_derives_in_place():
     """surface replace：遮蔽旧区间 + checkpoint 原位顶替 + 日志完整 + 重放一致。"""
-    from agent_demo.state.session import Session
-    from agent_demo.values.messages import TextBlock, create_assistant_message, create_user_message
+    from my_coder.state.session import Session
+    from my_coder.values.messages import TextBlock, create_assistant_message, create_user_message
 
     def user(text):
         return create_user_message([TextBlock(text=text)])
@@ -112,9 +112,9 @@ def test_surface_replace_shadows_and_derives_in_place():
 
 def test_surface_replace_replays_identically(tmp_path):
     """resume：replace 遮蔽随日志重放重建，投影与压前一致。"""
-    from agent_demo.state.session import Session
-    from agent_demo.values.messages import TextBlock, create_user_message
-    from agent_demo.values.persistence import load_events, save_event
+    from my_coder.state.session import Session
+    from my_coder.values.messages import TextBlock, create_user_message
+    from my_coder.values.persistence import load_events, save_event
 
     s = Session(id='r')
     s.append('user/message', create_user_message([TextBlock(text='hi')]), surface_op='append')
@@ -137,8 +137,8 @@ def test_surface_replace_replays_identically(tmp_path):
 
 def test_surface_replace_positional_not_numeric():
     """多次 replace 用位置语义：数值范围会误吞，位置定位才正确（防 surface 乱）。"""
-    from agent_demo.state.session import Session
-    from agent_demo.values.messages import TextBlock, create_assistant_message, create_user_message
+    from my_coder.state.session import Session
+    from my_coder.values.messages import TextBlock, create_assistant_message, create_user_message
 
     def user(text):
         return create_user_message([TextBlock(text=text)])
@@ -176,9 +176,9 @@ def test_surface_replace_positional_not_numeric():
 
 def test_surface_replace_positional_replays(tmp_path):
     """嵌套 replace 的重放一致性：adopt 重建出相同 surface 与派生消息。"""
-    from agent_demo.state.session import Session
-    from agent_demo.values.messages import TextBlock, create_assistant_message, create_user_message
-    from agent_demo.values.persistence import load_events, save_event
+    from my_coder.state.session import Session
+    from my_coder.values.messages import TextBlock, create_assistant_message, create_user_message
+    from my_coder.values.persistence import load_events, save_event
 
     def user(text):
         return create_user_message([TextBlock(text=text)])

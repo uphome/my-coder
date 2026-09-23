@@ -6,5 +6,5 @@
 - `loop.py`  —— 一个 turn = turn/start → [claim inbox + 一次模型请求 + 执行本步工具调用] 循环 → turn/end。
   step 粒度是**一次模型请求**（不是整段工具循环），插队消息才能在每个请求前被 claim。
 
-这一层不知道 CLI/Web 的存在（宿主在上层，见 `agent_demo/cli.py` 与 `agent_demo/web/`）。
+这一层不知道 CLI/Web 的存在（宿主在上层，见 `my_coder/cli.py` 与 `my_coder/web/`）。
 """

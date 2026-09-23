@@ -1,6 +1,6 @@
 """状态层（层 3）：日志及其各种投影——会话、队列、提示词注册表、工具注册表、自愈。
 
-允许 import：`agent_demo.values`、`agent_demo.capability`。**不感知循环与宿主**：
+允许 import：`my_coder.values`、`my_coder.capability`。**不感知循环与宿主**：
 这一层是"被动的状态持有者"，谁来推它（loop / cli / web）它不知道。
 
 一条贯穿全层的规矩：**日志是唯一事实源**（`session.py`），其它模块的状态都是从日志

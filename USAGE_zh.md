@@ -1,9 +1,9 @@
-# agent-demo 使用指南
+# MyCoder 使用指南
 
 > 面向**想立刻把 agent 跑起来**的你。这份文档只讲「怎么用」，不讲内部架构
 > （那个看 `README.md` / `ARCHITECTURE.md`）。
 
-agent-demo 有两种跑法，其余操作完全一样：
+MyCoder 有两种跑法，其余操作完全一样：
 
 - **离线演示**：`--fake` 用脚本化的假 LLM —— 不联网、不需要 API key，走一遍完整
   循环（读文件 → 调工具 → 回答），适合初次体验。
@@ -24,18 +24,18 @@ agent-demo 有两种跑法，其余操作完全一样：
 # ① 环境（一次就够，Miniforge）
 conda create -n agent-demo python=3.13 pytest pytest-asyncio httpx -y
 conda activate agent-demo
-pip install -e ".[dev]"    # httpx / fastapi / uvicorn + 可执行命令 agent-demo / agent-demo-web
+pip install -e ".[dev]"    # httpx / fastapi / uvicorn + 可执行命令 my-coder / my-coder-web
 
 # ② 离线体验（不联网，30 秒跑通工具循环）
 conda run --no-capture-output -n agent-demo \
-  python -m agent_demo.cli --fake --workspace . "read README.md and summarize"
+  python -m my_coder.cli --fake --workspace . "read README.md and summarize"
 
 # ③ 真实任务（先 export DEEPSEEK_API_KEY=sk-...，见第 3 章）
 conda run --no-capture-output -n agent-demo \
-  python -m agent_demo.cli --workspace . "调查这个仓库是干什么的"
+  python -m my_coder.cli --workspace . "调查这个仓库是干什么的"
 ```
 
-- 想用浏览器：把 `agent_demo.cli` 换成 `agent_demo.web`（第 7 章）。
+- 想用浏览器：把 `my_coder.cli` 换成 `my_coder.web`（第 7 章）。
 - 感觉 agent 动作危险 → 因为它要你先批 `edit`/`bash`（第 6 章）。
 
 ---
@@ -45,7 +45,7 @@ conda run --no-capture-output -n agent-demo \
 1. [准备环境](#1-准备环境)
 2. [最快跑通（离线）](#2-最快跑通离线-30-秒)
 3. [接真实模型（DeepSeek）](#3-接真实模型deepseek)
-4. [参数速查](#4-参数速查-python--m-agent_democl)
+4. [参数速查](#4-参数速查-python--m-my_codercl)
 5. [会话与恢复](#5-会话与恢复)
 6. [敏感工具与审批](#6-敏感工具与审批approval)
 7. [Web UI](#7-web-ui浏览器里对话)
@@ -60,7 +60,7 @@ conda run --no-capture-output -n agent-demo \
 # 建环境并装依赖（一次就够）
 conda create -n agent-demo python=3.13 pytest pytest-asyncio httpx -y
 conda activate agent-demo
-pip install -e ".[dev]"      # httpx / fastapi / uvicorn / ruff / mypy + agent-demo 命令
+pip install -e ".[dev]"      # httpx / fastapi / uvicorn / ruff / mypy + my-coder 命令
 ```
 
 后续所有命令都在**仓库根目录**执行。
@@ -69,7 +69,7 @@ pip install -e ".[dev]"      # httpx / fastapi / uvicorn / ruff / mypy + agent-d
 
 ```sh
 conda run --no-capture-output -n agent-demo \
-  python -m agent_demo.cli --fake --workspace . "read README.md and summarize"
+  python -m my_coder.cli --fake --workspace . "read README.md and summarize"
 ```
 
 fake 的回答是预置的两句话 —— 重点看**过程**：读取文件 → 返回结果 → 在几步内结束。
@@ -88,7 +88,7 @@ fake 的回答是预置的两句话 —— 重点看**过程**：读取文件 �
 
 ```sh
 conda run --no-capture-output -n agent-demo \
-  python -m agent_demo.cli --fake --workspace . "read agent_demo/tools/__init__.py and list the tools it registers"
+  python -m my_coder.cli --fake --workspace . "read my_coder/tools/__init__.py and list the tools it registers"
 ```
 
 ## 3. 接真实模型（DeepSeek）
@@ -109,19 +109,19 @@ export DEEPSEEK_API_KEY=sk-...              # macOS / Linux
 
 ```sh
 conda run --no-capture-output -n agent-demo \
-  python -m agent_demo.cli --workspace . "调查这个仓库：它是干什么的？测试怎么跑？"
+  python -m my_coder.cli --workspace . "调查这个仓库：它是干什么的？测试怎么跑？"
 ```
 
 它会真实地搜索、读文件再总结。默认模型 `deepseek-v4-flash`；换模型：
 
 ```sh
-python -m agent_demo.cli --workspace . --model deepseek-chat "你的任务"
+python -m my_coder.cli --workspace . --model deepseek-chat "你的任务"
 ```
 
 > 思考过程在真实模式下也有（模型支持时），默认以 `[思考]` 显示；
 > 想折叠可用 `--hide-reasoning`（照常写进日志，只是屏幕不显示）。
 
-## 4. 参数速查（`python -m agent_demo.cli`）
+## 4. 参数速查（`python -m my_coder.cli`）
 
 | 参数 | 说明 | 必填 |
 |---|---|---|
@@ -143,7 +143,7 @@ python -m agent_demo.cli --workspace . --model deepseek-chat "你的任务"
 
 ```sh
 conda run --no-capture-output -n agent-demo \
-  python -m agent_demo.cli --fake --workspace .          # 离线 REPL
+  python -m my_coder.cli --fake --workspace .          # 离线 REPL
 
 # REPL 内：输入任务回车 → 回合跑完回提示符；/exit 退出；/compact 手动压缩
 # 想运行中打断/插队：用 Web UI（发送按钮旁输入会插队当前回合，见第 7 章）
@@ -157,11 +157,11 @@ agent 的“记忆”就是一份日志：每次对话都**追加**写进 `.sess
 ```sh
 # 延续刚才的会话（默认 id main）——命令带 --resume：
 conda run --no-capture-output -n agent-demo \
-  python -m agent_demo.cli --workspace . --resume "上一步看到哪些文件？"
+  python -m my_coder.cli --workspace . --resume "上一步看到哪些文件？"
 
 # 另开互不干扰的新会话：
 conda run --no-capture-output -n agent-demo \
-  python -m agent_demo.cli --workspace . --session mytask "读 README.md 再总结"
+  python -m my_coder.cli --workspace . --session mytask "读 README.md 再总结"
 ```
 
 启动时终端会把历史**重放一遍**再接着跑——你打开的就是「日志的可视化」。
@@ -194,8 +194,8 @@ conda run --no-capture-output -n agent-demo \
 
 ```sh
 conda run --no-capture-output -n agent-demo \
-  python -m agent_demo.web --workspace . --fake          # 离线演示
-# python -m agent_demo.web --workspace .                # 真实模型
+  python -m my_coder.web --workspace . --fake          # 离线演示
+# python -m my_coder.web --workspace .                # 真实模型
 ```
 
 打开 <http://127.0.0.1:8000>：

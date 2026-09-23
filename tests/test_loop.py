@@ -12,15 +12,15 @@ import time
 import pytest
 from conftest import make_agent
 
-from agent_demo.capability.hooks import Hooks, PreStepContext, RequestErrorContext
-from agent_demo.capability.llm import FakeLlm, StreamChunk
-from agent_demo.runtime import loop as loop_module
-from agent_demo.runtime.agent import Agent
-from agent_demo.state.prompt import PromptRegistry
-from agent_demo.state.registry import ToolRegistry, ToolSpec
-from agent_demo.state.runtime_status import RuntimeStatusRegistry
-from agent_demo.state.session import Session
-from agent_demo.values.messages import (
+from my_coder.capability.hooks import Hooks, PreStepContext, RequestErrorContext
+from my_coder.capability.llm import FakeLlm, StreamChunk
+from my_coder.runtime import loop as loop_module
+from my_coder.runtime.agent import Agent
+from my_coder.state.prompt import PromptRegistry
+from my_coder.state.registry import ToolRegistry, ToolSpec
+from my_coder.state.runtime_status import RuntimeStatusRegistry
+from my_coder.state.session import Session
+from my_coder.values.messages import (
     TextBlock,
     ToolCallBlock,
     ToolOutcome,
@@ -427,10 +427,10 @@ async def test_steer_inserts_and_runs_as_next_turn():
     绝不会丢——when_idle 收敛后 inbox.has_pending 为假、两条用户消息都
     进了模型记忆。
     """
-    from agent_demo.runtime.agent import Agent
-    from agent_demo.state.prompt import PromptRegistry
-    from agent_demo.state.registry import ToolRegistry
-    from agent_demo.state.session import Session
+    from my_coder.runtime.agent import Agent
+    from my_coder.state.prompt import PromptRegistry
+    from my_coder.state.registry import ToolRegistry
+    from my_coder.state.session import Session
 
     session = Session(id='s')
     agent = Agent(
@@ -458,11 +458,11 @@ async def test_steer_while_running_becomes_next_step_of_same_turn():
     - 出现 ≥2 次 step/start（steer 消息作为本回合的下一步被处理）
     - 插队文本在模型可见记忆里
     """
-    from agent_demo.capability.llm import StreamChunk
-    from agent_demo.runtime.agent import Agent
-    from agent_demo.state.prompt import PromptRegistry
-    from agent_demo.state.registry import ToolRegistry
-    from agent_demo.state.session import Session
+    from my_coder.capability.llm import StreamChunk
+    from my_coder.runtime.agent import Agent
+    from my_coder.state.prompt import PromptRegistry
+    from my_coder.state.registry import ToolRegistry
+    from my_coder.state.session import Session
 
     class HoldingLlm:
         """第一步：stream 挂起（等 steer 入队窗口）再 yield 文本。
@@ -517,7 +517,7 @@ async def test_steer_absorbed_at_next_request_inside_tool_loop():
     - 第 2 次请求（工具循环仍在继续）的 messages 里**已经有**它
     - 日志里 step 数与请求数一一对应
     """
-    from agent_demo.capability.llm import ToolCallDelta
+    from my_coder.capability.llm import ToolCallDelta
 
     calls = []
 
@@ -661,7 +661,7 @@ async def test_runtime_status_contributor_failure_does_not_kill_the_turn(caplog)
     """
     import logging
 
-    from agent_demo.state.runtime_status import RuntimeStatusRegistry as _Registry
+    from my_coder.state.runtime_status import RuntimeStatusRegistry as _Registry
 
     agent, llm = _record_agent('rs-broken')
 

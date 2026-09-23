@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import pytest
 
-from agent_demo.state.prompt import PromptRegistry
-from agent_demo.state.session import Session
+from my_coder.state.prompt import PromptRegistry
+from my_coder.state.session import Session
 
 
 def test_interpolation_strict():
@@ -47,8 +47,8 @@ async def test_identity_prompt_is_neutral(tmp_path):
     """
     from argparse import Namespace
 
-    from agent_demo.app import factory
-    from agent_demo.state.session import Session
+    from my_coder.app import factory
+    from my_coder.state.session import Session
 
     args = Namespace(fake=True, model='fake-model', workspace=tmp_path, hide_reasoning=False,
                      session='id', sessions=str(tmp_path), prompt='x', resume=False, verbose=False)
@@ -79,7 +79,7 @@ async def test_system_prompt_carries_general_discipline(tmp_path):
     """
     from argparse import Namespace
 
-    from agent_demo.app import factory
+    from my_coder.app import factory
 
     args = Namespace(fake=True, model='fake-model', workspace=tmp_path, hide_reasoning=False,
                      session='id', sessions=str(tmp_path), prompt='x', resume=False, verbose=False)

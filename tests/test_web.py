@@ -11,23 +11,23 @@ import json
 import httpx
 import pytest
 
-from agent_demo.app.constants import MODEL_CONTEXT_WINDOW
-from agent_demo.capability.llm import StreamChunk
-from agent_demo.state.session import Session
-from agent_demo.values.messages import (
+from my_coder.app.constants import MODEL_CONTEXT_WINDOW
+from my_coder.capability.llm import StreamChunk
+from my_coder.state.session import Session
+from my_coder.values.messages import (
     TextBlock,
     ToolCallBlock,
     create_assistant_message,
     create_tool_result_message,
     create_user_message,
 )
-from agent_demo.values.persistence import load_events, save_event
+from my_coder.values.persistence import load_events, save_event
 
 
 def test_web_chat_streams_events(tmp_path):
     from fastapi.testclient import TestClient
 
-    from agent_demo import web
+    from my_coder import web
 
     # SSE 流全链路（--fake 离线验证；sessions_dir 隔离，不污染真实会话）
     web.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
@@ -74,7 +74,7 @@ def test_history_projects_reasoning_per_request(tmp_path):
     """
     from fastapi.testclient import TestClient
 
-    from agent_demo import web
+    from my_coder import web
 
     web.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
     client = TestClient(web.app)
@@ -120,7 +120,7 @@ def test_history_projects_reasoning_per_request(tmp_path):
 def test_web_session_management(tmp_path):
     from fastapi.testclient import TestClient
 
-    from agent_demo import web
+    from my_coder import web
 
     web.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
     client = TestClient(web.app)
@@ -167,7 +167,7 @@ def test_web_session_title_endpoint(tmp_path):
     """手动改名：append session/title（user）→ 列表 summary 以标题优先，重放可恢复。"""
     from fastapi.testclient import TestClient
 
-    from agent_demo import web
+    from my_coder import web
 
     web.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
     client = TestClient(web.app)
@@ -200,7 +200,7 @@ def test_web_session_title_endpoint(tmp_path):
 
 def test_auto_title_trigger_conditions(tmp_path):
     """自动起名只在 真模型 + 无标题 + 首条消息 时触发（fake 一律跳过）。"""
-    from agent_demo import web
+    from my_coder import web
 
     web.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
     s = Session(id='x')
@@ -228,8 +228,8 @@ def test_auto_title_trigger_conditions(tmp_path):
 
 def test_session_title_event_is_trace_not_surface(tmp_path):
     """session/title 是痕迹事件：不进模型记忆（derive_messages），但重放保留。"""
-    from agent_demo import web
-    from agent_demo.state.session import Session
+    from my_coder import web
+    from my_coder.state.session import Session
 
     web.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
     s = Session(id='t')
@@ -251,7 +251,7 @@ def test_session_title_event_is_trace_not_surface(tmp_path):
 
 def test_auto_title_rejects_verbatim_copy():
     """自动起名逐字复读首条消息 → 判定为失败（不落 auto 事件，退回 fallback）。"""
-    from agent_demo import web
+    from my_coder import web
     assert web.titles.is_verbatim_copy('你好', '你好') is True
     assert web.titles.is_verbatim_copy('总结README', '请帮我总结README') is True   # 子串
     assert web.titles.is_verbatim_copy('代码审查', '请帮我审查这段代码') is False  # 概括 ≠ 复读
@@ -262,7 +262,7 @@ def test_web_todo_dock_payloads(tmp_path):
     """todo dock 的数据通道：SSE 帧 todo_update + /history 附带 todos + 会话切换恢复。"""
     from fastapi.testclient import TestClient
 
-    from agent_demo import web
+    from my_coder import web
 
     web.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
     client = TestClient(web.app)
@@ -291,8 +291,8 @@ def test_web_checkpoint_role_and_context_payload(tmp_path):
     """checkpoint 消息标记 role=checkpoint；history/会话响应带 context。"""
     from fastapi.testclient import TestClient
 
-    from agent_demo import web
-    from agent_demo.values.messages import TextBlock, create_user_message
+    from my_coder import web
+    from my_coder.values.messages import TextBlock, create_user_message
 
     web.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
     client = TestClient(web.app)
@@ -329,8 +329,8 @@ def test_web_context_session_totals_accumulate(tmp_path):
     """真实 usage 多条 → 会话级累计账（消耗 token 求和、缓存命中率 token 加权）。"""
     from fastapi.testclient import TestClient
 
-    from agent_demo import web
-    from agent_demo.values.messages import TextBlock, create_assistant_message, create_user_message
+    from my_coder import web
+    from my_coder.values.messages import TextBlock, create_assistant_message, create_user_message
 
     web.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
     client = TestClient(web.app)
@@ -395,8 +395,8 @@ def test_web_manual_compact_endpoint(tmp_path):
     os.environ['DEEPSEEK_API_KEY'] = 'sk-placeholder'
     from fastapi.testclient import TestClient
 
-    from agent_demo import web
-    from agent_demo.values.messages import TextBlock, create_assistant_message, create_user_message
+    from my_coder import web
+    from my_coder.values.messages import TextBlock, create_assistant_message, create_user_message
 
     # fake 模式：脚本模型不能生成摘要 → 400 拒绝
     web.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
@@ -455,7 +455,7 @@ def test_web_sessions_run_in_parallel_isolated(tmp_path):
     """
     from fastapi.testclient import TestClient
 
-    from agent_demo import web
+    from my_coder import web
 
     web.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
     client = TestClient(web.app)
@@ -504,7 +504,7 @@ def test_web_sessions_run_in_parallel_isolated(tmp_path):
 
 def _id_of(client) -> str:
     """当前焦点会话 id（init 后默认 'web'）。"""
-    from agent_demo import web
+    from my_coder import web
     return web.state.current_sid
 
 
@@ -522,7 +522,7 @@ def test_web_queue_actions_endpoint(tmp_path):
     """
     from fastapi.testclient import TestClient
 
-    from agent_demo import web
+    from my_coder import web
 
     web.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
     client = TestClient(web.app)
@@ -574,7 +574,7 @@ def test_web_queue_rows_serialize_state_projection(tmp_path):
     注意入队走 wakeup=False：这里只测投影，不真跑回合（sync 测试里
     没有事件循环，_wake 会拉不起 driver）。
     """
-    from agent_demo import web
+    from my_coder import web
 
     web.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
     session, agent = web.state.session, web.state.agent
@@ -600,7 +600,7 @@ def test_web_steer_requires_active_stream(tmp_path):
     """POST /steer：无活跃对话流（idle）时 409 拒绝；提示用 /chat 开回合。"""
     from fastapi.testclient import TestClient
 
-    from agent_demo import web
+    from my_coder import web
 
     web.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
     client = TestClient(web.app)
@@ -626,8 +626,8 @@ async def test_web_steer_interrupts_open_sse_stream(tmp_path):
     断言：插队消息在同一回合内被消费（无第二个 turn/start），回答沿原流推送。
     """
 
-    from agent_demo import web
-    from agent_demo.capability.llm import StreamChunk
+    from my_coder import web
+    from my_coder.capability.llm import StreamChunk
 
     class HoldLlm:
         """第一次 stream 挂起（started 置位等 release）；放行后给第一轮回答。
@@ -736,8 +736,8 @@ async def test_web_sse_disconnect_cancels_agent(tmp_path):
     等 agent 收敛 → 断言回合被 abort、agent 回 idle、inbox 被清。
     """
 
-    from agent_demo import web
-    from agent_demo.capability.llm import StreamChunk
+    from my_coder import web
+    from my_coder.capability.llm import StreamChunk
 
     class HoldLlm:
         def __init__(self):
@@ -791,8 +791,8 @@ def test_web_history_marks_same_turn_steer(tmp_path):
     """
     from fastapi.testclient import TestClient
 
-    from agent_demo import web
-    from agent_demo.values.messages import TextBlock, create_assistant_message, create_user_message
+    from my_coder import web
+    from my_coder.values.messages import TextBlock, create_assistant_message, create_user_message
 
     web.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
     client = TestClient(web.app)
@@ -848,7 +848,7 @@ def test_web_per_session_workspace_isolates_the_sandbox(tmp_path):
 
     from fastapi.testclient import TestClient
 
-    from agent_demo import web
+    from my_coder import web
 
     root_a = tmp_path / 'a'
     root_b = tmp_path / 'b'
@@ -896,8 +896,8 @@ def test_web_workspace_is_a_trace_event_and_survives_replay(tmp_path):
 
     from fastapi.testclient import TestClient
 
-    from agent_demo import web
-    from agent_demo.web.sessions import open_session_seat
+    from my_coder import web
+    from my_coder.web.sessions import open_session_seat
 
     root_a = tmp_path / 'a'
     root_b = tmp_path / 'b'
@@ -935,7 +935,7 @@ def test_web_legacy_session_follows_host_default_without_rewriting_log(tmp_path)
 
     from fastapi.testclient import TestClient
 
-    from agent_demo import web
+    from my_coder import web
 
     root_a = tmp_path / 'a'
     root_a.mkdir()
@@ -964,9 +964,9 @@ def test_web_workspace_validation_and_immutability(tmp_path):
     from fastapi import HTTPException
     from fastapi.testclient import TestClient
 
-    from agent_demo import web
-    from agent_demo.web.sessions import WORKSPACE_FIXED_MESSAGE
-    from agent_demo.web.sessions import open_session_seat as _open_seat
+    from my_coder import web
+    from my_coder.web.sessions import WORKSPACE_FIXED_MESSAGE
+    from my_coder.web.sessions import open_session_seat as _open_seat
 
     root_a = tmp_path / 'a'
     root_b = tmp_path / 'b'
@@ -1018,7 +1018,7 @@ def test_web_reopening_a_session_whose_workspace_is_gone_is_loud(tmp_path):
 
     from fastapi.testclient import TestClient
 
-    from agent_demo import web
+    from my_coder import web
 
     root_a = tmp_path / 'a'
     root_b = tmp_path / 'b'
@@ -1043,7 +1043,7 @@ def test_resolve_workspace_policy(tmp_path):
 
     import pytest
 
-    from agent_demo.app.workspace import resolve_workspace
+    from my_coder.app.workspace import resolve_workspace
 
     default = tmp_path / 'default'
     default.mkdir()
@@ -1076,8 +1076,8 @@ def test_web_list_and_seat_agree_on_a_hand_written_workspace(tmp_path, monkeypat
 
     from fastapi.testclient import TestClient
 
-    from agent_demo import web
-    from agent_demo.web.sessions import open_session_seat as _open_seat
+    from my_coder import web
+    from my_coder.web.sessions import open_session_seat as _open_seat
 
     sessions_dir = tmp_path / 'sess'
     sessions_dir.mkdir()
@@ -1111,7 +1111,7 @@ def test_web_blank_recorded_workspace_means_no_record(tmp_path):
 
     from fastapi.testclient import TestClient
 
-    from agent_demo import web
+    from my_coder import web
 
     host = tmp_path / 'host'
     host.mkdir()
@@ -1136,7 +1136,7 @@ def test_web_sessions_report_whether_the_workspace_still_exists(tmp_path):
     """列表带 `workspace_ok`：目录没了要提前标出来（切过去会被 409 拒，不能让用户点了没反应）。"""
     from fastapi.testclient import TestClient
 
-    from agent_demo import web
+    from my_coder import web
 
     host = tmp_path / 'host'
     host.mkdir()
@@ -1165,7 +1165,7 @@ def test_web_new_session_rejects_non_string_workspace(tmp_path):
     """`workspace` 必须是字符串：非字符串直接 400，且**不分配 sid**（不留半个会话）。"""
     from fastapi.testclient import TestClient
 
-    from agent_demo import web
+    from my_coder import web
 
     web.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
     client = TestClient(web.app)
@@ -1184,9 +1184,9 @@ def test_web_fresh_sid_skips_ids_held_by_an_open_seat(tmp_path, monkeypatch):
     "文件被删了但 seat 还开着"时，只看文件的判据会把这个 id 再发一次，而
     `open_session_seat` 命中已有 seat 会**静默复用**它——响应里的工作区与真实座位对不上。
     """
-    from agent_demo import web
-    from agent_demo.web.app import _fresh_sid
-    from agent_demo.web.sessions import open_session_seat as _open_seat
+    from my_coder import web
+    from my_coder.web.app import _fresh_sid
+    from my_coder.web.sessions import open_session_seat as _open_seat
 
     monkeypatch.setattr('time.time', lambda: 1_700_000_000.0)
     sessions_dir = tmp_path / 'sess'
@@ -1207,7 +1207,7 @@ def test_web_new_session_ids_do_not_collide_within_a_second(tmp_path, monkeypatc
     """
     from fastapi.testclient import TestClient
 
-    from agent_demo import web
+    from my_coder import web
 
     monkeypatch.setattr('time.time', lambda: 1_700_000_000.0)
     sessions_dir = tmp_path / 'sess'
