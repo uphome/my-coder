@@ -3,7 +3,7 @@
 四层单向（数字越小越底层）：
 
 ```
-0 值(agent_demo.values) ── 1 能力(capability) ── 2 状态(state) ── 3 框架循环(runtime)
+0 值(my_coder.values) ── 1 能力(capability) ── 2 状态(state) ── 3 框架循环(runtime)
    ── 4 应用与工具(app / tools) ── 5 入口(web / cli)
 ```
 
@@ -21,9 +21,9 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-PACKAGE_ROOT = Path(__file__).resolve().parents[1] / 'agent_demo'
+PACKAGE_ROOT = Path(__file__).resolve().parents[1] / 'my_coder'
 
-# 包名 → 层号（没有列出的包按入口层处理：`agent_demo/__init__.py` 与 `cli.py`）
+# 包名 → 层号（没有列出的包按入口层处理：`my_coder/__init__.py` 与 `cli.py`）
 LAYERS = {
     'values': 0,
     'capability': 1,
@@ -48,14 +48,14 @@ KNOWN_VIOLATIONS: dict[tuple[str, str], str] = {}
 
 
 def module_name(path: Path) -> str:
-    """文件 → 绝对模块名（`agent_demo/state/session.py` → `agent_demo.state.session`）。"""
+    """文件 → 绝对模块名（`my_coder/state/session.py` → `my_coder.state.session`）。"""
     return '.'.join(path.relative_to(PACKAGE_ROOT.parent).with_suffix('').parts)
 
 
 def layer_of(module: str) -> int:
-    """模块 → 层号（`agent_demo` 自己与未知包按入口层算）。"""
+    """模块 → 层号（`my_coder` 自己与未知包按入口层算）。"""
     parts = module.split('.')
-    if parts[0] != 'agent_demo' or len(parts) < 2:
+    if parts[0] != 'my_coder' or len(parts) < 2:
         return ENTRY_LAYER
     return LAYERS.get(parts[1], ENTRY_LAYER)
 
@@ -78,15 +78,15 @@ def import_edges() -> set[tuple[str, str]]:
         for node in ast.walk(ast.parse(path.read_text(encoding='utf-8'))):
             if isinstance(node, ast.ImportFrom):
                 target = unresolved_target(module, node)
-                if target.startswith('agent_demo'):
+                if target.startswith('my_coder'):
                     edges.add((module, target))
-                    for alias in node.names:         # from agent_demo import x → 也是模块依赖
+                    for alias in node.names:         # from my_coder import x → 也是模块依赖
                         sub = f'{target}.{alias.name}'
                         if (PACKAGE_ROOT / Path(*sub.split('.')[1:])).with_suffix('.py').exists():
                             edges.add((module, sub))
             elif isinstance(node, ast.Import):
                 for alias in node.names:
-                    if alias.name.startswith('agent_demo'):
+                    if alias.name.startswith('my_coder'):
                         edges.add((module, alias.name))
     return edges
 
@@ -100,6 +100,14 @@ def violations() -> set[tuple[str, str]]:
 
 
 def test_layers_only_depend_downwards():
+    # 先钉住"扫描面"本身，否则这条断言会**静默通过**：`PACKAGE_ROOT` 指错时 `rglob` 扫不到
+    # 文件 → `violations()` 是空集 → 下面两条断言全绿。实测（把 root 指到不存在的目录）：
+    # `2 passed`——门无声地没了。包改名/搬目录正好会造出这种"root 指错"，所以这一步不能省。
+    scanned = len(list(PACKAGE_ROOT.rglob('*.py'))) if PACKAGE_ROOT.is_dir() else 0
+    assert scanned >= 30, (
+        f'包目录或扫描面不对：{PACKAGE_ROOT}（扫到 {scanned} 个模块）——'
+        '扫不到文件时本文件的两个依赖断言都会静默全绿，所以这里要响亮地炸。'
+    )
     found = violations()
     unexpected = sorted(found - set(KNOWN_VIOLATIONS))
     assert not unexpected, (

@@ -1,10 +1,10 @@
-"""agent_demo：Python 复刻 deepseek-harness 架构的 agent 框架（含应用）。
+"""my_coder：Python 复刻 deepseek-harness 架构的 agent 框架（含应用）。
 
 **目录 = 分层**（2026-09 分层重构后）：依赖方向不再只是文档里的约定，而是包结构 + 一条
 `tests/test_architecture.py` 的断言（下层 import 上层当场红）：
 
 ```
-agent_demo/
+my_coder/
 ├── values/        层 1 值：消息/事件词汇表（values/messages.py）+ JSONL 持久化
 ├── capability/    层 2 能力：LLM 客户端、决策钩子（只依赖 values）
 ├── state/         层 3 状态：日志与它的投影（session / inbox / prompt / registry / recovery）

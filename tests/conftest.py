@@ -5,11 +5,11 @@
 """
 from __future__ import annotations
 
-from agent_demo.capability.llm import FakeLlm
-from agent_demo.runtime.agent import Agent
-from agent_demo.state.prompt import PromptRegistry
-from agent_demo.state.registry import ToolRegistry
-from agent_demo.state.session import Session
+from my_coder.capability.llm import FakeLlm
+from my_coder.runtime.agent import Agent
+from my_coder.state.prompt import PromptRegistry
+from my_coder.state.registry import ToolRegistry
+from my_coder.state.session import Session
 
 
 def make_agent(script, session=None, hooks=None):

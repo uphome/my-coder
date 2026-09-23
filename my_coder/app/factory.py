@@ -53,12 +53,16 @@ def build_agent(session: Session, args, ui_state: dict, hooks=None) -> Agent:
     prompt.section('identity', -100, 'You are {{model}}, a coding agent that helps with programming tasks. Read, search, edit, and run commands in the workspace to help the user — verify claims about runtime behaviour instead of guessing. Never claim to be a different AI model or company than {{model}}; if asked, state the model name exactly as given here.')
     prompt.section('persona', 0, 'You run on the {{model}} model. Your workspace is {{workspace}}; tool paths resolve relative to it, and nothing outside it is readable or writable.\nVerify changes by running code or tests; reading code needs no execution. Keep answers brief.')
     # discipline：**与具体工具无关**的通用行为纪律（order 10 → persona 之后、
-    # 工具段之前）。三条各自的动机（事故与复盘见 AGENTS.md「提示词纪律的归属」）：
+    # 工具段之前）。四条各自的动机（事故与复盘见 AGENTS.md「提示词纪律的归属」）：
     # Scope    —— "看看/评估/解释"类请求默认是只读调查；为"看某东西怎么表现"而制造
     #             真实副作用（联网、昂贵命令、写盘）是把范围搞错了；
     # Economy  —— 先花工作区里已有的答案，不重复调用，外部/昂贵操作先自问是否必要；
     # Evidence —— 静默成功（exit 0 无输出）既不能证明成功也不能证明失败，等于白跑一趟
     #             还占一次人工确认；多行内联脚本的引号/换行在跨 shell 时会被吃掉。
+    #             **收尾也要清干净**：临时脚本/日志/产物留着，用户就得先分辨哪些是
+    #             垃圾才能看 diff（本仓库真被踩过：一次会话留下三个 `_tmp_*` 扫描脚本）；
+    # Instructions —— 工作区里的 AGENTS.md / CLAUDE.md 是长期约定：存在就先读并遵循、
+    #             出现稳定可复用的项目知识时提议写进去、不静默改、不写密钥与临时状态。
     # 只放通用规则：工具专属规则写各自的 tool:* 段，否则换个工具就失效（反之把工具坑
     # 写进通用段，则变成每轮都付的噪声）。
     prompt.section('discipline', 10, (
@@ -72,7 +76,10 @@ def build_agent(session: Session, args, ui_state: dict, hooks=None) -> Agent:
         'Evidence: make every command self-evidencing — it prints what you need or fails '
         'loudly, because silent success proves nothing; put multi-line scripts in a '
         'temporary file and print the result, since inline multi-line quoting breaks '
-        'across shells. '
+        'across shells — then clean up after yourself: delete the scratch you created to '
+        'get the answer (the temporary scripts, their logs and their output), because '
+        'scratch left behind makes the user sort out your mess before they can read the '
+        'real diff; keep the files the user actually asked you to produce. '
         'Instructions: an AGENTS.md / CLAUDE.md in the workspace is a standing rule — read '
         'it before you change anything and follow it; when stable, reusable project '
         'knowledge shows up, propose writing it into that file instead of leaving it in '

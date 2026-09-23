@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>agent-demo</title>
+<title>MyCoder</title>
 <style>
 /* ============ 视觉系统（层 4）：所有颜色/间距/圆角收敛为 token ============ */
 /* 浅色主题（2026-09）：页面底色 = 纯白。深色版只能靠"背景越浅层级越高"区分层次，
@@ -75,7 +75,7 @@ button:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--accent
   cursor: pointer; transition: all .15s ease;
 }
 #new-btn:hover { color: var(--text-1); border-color: var(--accent); background: var(--accent-soft); }
-/* ---- 新建会话时的工作区选择器（每个对话一个工作区，见 agent_demo/app/workspace.py） ---- */
+/* ---- 新建会话时的工作区选择器（每个对话一个工作区，见 my_coder/app/workspace.py） ---- */
 #ws-picker {
   margin: 0 12px 10px; padding: 10px; display: flex; flex-direction: column; gap: 8px;
   border: 1px solid var(--border-strong); border-radius: var(--r-m); background: var(--bg2);
@@ -636,7 +636,7 @@ footer { padding: 10px 22px 18px; background: var(--bg1); border-top: 1px solid 
   </aside>
   <section id="main-col">
     <header>
-      <h1>agent<span class="dot">.</span>demo</h1>
+      <h1>My<span class="dot">.</span>Coder</h1>
       <span id="model-label" title="模型">…</span>
       <span id="ws-label" title="当前对话的工作区"></span>
     </header>
@@ -688,7 +688,7 @@ footer { padding: 10px 22px 18px; background: var(--bg1); border-top: 1px solid 
 <script>
 'use strict';
 /* ============================================================
- * agent-demo Web UI
+ * MyCoder Web UI
  *
  * 渲染哲学（借鉴 deep-chat 的 partialRender，解决"流式不顺滑"）：
  *  - 不整块重渲染 markdown。助手文本按段落边界（\n\n）切分：
@@ -1937,7 +1937,7 @@ function applySession(data) {
 /* ---------- 工作区：每个对话一个，选择发生在"新建会话"时 ---------- */
 /* 服务端把工作区写进会话日志（`session/workspace` 痕迹事件），所以切换会话/刷新页面
    都能从日志读回来；这里只负责"让用户选一个"和"把当前那个显示出来"。 */
-const WS_RECENT_KEY = 'agent-demo.recent-workspaces';
+const WS_RECENT_KEY = 'mycoder.recent-workspaces';
 
 function setWorkspace(path) {
   wsRoot = path || '';

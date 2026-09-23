@@ -10,8 +10,8 @@ import json
 import httpx
 import pytest
 
-from agent_demo.state.registry import ToolRegistry
-from agent_demo.state.session import Session
+from my_coder.state.registry import ToolRegistry
+from my_coder.state.session import Session
 
 # ============================================================
 # web_search —— DeepSeek 官方原生搜索（Anthropic 兼容 Messages 端点）
@@ -49,7 +49,7 @@ _WEB_SEARCH_FIXTURE = {
 
 def _web_search_backend(monkey_env='test-key'):
     """造一个 httpx.MockTransport 后端（喂夹具，记录请求体），不碰网络。"""
-    from agent_demo.tools import web_search as ws
+    from my_coder.tools import web_search as ws
 
     requests: list[dict] = []
 
@@ -72,7 +72,7 @@ def _web_search_backend(monkey_env='test-key'):
 
 def test_web_search_parses_structured_blocks_only():
     """只认结构化块：去重 / 空 url 丢弃 / title 缺失 / page_age=null 都不炸。"""
-    from agent_demo.tools import web_search as ws
+    from my_coder.tools import web_search as ws
 
     outcome = ws.parse_search_response(_WEB_SEARCH_FIXTURE)
     results = list(outcome.results)
@@ -106,7 +106,7 @@ def test_web_search_parses_structured_blocks_only():
 
 def test_web_search_summary_merge_and_truncation():
     """多 query 的摘要分段拼接（>1 条才加 ### 标题）、超长截断、可整体关掉。"""
-    from agent_demo.tools import web_search as ws
+    from my_coder.tools import web_search as ws
 
     def outcome(summary: str, url: str) -> ws.SearchOutcome:
         return ws.SearchOutcome(
@@ -148,7 +148,7 @@ def test_web_search_citation_snippet_when_present():
     注意：这是**防御性**覆盖——DeepSeek 实测从不返回 citations（探针两次确认，
     连 system 里明确要求标注来源也没有），但协议支持，所以解析层照 DSH 实现。
     """
-    from agent_demo.tools import web_search as ws
+    from my_coder.tools import web_search as ws
 
     payload = {
         'content': [
@@ -170,7 +170,7 @@ def test_web_search_citation_snippet_when_present():
 
 def test_web_search_no_result_block_is_error_not_empty():
     """没触发原生搜索 → 响亮失败（WEB_PROVIDER_ERROR），不退化成"没找到"。"""
-    from agent_demo.tools import web_search as ws
+    from my_coder.tools import web_search as ws
 
     for payload in (
         {'content': [{'type': 'text', 'text': '我直接回答了，没搜索'}]},
@@ -186,7 +186,7 @@ def test_web_search_no_result_block_is_error_not_empty():
 @pytest.mark.asyncio
 async def test_web_search_backend_request_shape_and_failures(monkeypatch):
     """默认后端：请求体/头照 DSH；缺 key / HTTP 非 200 / 响应不可解析都结构化失败。"""
-    from agent_demo.tools import web_search as ws
+    from my_coder.tools import web_search as ws
 
     backend, requests = _web_search_backend()
     outcome = await backend('deepseek-harness 架构', 3, ws.default_config())
@@ -229,7 +229,7 @@ async def test_web_search_backend_request_shape_and_failures(monkeypatch):
 
 def test_web_search_query_validation():
     """queries 校验：空数组 / 超限 / 空白项 → is_error；重复项折叠。"""
-    from agent_demo.tools import web_search as ws
+    from my_coder.tools import web_search as ws
 
     assert ws.parse_query_args(['a', ' b ', 'a'], 4) == ['a', 'b']   # 折叠 + strip
     for bad in ([], ['  '], ['a'] * 5, 'a', [1]):
@@ -246,7 +246,7 @@ async def test_web_search_tool_multi_query_merge_and_trace(tmp_path):
     超上限截断。痕迹事件对齐 DSH 的 web/deepseek-search-llm-request：
     记 query/endpoint/model/max_uses，**绝不含 key**。
     """
-    from agent_demo.tools import web_search as ws
+    from my_coder.tools import web_search as ws
 
     backend, requests = _web_search_backend()
     registry = ToolRegistry()
@@ -285,7 +285,7 @@ async def test_web_search_trace_matches_the_real_request(tmp_path):
     ② register(endpoint=...) 这类覆盖对真实请求**完全无效**（静默失效）。
     现在配置是一个值对象，由工具层解析一次、trace 与请求共用。
     """
-    from agent_demo.tools import web_search as ws
+    from my_coder.tools import web_search as ws
 
     backend, requests = _web_search_backend()
     custom = ws.SearchConfig(endpoint='http://mock.local/v1/messages',
@@ -326,7 +326,7 @@ async def test_web_search_trace_matches_the_real_request(tmp_path):
 @pytest.mark.asyncio
 async def test_web_search_tool_degrades_to_is_error(tmp_path):
     """工具包装层：坏入参 / 后端失败都返回 is_error 的 ToolOutcome，绝不抛异常。"""
-    from agent_demo.tools import web_search as ws
+    from my_coder.tools import web_search as ws
 
     # 坏参数：空 queries（schema 外的话直接拒绝）
     registry = ToolRegistry()

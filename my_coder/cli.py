@@ -4,8 +4,8 @@
 而是订阅 session 事件（assistant/chunk、tool/call）渲染的。
 
 用法：
-    python -m agent_demo.cli "任务" --workspace <root> [--fake]   # 单次任务
-    python -m agent_demo.cli --workspace <root> [--fake]          # REPL（多轮）
+    python -m my_coder.cli "任务" --workspace <root> [--fake]   # 单次任务
+    python -m my_coder.cli --workspace <root> [--fake]          # REPL（多轮）
 """
 from __future__ import annotations
 
@@ -69,7 +69,7 @@ async def run_repl(args) -> None:
     load_env(Path(__file__).resolve().parent.parent / '.env')
     session, ui_state = await _prepare(args)
     agent = build_agent(session, args, ui_state)
-    print('agent-demo REPL — 输入任务开始，/exit 退出，/compact 手动压缩。')
+    print('MyCoder REPL — 输入任务开始，/exit 退出，/compact 手动压缩。')
     while True:
         try:
             line = await asyncio.to_thread(input, 'agent> ')

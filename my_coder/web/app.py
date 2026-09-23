@@ -34,11 +34,11 @@ from .sessions import append_title, open_session, open_session_seat, scan_sessio
 from .state import state
 from .titles import auto_title, clean_title, first_user_message_just_landed
 
-# 仓库根 = 包上两级（`agent_demo/web/app.py` → `agent_demo/web` → `agent_demo` → 根）：
+# 仓库根 = 包上两级（`my_coder/web/app.py` → `my_coder/web` → `my_coder` → 根）：
 # 静态资源（web/）与 .env 都在仓库根。**拆包时这里最容易算错**，手测清单第一条就是它。
 _ROOT = Path(__file__).resolve().parents[2]
 
-app = FastAPI(title='agent-demo web')
+app = FastAPI(title='MyCoder web')
 # 前端依赖（marked / DOMPurify 本地 vendor，免 CDN）
 app.mount('/vendor', StaticFiles(directory=_ROOT / 'web' / 'vendor'), name='vendor')
 
@@ -439,7 +439,7 @@ async def approval_respond(request: Request) -> dict:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description='agent-demo Web UI (DeepSeek-style chat)')
+    parser = argparse.ArgumentParser(description='MyCoder Web UI (DeepSeek-style chat)')
     parser.add_argument('--workspace', type=Path, required=True,
                         help='default workspace root — new conversations use it unless they '
                              'pick another one (tools may only read/write inside the '

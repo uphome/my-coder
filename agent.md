@@ -1,6 +1,6 @@
 # Agent 机制实现参考（DSH / PI / opencode + codegraph）
 
-> 用途：**讨论 agent-demo（本仓库）某个机制怎么做之前，先翻本文件看三家现成项目
+> 用途：**讨论 MyCoder（本仓库）某个机制怎么做之前，先翻本文件看三家现成项目
 > （deepseek-harness / pi / opencode）各自怎么实现**，再决定教学复刻的取舍。
 > 本文件是跨会话的参考手册，不是本仓库的实现约定——实现约定见 AGENTS.md。
 >
@@ -18,7 +18,7 @@
 
 理解/抄机制的第一动作是 codegraph（**不是 grep/Read 循环**）。每个项目根有
 `.codegraph/` 索引；跨项目查询要显式传 `projectPath`（默认只查当前工作区
-agent-demo，而 agent-demo 的索引不含那三家）。
+MyCoder，而 MyCoder 的索引不含那三家）。
 
 ```text
 mcp__codegraph__codegraph_explore(
@@ -131,7 +131,7 @@ mcp__codegraph__codegraph_explore(
 | 来源分层 | project/user/bundled + scope | 项目 + 用户目录 | 内置/项目/外部(.claude,.agents)/配置路径/远程 git |
 | issue 工作流落点 | 无内置（靠工具扩展） | prompts 模板 + AGENTS 纪律 | agent 角色（白名单）+ 窄专用工具 + command |
 
-**三家的共同结论**（agent-demo 照抄时优先对齐这些）：
+**三家的共同结论**（MyCoder 照抄时优先对齐这些）：
 1. 常驻的只是“技能目录”，正文永远按需加载 → 加再多的技能也不费常驻 token
 2. 技能 = 指令，不造新执行能力；执行走通用工具（read/bash）
 3. 是否给模型加“skill 加载工具”是可选项：PI 证明 read 就够了（省一个工具），
@@ -160,13 +160,13 @@ mcp__codegraph__codegraph_explore(
 
 ---
 
-## 3. 对 agent-demo 的落点候选（讨论档案——落地规则以 AGENTS.md 为准）
+## 3. 对 MyCoder 的落点候选（讨论档案——落地规则以 AGENTS.md 为准）
 
 > 本节是 2026-09 讨论后的**候选方案记录**（为什么这么选、有哪些取舍），
 > **不是本仓库的实现约定**。若方案定稿落地，把该怎么做提炼进 AGENTS.md
 > （约定节），本节保留为背景与动机。
 
-agent-demo 现状：Python 四层单向架构、日志唯一事实源、已有 read/bash/edit 等
+MyCoder 现状：Python 四层单向架构、日志唯一事实源、已有 read/bash/edit 等
 通用工具 + approval 门、gh CLI 已装已登录（uphome）、无 skill 基础设施。
 
 ### 3.1 候选方案（2026-09 讨论倾向：PI 式 + 工具结果注入）
@@ -201,7 +201,7 @@ agent-demo 现状：Python 四层单向架构、日志唯一事实源、已有 r
 
 ### 3.3 候选实现面（落地时照此评估，具体以 AGENTS.md/实现为准）
 
-- `agent_demo/app/skills.py`：`Skill` 值对象（frozen dataclass：name/description/
+- `my_coder/app/skills.py`：`Skill` 值对象（frozen dataclass：name/description/
   path/model_invocable）+ `scan_skills(dir)`（dir 参数化，为多 agent 留缝）+
   `format_catalog()`（纯文本目录行）
 - `factory.py build_agent`：注册 `prompt.section('skill:catalog', order<100,
@@ -226,7 +226,7 @@ gh-issue 技能 → Web/CLI 实测“处理 issue #N” → 质量门三绿提�
 §3.1 的两条决策被实测推翻了，这里记录修正与理由（落地规则以 AGENTS.md 约定节为准）：
 
 - **技能存储只有"仓库内建 `skills/`"一层** → 改成 **bundled（包内
-  `agent_demo/bundled_skills/`，随 agent 发布）+ workspace（`<workspace>/skills/`）**，
+  `my_coder/bundled_skills/`，随 agent 发布）+ workspace（`<workspace>/skills/`）**，
   按名字合并、workspace 同名覆盖。理由（实测）：技能根目录写死为工作区之后，
   **换个工作区自带能力归零**——用户在自己的项目里跑这个 agent，system 里既没有
   「可用技能」段、`read_file` 读包内技能也被沙箱拒（`path outside workspace`）。
@@ -285,17 +285,17 @@ gh-issue 技能 → Web/CLI 实测“处理 issue #N” → 质量门三绿提�
 - 注意：**todo 不走 SystemContext**——todowrite 的 `toModelOutput` 直接返回
   完整清单 JSON 作为 tool/result（模型从历史读最新），这是另一条路
 
-**共同结论**（对 agent-demo 的启示）：
+**共同结论**（对 MyCoder 的启示）：
 1. "运行时状态" = user 消息快照放 messages 尾部（不是 system）→ 前缀缓存稳定
 2. **变化才更新**（去重）而非每轮合成——避免"状态没变也重复附加"
-3. 注册制贡献者（每个插件/模块注册自己那块状态）——与 agent-demo 的
+3. 注册制贡献者（每个插件/模块注册自己那块状态）——与 MyCoder 的
    `prompt.section`/`ToolRegistry` 同哲学
-4. 快照作为 user/plugin 消息**落日志** → 完全可重建（agent-demo 若做需扩展
+4. 快照作为 user/plugin 消息**落日志** → 完全可重建（MyCoder 若做需扩展
    source 类型 + compaction 联动，中型改动）
 
 ### 问题 1：todo_write 的完整结果到底该放哪？（已收敛到"状态栏"方向）
 
-现状（agent-demo）：`todo_write` 执行时把完整清单写进 `todo/write` **痕迹事件**
+现状（MyCoder）：`todo_write` 执行时把完整清单写进 `todo/write` **痕迹事件**
 （不进 derive_messages），返回给模型的 tool/result 只有**计数摘要**
 （"Updated todo list: 3 pending, 1 in progress…"）。完整清单靠
 `fold_todos()` 折叠 + system 里 `todo:state` live section 注入模型。
@@ -332,11 +332,11 @@ SystemContext 的形态一致，todo 只是通用状态栏的第一个贡献者�
   </todo_status>
   ```
 - 改动清单：
-  - `agent_demo/tools/todo.py`：新增 `build_todo_status(session)`——fold 出
+  - `my_coder/tools/todo.py`：新增 `build_todo_status(session)`——fold 出
     清单 → XML `<todo_status>` 块；无清单或 `all_completed` 返回 None
-  - `agent_demo/runtime/loop.py _run_step`：组 messages 时若 `build_todo_status` 非
+  - `my_coder/runtime/loop.py _run_step`：组 messages 时若 `build_todo_status` 非
     None 则 append 一条 `create_user_message([TextBlock(text=status)])`
-  - `agent_demo/app/factory.py`：删 `todo:state` live section + `_todo_context`
+  - `my_coder/app/factory.py`：删 `todo:state` live section + `_todo_context`
     （todo 离开 system；注释同步）
   - `web/index.html`：不改——前端 dock 由 todo_update 帧驱动，状态栏只影响
     模型上下文
@@ -518,7 +518,7 @@ DSH 把"搜索"这一能力**完全交给提供方**，自己只做协议与解�
 
 | DSH | 我们 |
 |---|---|
-| `web-search-deepseek` provider | `agent_demo/tools/web_search.py` 的 `deepseek_search_backend`（默认后端，可注入） |
+| `web-search-deepseek` provider | `my_coder/tools/web_search.py` 的 `deepseek_search_backend`（默认后端，可注入） |
 | `tool-web` 的 `web_search` 工具 | 同名工具，schema/输出格式照抄 |
 | `web/deepseek-search-llm-request` 痕迹 | **`web/search`** 痕迹事件（query/endpoint/model/max_uses，无 key） |
 | `WebError(code)` 抛给调用方 | `WebSearchError(code)` → 工具层降级为 `is_error` 结果（不变式⑤） |
@@ -675,7 +675,7 @@ snippet 永远空；② 摘要无法做"句句有据"的引用；③ 摘要正�
 4. **回合号/状态本身没坏**（`_last_turn` 恢复正确、status=idle），所以表面上"看着
    还挺正常"，问题要到下一次发送才暴露。
 
-### 8.3 修法（`agent_demo/state/recovery.py`）
+### 8.3 修法（`my_coder/state/recovery.py`）
 
 恢复（重放）之后扫一遍**投影**，给缺结果的调用补一条 `is_error` 合成结果，并**先落
 一条 `session/repaired` 痕迹**。两个刻意的选择：
@@ -794,7 +794,7 @@ instructions（live system 段，order 20） ← C：确定性探测 + 正文/�
 
 > **收尾（#16 合并后）**：这份手册最初放在工作区 `skills/project-instructions.md`，
 > 但"工作区技能"在**没有 `skills/` 的工作区**里看不到（正是最需要它的场景）——所以
-> 它已随 issue #22 挪到包内 `agent_demo/bundled_skills/`，作为 **bundled 技能**随 agent
+> 它已随 issue #22 挪到包内 `my_coder/bundled_skills/`，作为 **bundled 技能**随 agent
 > 发布；工作区里那份重复副本已删除（同名时 workspace 会覆盖 bundled）。详见 §3.5。
 
 - `instructions.py`：`scan_nested_instruction_files`（每回合 `os.walk` 剪枝重扫一次——

@@ -12,8 +12,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from agent_demo.values.persistence import load_events
-from agent_demo.state.session import Session
+from my_coder.values.persistence import load_events
+from my_coder.state.session import Session
 
 
 def preview(message, limit: int = 80) -> str:

@@ -1,4 +1,4 @@
-# agent-demo 架构与核心机制说明
+# MyCoder 架构与核心机制说明
 
 > 本文档整合代码带读过程中厘清的全部概念：架构分层、核心机制、
 > 关键设计决策，以及后续进化路线图。配合 `README.md`（快速上手）
@@ -553,7 +553,7 @@ project / user / bundled 与同名覆盖）：
 
 | 来源 | 位置 | 谁维护 | 例子 |
 |---|---|---|---|
-| **bundled** | 包内 `agent_demo/bundled_skills/*.md`（`pyproject` package-data 保证随包发布） | agent 作者 | `project-instructions`（怎么写 AGENTS.md，任何工作区都适用） |
+| **bundled** | 包内 `my_coder/bundled_skills/*.md`（`pyproject` package-data 保证随包发布） | agent 作者 | `project-instructions`（怎么写 AGENTS.md，任何工作区都适用） |
 | **workspace** | `<workspace>/skills/*.md` | 项目 / 用户 | `gh-issue`（只对本仓库有意义的工作流） |
 
 同名时 **workspace 覆盖 bundled**；合并后按名字排序——目录段进 system 的缓存稳定
@@ -721,7 +721,7 @@ user 角色以保住 system 前缀缓存；opencode 的 SystemContext 强调"不
 
 ## 5. 文件职责清单
 
-包 `agent_demo/`（框架四层 + 应用内容）：
+包 `my_coder/`（框架四层 + 应用内容）：
 
 | 文件 | 角色 |
 |---|---|

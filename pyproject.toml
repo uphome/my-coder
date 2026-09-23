@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "agent-demo"
+name = "my-coder"
 version = "0.1.0"
 description = "Python 复刻 deepseek-harness 架构的 agent 框架（教学 + 个人工具）"
 readme = "README.md"
@@ -24,16 +24,16 @@ dev = [
 ]
 
 [project.scripts]
-agent-demo = "agent_demo.cli:main"
-agent-demo-web = "agent_demo.web.app:main"
+my-coder = "my_coder.cli:main"
+my-coder-web = "my_coder.web.app:main"
 
 [tool.setuptools.packages.find]
-include = ["agent_demo*"]
+include = ["my_coder*"]
 
 [tool.setuptools.package-data]
 # 随包发布 agent 自带技能（bundled）：装到别的环境也要在（否则"自带能力"只在源码
 # checkout 里成立）。workspace 技能不在这里——它们属于项目，不属于这个包。
-agent_demo = ["bundled_skills/*.md"]
+my_coder = ["bundled_skills/*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -50,7 +50,7 @@ ignore = ["E501"]
 
 [tool.mypy]
 python_version = "3.11"
-files = ["agent_demo"]
+files = ["my_coder"]
 ignore_missing_imports = true
 # 教学代码的工具 executor 刻意不写参数注解（args: dict 由 ToolSpec schema 约束）；
 # 未注解函数体不深查，聚焦有注解代码里的真问题

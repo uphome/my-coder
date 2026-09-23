@@ -1,6 +1,6 @@
 """应用内容：组装（factory）+ 具体能力（指令文件 / 技能 / 压缩 / 渲染 / 沙箱 / 常量）。
 
-允许 import：下面四层全部，以及 `agent_demo.tools`。这一层是"这个 agent 具体会做什么"，
+允许 import：下面四层全部，以及 `my_coder.tools`。这一层是"这个 agent 具体会做什么"，
 不是框架本身——换一个应用可以整层替换掉：
 
 - `factory.py`     —— 组装一次完整 agent（system 段、工具、hooks、压缩接线）

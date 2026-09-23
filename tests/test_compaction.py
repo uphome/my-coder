@@ -9,9 +9,9 @@ import asyncio
 
 import pytest
 
-from agent_demo.capability.llm import StreamChunk
-from agent_demo.state.session import Session
-from agent_demo.values.messages import (
+from my_coder.capability.llm import StreamChunk
+from my_coder.state.session import Session
+from my_coder.values.messages import (
     TextBlock,
     ToolCallBlock,
     create_assistant_message,
@@ -23,7 +23,7 @@ from agent_demo.values.messages import (
 @pytest.mark.asyncio
 async def test_compaction_selection_and_file_ops():
     """选区：保留最近 N 回合；文件提取：read/write/edit 归类。"""
-    from agent_demo.app.compaction import extract_file_ops, select_compact_range
+    from my_coder.app.compaction import extract_file_ops, select_compact_range
 
     def user(text):
         return create_user_message([TextBlock(text=text)])
@@ -76,7 +76,7 @@ async def test_compaction_selection_and_file_ops():
 @pytest.mark.asyncio
 async def test_compaction_transaction_fake_llm(tmp_path):
     """整链路：start → summary → replace(checkpoint) → end，摘要替换旧回合。"""
-    from agent_demo.app.compaction import run_compaction
+    from my_coder.app.compaction import run_compaction
 
     class FakeCompactorLlm:
         def __init__(self, summary):
@@ -143,7 +143,7 @@ async def test_compaction_transaction_fake_llm(tmp_path):
 @pytest.mark.asyncio
 async def test_compaction_failure_degrades():
     """失败降级：空摘要 / 摘要不够小 → 落 end{error}，日志完好、无 replace。"""
-    from agent_demo.app.compaction import run_compaction
+    from my_coder.app.compaction import run_compaction
 
     def user(text):
         return create_user_message([TextBlock(text=text)])
@@ -183,7 +183,7 @@ async def test_compaction_failure_degrades():
 @pytest.mark.asyncio
 async def test_auto_compaction_fires_on_threshold(tmp_path):
     """自动压缩：turn/end 后上下文超阈值 → 触发压缩；低于阈值不触发。"""
-    from agent_demo.app.compaction import wire_auto_compaction
+    from my_coder.app.compaction import wire_auto_compaction
 
     def user(text):
         return create_user_message([TextBlock(text=text)])
@@ -236,10 +236,10 @@ def test_build_agent_wires_auto_compaction_by_default(tmp_path):
     import os
     from argparse import Namespace
 
-    from agent_demo.app.constants import DEFAULT_COMPACT_TOKENS
-    from agent_demo.app.factory import build_agent
+    from my_coder.app.constants import DEFAULT_COMPACT_TOKENS
+    from my_coder.app.factory import build_agent
     os.environ['DEEPSEEK_API_KEY'] = 'sk-placeholder'  # build_agent 只构造 llm 不连接
-    import agent_demo.app.compaction as comp  # factory 函数体内 import 会实时取这里，mock 生效
+    import my_coder.app.compaction as comp  # factory 函数体内 import 会实时取这里，mock 生效
     wired = []
     orig_wire = comp.wire_auto_compaction
     orig_overflow = comp.wire_overflow_recovery
@@ -277,7 +277,7 @@ def test_build_agent_wires_auto_compaction_by_default(tmp_path):
 
 def test_cache_hit_rate_from_real_usage():
     """真实 usage 拆分缓存命中率：hit/(hit+miss)；无 usage → None。"""
-    from agent_demo.app.compaction import cache_hit_rate, estimate_context_tokens, last_prompt_usage
+    from my_coder.app.compaction import cache_hit_rate, estimate_context_tokens, last_prompt_usage
 
     s = Session(id='t')
     s.append('turn/start', {'turn': 1})
@@ -321,7 +321,7 @@ def test_cache_hit_rate_from_real_usage():
 
 def test_context_overflow_detection():
     """溢出错误识别：HTTP_ERROR + 特征串为真，其他为假。"""
-    from agent_demo.app.compaction import _is_context_overflow
+    from my_coder.app.compaction import _is_context_overflow
     assert _is_context_overflow('HTTP_ERROR', '400: maximum context length exceeded') is True
     assert _is_context_overflow('HTTP_ERROR', 'input is too long for the model') is True
     assert _is_context_overflow('HTTP_ERROR', '上下文长度超过限制') is True
@@ -337,7 +337,7 @@ async def test_overflow_recovery_compacts_and_retries(tmp_path):
     os.environ['DEEPSEEK_API_KEY'] = 'sk-placeholder'
     from argparse import Namespace
 
-    from agent_demo.app.factory import build_agent
+    from my_coder.app.factory import build_agent
 
     class OverflowLlm:
         def __init__(self):
@@ -347,7 +347,7 @@ async def test_overflow_recovery_compacts_and_retries(tmp_path):
             ]
 
         async def stream(self, request, signal=None):
-            from agent_demo.capability.llm import LlmError
+            from my_coder.capability.llm import LlmError
             if 'compaction engine' in (request.system or ''):
                 yield StreamChunk(text='## 主要请求\n- 压缩历史\n## 下一步\n1. 继续', finish_reason='stop')
                 return

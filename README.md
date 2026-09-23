@@ -1,4 +1,4 @@
-# agent-demo
+# MyCoder
 
 deepseek-harness 核心架构的 Python 复刻（学习用 / 个人工具）。约 3000 行
 Python + 原生单页 Web（约 1500 行，零构建），忠实实现 harness 的四个核心
@@ -12,36 +12,36 @@ Python + 原生单页 Web（约 1500 行，零构建），忠实实现 harness �
 conda create -n agent-demo python=3.13 pytest pytest-asyncio httpx -y
 conda activate agent-demo
 
-# 安装本包（可选：装后可直接用 agent-demo / agent-demo-web 命令）
+# 安装本包（可选：装后可直接用 my-coder / my-coder-web 命令）
 pip install -e ".[dev]"
 
 # 离线演示（脚本化假模型，不联网、不需要 key，跑通工具循环）
 # --workspace 必填：工具只能读写这个目录（安全边界由你声明）
 # Windows 控制台是 GBK：conda run 加 --no-capture-output 避免中文乱码
-conda run --no-capture-output -n agent-demo python -m agent_demo.cli --fake --workspace . "read README.md and summarize"
+conda run --no-capture-output -n agent-demo python -m my_coder.cli --fake --workspace . "read README.md and summarize"
 
 # 恢复上次会话（JSONL 重放：队列、回合号、请求配置全部还原）
-conda run --no-capture-output -n agent-demo python -m agent_demo.cli --fake --workspace . --resume "continue"
+conda run --no-capture-output -n agent-demo python -m my_coder.cli --fake --workspace . --resume "continue"
 
 # 交互式 REPL：不带任务参数即进入多轮对话（/exit 退出）
-conda run --no-capture-output -n agent-demo python -m agent_demo.cli --fake --workspace .
+conda run --no-capture-output -n agent-demo python -m my_coder.cli --fake --workspace .
 
 # 真实模型（DeepSeek 官方 API，OpenAI 兼容格式；敏感工具执行前会弹 [approval] 确认）
 # Windows PowerShell: $env:DEEPSEEK_API_KEY = "sk-..."
 export DEEPSEEK_API_KEY=sk-...
-conda run --no-capture-output -n agent-demo python -m agent_demo.cli --workspace . "读一下 README.md 并用 todo_write 列出你的三步计划"
+conda run --no-capture-output -n agent-demo python -m my_coder.cli --workspace . "读一下 README.md 并用 todo_write 列出你的三步计划"
 
 # 测试 + 质量门（ruff / mypy 全绿才提交）
 conda run -n agent-demo python -m pytest -q
-conda run -n agent-demo python -m ruff check agent_demo tests
-conda run -n agent-demo python -m mypy agent_demo
+conda run -n agent-demo python -m ruff check my_coder tests
+conda run -n agent-demo python -m mypy my_coder
 ```
 
 思维链（如 DeepSeek 的 `reasoning_content`）默认会以彩色 `[思考]` 实时显示，
 但**不会回灌给模型**，只作为痕迹数据写入日志。不需要看思考过程时加 `--hide-reasoning`：
 
 ```sh
-python -m agent_demo.cli --fake --workspace . --hide-reasoning "read README.md and summarize"
+python -m my_coder.cli --fake --workspace . --hide-reasoning "read README.md and summarize"
 ```
 
 ## Web UI（DeepSeek 风格对话）
@@ -57,8 +57,8 @@ Web 前端也是"投影架构"：页面只持有一份从日志重建的投影�
 ```sh
 # 启动 Web 服务（默认 http://127.0.0.1:8000）
 # --workspace 是**默认**工作区：新建对话时不另外指定，就用它
-conda run -n agent-demo python -m agent_demo.web --workspace . --fake    # 离线（不需要 key）
-conda run -n agent-demo python -m agent_demo.web --workspace .           # 真实模型
+conda run -n agent-demo python -m my_coder.web --workspace . --fake    # 离线（不需要 key）
+conda run -n agent-demo python -m my_coder.web --workspace .           # 真实模型
 ```
 
 浏览器打开 http://127.0.0.1:8000：
@@ -198,7 +198,7 @@ issue 号的例外。
 
 ## 模块清单
 
-包 `agent_demo/`（框架四层 + 应用内容；全部经 `agent_demo/__init__.py` 组织）：
+包 `my_coder/`（框架四层 + 应用内容；全部经 `my_coder/__init__.py` 组织）：
 
 | 文件 | 角色 |
 |---|---|
@@ -277,6 +277,6 @@ issue 号的例外。
 **Web 的工作区选择是"信任界面使用者"模型**（对齐 DSH 的本地工具形态）：只校验
 "路径存在 + 是目录"，**没有白名单**——能点这个界面的人，本来就等于把该目录的读写
 交给 agent（Web 默认只绑 `127.0.0.1`，且不校验来源，所以**不要**把它暴露到网络上）。
-想收紧的话，判据只有一处（`agent_demo/app/workspace.py` 的 `resolve_workspace`），
+想收紧的话，判据只有一处（`my_coder/app/workspace.py` 的 `resolve_workspace`），
 在那里加白名单即可，调用方不用改。
 只用于本地学习，不要暴露给不可信的输入。
