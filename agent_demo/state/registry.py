@@ -24,21 +24,11 @@ from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from typing import Any
 
-from ..app.constants import TOOL_RESULT_MAX_CHARS
+from ..values.limits import TOOL_RESULT_MAX_CHARS
+from ..values.messages import ToolOutcome
 
 # 合法的执行模式：parallel=可与其他调用并发；sequential=独占（也是默认值）。
 EXECUTION_MODES = frozenset({'parallel', 'sequential'})
-
-
-@dataclass(frozen=True)
-class ToolOutcome:
-    """工具执行结果：一段文本 + 是否出错。
-
-    is_error=True 只是"这条结果告诉模型：调用失败了"，
-    不会抛给循环——失败降级成结果，是工具层最重要的约定。
-    """
-    content: str = ''
-    is_error: bool = False
 
 
 @dataclass(frozen=True)

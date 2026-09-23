@@ -1,7 +1,10 @@
-"""应用层常量：搜索预算 / bash 输出上限 / fake 演示脚本。
+"""应用层常量：搜索预算 / bash 输出上限 / 渲染颜色 / fake 演示脚本。
 
-与 ui.py（渲染）分开：budget 是工具的硬预算（进不进模型 schema、
+与 `ui.py`（渲染）分开：budget 是工具的硬预算（进不进模型 schema、
 截断上限），demo 脚本是 fake 模式的应答剧本——都是"值"不是行为。
+
+**放这里的判据**：只有应用层/工具层用到的常量。一旦有更低的层（状态/框架循环）也要用，
+就下沉到 `values/limits.py`（那条规矩写在那里）——`TOOL_RESULT_MAX_CHARS` 就是这么搬走的。
 """
 from __future__ import annotations
 
@@ -23,15 +26,11 @@ GLOB_MAX_RESULTS = 100   # glob 内联保留的最大路径数
 BASH_MAX_OUTPUT_CHARS = 8000
 
 # read_file 预算：默认 200 行，单次最多 2000 行 / 16000 字符。
-# 字符预算故意小于 registry 的 TOOL_RESULT_MAX_CHARS，给截断/导航提示留余量，
-# 避免 read_file 的提示又被 registry 通用截断盖掉。
+# 字符预算故意小于 registry 的 TOOL_RESULT_MAX_CHARS（那个在 values/limits.py），
+# 给截断/导航提示留余量，避免 read_file 的提示又被 registry 通用截断盖掉。
 READ_FILE_DEFAULT_LIMIT = 200
 READ_FILE_MAX_LIMIT = 2000
 READ_FILE_MAX_CHARS = 16000
-
-# registry 层统一工具结果上限：任何工具返回内容超过它就截断。
-# 这是最后的安全网；具体工具（read_file/bash 等）可以有更早、更精确的预算。
-TOOL_RESULT_MAX_CHARS = 20000
 
 # web_search 预算与端点（对齐 DSH packages/web/web-search-deepseek）：
 # 搜索能力由 DeepSeek 官方在服务端提供（原生 web_search_20250305 服务端工具），

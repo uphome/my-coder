@@ -1,9 +1,13 @@
-"""值层：消息与事件的不可变词汇表 + JSONL 编解码。
+"""值层：消息、事件与工具返回值的不可变词汇表 + JSONL 编解码。
 
 Python 的 frozen dataclass 只冻结字段赋值，不深冻结嵌套容器——
 约定：所有内容一律用 frozen dataclass 与 tuple，禁止把可变容器放进
 消息/事件。这就是"不可变值对象"在 Python 里的落地方式（harness 用
 deepFreeze，这里用类型 + 约定）。
+
+`ToolOutcome`（工具执行的返回值）也住在这里：它和 `ToolResultBlock` 是同一件事的
+两个阶段（执行返回值 → 补上 call_id 落进日志的 wire 形态），而且**只描述结果、不含
+执行逻辑**——`ToolSpec`（schema + executor）留在 `state/registry.py`。
 """
 from __future__ import annotations
 
@@ -40,6 +44,22 @@ class ToolResultBlock:
     让模型能把结果和调用对上；is_error 标记执行失败（不炸循环）。"""
     type: Literal['tool-result'] = 'tool-result'
     tool_call_id: str = ''
+    content: str = ''
+    is_error: bool = False
+
+
+@dataclass(frozen=True)
+class ToolOutcome:
+    """工具**执行**的返回值：一段文本 + 是否出错（`ToolResultBlock` 的前身）。
+
+    两个对象是同一件事的两个阶段：executor 返回 `ToolOutcome` → 宿主把它包成
+    `ToolResultBlock`（补上 call_id）落进日志。放在值层是因为它**只描述结果**，
+    不含任何执行逻辑：`ToolSpec`（schema + executor）留在 `state/registry.py`，
+    而"一个工具返回了什么"是词汇表的一部分。
+
+    is_error=True 只是"这条结果告诉模型：调用失败了"，不会抛给循环——
+    失败降级成结果，是工具层最重要的约定。
+    """
     content: str = ''
     is_error: bool = False
 

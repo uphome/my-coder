@@ -121,8 +121,9 @@ conda run -n agent-demo python -m agent_demo.web --workspace .           # 真�
 能力层   capability/llm.py    LLM 客户端（OpenAI 兼容流式 + FakeLlm）
          capability/hooks.py  三个决策钩子的类型
          │
-值 层    values/messages.py   不可变 Message/SessionEvent + tagged dict 编解码
+值 层    values/messages.py   不可变 Message/SessionEvent/ToolOutcome + tagged dict 编解码
          values/persistence.py JSONL 追加写 + 重放读
+         values/limits.py     跨层共享的常量（有更低层要用的数字就下沉到这里）
 
 应用内容（可整层替换）：app/factory.py 组装 + app/{constants,sandbox,ui,compaction,
 instructions,skills}.py + tools/（read_file/list_files/grep/glob/edit/write_file/
@@ -195,11 +196,12 @@ issue 号的例外。
 
 | 文件 | 角色 |
 |---|---|
-| `values/messages.py` | 值层：不可变 Message/SessionEvent + JSONL 编解码 |
+| `values/messages.py` | 值层：不可变 Message/SessionEvent/**ToolOutcome**（工具执行返回值，与 ToolResultBlock 是同一件事的两个阶段）+ tagged dict 编解码 |
+| `values/limits.py` | **跨层共享的常量**（判据：有更低层要用就下沉到这里——`TOOL_RESULT_MAX_CHARS` 原先住应用层，状态层要用它就把方向弄反了） |
 | `state/session.py` | 日志 + surface 折叠投影（append / derive_messages / adopt / request_header） |
 | `state/inbox.py` | 双队列（next-turn / next-step）+ claim 语义 + 持久化重放 |
 | `state/prompt.py` | sections 按 order 拼接 + `{{var}}` 严格插值（未注册/无值抛错） |
-| `state/registry.py` | 工具类型（ToolSpec：schema + executor + 并发模式 + 卸载声明 + 超时 + requires_approval） |
+| `state/registry.py` | 工具类型（ToolSpec：schema + executor + 并发模式 + 卸载声明 + 超时 + requires_approval；返回值 `ToolOutcome` 在 `values/messages.py`） |
 | `capability/llm.py` | OpenAI 兼容 SSE 流式客户端 + 可脚本化 FakeLlm + wire 格式纯函数（含思维链字段解析） |
 | `capability/hooks.py` | pre_step / request / request_error 三钩子 + approval 钩子的类型 |
 | `runtime/loop.py` | turn/step 两级循环 + 流组装 + 工具分组执行 + 思维链痕迹落盘 |

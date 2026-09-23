@@ -578,6 +578,15 @@ agent_demo/
 3. **`Path(__file__).parent` 类路径会随层数变化**：`app/skills.py` 找包内 `bundled_skills/`
    要用 `parents[1]`——写错时表现是"技能表静默变空"（7 条测试红，不是崩溃）。
 
+**第 4 步（同一条线的收尾，已完成）**：把"值对象住错层"和"常量住错层"两件事一起修掉——
+`ToolOutcome` 从 `state/registry.py` 搬进 `values/messages.py`（它和 `ToolResultBlock` 是
+同一件事的两个阶段：执行返回值 → 补 call_id 落日志的 wire 形态；`ToolSpec` 带 executor，
+是行为不是值，留在 registry）；`TOOL_RESULT_MAX_CHARS` 从 `app/constants.py` 下沉到
+`values/limits.py`（判据：**有更低层要用就下沉**——状态层要用应用层的常量，方向本来就反了）。
+两条都修完后，`KNOWN_VIOLATIONS` 只剩 issue #19 那一条（白名单僵尸检查会盯着删干净）。
+落地过程同样留记录：搬完后 `test_known_violations_are_still_real` **主动报红**"这条例外已经
+不再越界了，请从白名单删掉"——机制按设计工作。
+
 ## 实施约定（延续项目哲学）
 
 1. 新增状态一律落日志——"没有状态不进日志"不变式不能破

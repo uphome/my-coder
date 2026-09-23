@@ -12,7 +12,8 @@ from pathlib import Path
 
 from ..app.constants import GLOB_MAX_RESULTS, GREP_MAX_MATCHES
 from ..app.sandbox import iter_files, resolve_in_workspace
-from ..state.registry import ToolOutcome, ToolSpec
+from ..state.registry import ToolSpec
+from ..values.messages import ToolOutcome
 
 
 def register(registry, workspace: Path) -> None:

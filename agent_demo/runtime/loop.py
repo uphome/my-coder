@@ -14,12 +14,12 @@ import logging
 
 from ..capability.hooks import PreStepContext, RequestContext, RequestErrorContext
 from ..capability.llm import LlmError, LlmRequest, StreamChunk
-from ..state.registry import ToolOutcome
 from ..tools.todo import build_todo_status
 from ..values.messages import (
     Message,
     TextBlock,
     ToolCallBlock,
+    ToolOutcome,
     create_assistant_message,
     create_tool_result_message,
     create_user_message,

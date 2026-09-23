@@ -35,11 +35,13 @@ LAYERS = {
 ENTRY_LAYER = 5
 
 # 已知例外：(源模块, 目标模块) → 为什么留着
+#
+# 曾经的第二条是 `state.registry → app.constants`（状态层要用应用层的
+# `TOOL_RESULT_MAX_CHARS`）：第 4 步把它下沉到 `values/limits.py` 之后就不再越界，
+# 于是按"白名单不许长僵尸"的规矩从这里删掉了——这条注释就是那次删除留下的记录。
 KNOWN_VIOLATIONS = {
     ('agent_demo.runtime.loop', 'agent_demo.tools.todo'):
         'issue #19：把"每轮叠给模型的状态"做成注册制贡献者之后清掉',
-    ('agent_demo.state.registry', 'agent_demo.app.constants'):
-        'issue #21：constants 拆成"框架级 / 应用级"之后清掉',
 }
 
 
