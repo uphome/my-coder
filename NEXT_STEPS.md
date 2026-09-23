@@ -533,9 +533,11 @@ pyproject.toml            打包 + ruff / mypy / pytest 配置 + console scripts
   steer 插队 + CLI REPL（已完成，见下节）；阶段四工程化打磨（配置/日志
   查看器）仍未开始
 
-**测试拆分**（蓝图里的 tests/ 按主题拆分）尚未做：65 个测试仍在单文件
-`tests/test_demo.py`——当前质量门（ruff/mypy/pytest）已覆盖，拆分是纯可读性
-优化，留到有需要时再做。
+**测试拆分**（蓝图里的 tests/ 按主题拆分）✅ **已完成（2026-09）**：单文件
+`tests/test_demo.py`（4293 行 / 132 用例）按关注点拆成 13 个测试文件 + `conftest.py`
+（值/日志、inbox、prompt、loop、tools、todo、recovery、compaction、instructions、skills、
+web_search、web、cli），**只搬家不改断言**，用例总数不变。起因：单文件已经 4293 行，
+定位慢、review diff 噪声大；拆分同时让 26 处函数内冗余 import 暴露出来（ruff F401/F811）。
 
 ## 实施约定（延续项目哲学）
 
