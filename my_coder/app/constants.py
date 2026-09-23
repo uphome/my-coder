@@ -66,7 +66,7 @@ DEMO_SCRIPT: list[dict] = [
     },
     {
         'reasoning': 'README 已经读完，核心是四层架构，现在整理成简短总结。',
-        'text': 'README 讲的是这个 demo 的四层架构。任务完成。',
+        'text': 'README 讲的是这个项目的四层架构。任务完成。',
         'finish_reason': 'stop',
     },
 ]

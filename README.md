@@ -1,107 +1,133 @@
+<div align="center">
+
 # MyCoder
 
-deepseek-harness 核心架构的 Python 复刻（学习用 / 个人工具）。约 3000 行
-Python + 原生单页 Web（约 1500 行，零构建），忠实实现 harness 的四个核心
-设计：**日志是唯一事实源、模型可见 ⟺ 可重建、被动状态机 + Inbox、决策走钩子**；
-并在其上做了真实工具集、多会话 Web UI 与上下文压缩（compaction）。
+**deepseek-harness 的 Python 复刻** —— 一个能读代码、改文件、跑命令、联网搜索的本地编码 agent。
 
-## 快速开始
+*把 agent 框架本身讲清楚的实现：四层架构 + 真实工具集 + 零构建 Web UI。*
+
+`日志是唯一事实源` · `模型可见 ⟺ 可重建` · `被动状态机 + Inbox` · `决策走钩子`
+
+![Python](https://img.shields.io/badge/Python-3.13-3776AB?logo=python&logoColor=white)
+![tests](https://img.shields.io/badge/tests-154%20passing-3fb950)
+![license](https://img.shields.io/badge/license-MIT-4d6bfe)
+![web](https://img.shields.io/badge/Web%20UI-%E9%9B%B6%E6%9E%84%E5%BB%BA%20%C2%B7%20%E5%8D%95%E6%96%87%E4%BB%B6-39c5cf)
+
+</div>
+
+---
+
+## 这是什么
+
+把 [deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)（`dsh`）的核心架构，用
+**6700 行 Python + 2400 行零构建前端**重写一遍（另有 5200 行测试）——不是又一个 agent 应用，
+而是**把 agent 框架本身讲清楚**：每一处设计都对着它的母本，每一条规则都有测试盯着。
+
+它不是玩具：模型真能在这个仓库里读文件、搜代码、改代码、跑 `pytest`、联网查资料，
+并且**每次对话只被允许读写你指定的那个目录**。
+
+```console
+$ my-coder --fake --workspace . "read README.md and summarize"
+
+════ turn 1 ════
+── step 1.1 ──
+[req 1 fake-model]
+[思考] 用户让我总结 README，先读取文件内容再回答。
+
+[tool 1] read_file({"file_path": "README.md"})
+[result]      1: <div align="center">
+     2:
+     3: # MyCoder
+  (…共 N 字符 / M 行)
+── step 1.2 ──
+[req 2 fake-model]
+[思考] README 已经读完，核心是四层架构，现在整理成简短总结。
+README 讲的是这个项目的四层架构。任务完成。
+```
+
+`--fake` 是脚本化的假模型：**不联网、不需要 API key**，用来把整条链路（请求 → 工具调用 →
+结果回灌 → 收尾）跑给你看。换成真模型只是去掉这个参数。
+
+### 四个核心设计
+
+| 设计 | 一句话 | 换来了什么 |
+|---|---|---|
+| **日志是唯一事实源** | 所有状态都落 `.sessions/<id>.jsonl`，没有第二份 | 日志本身就是调试器 |
+| **模型可见 ⟺ 可重建** | 模型记忆是日志的**纯函数投影**，不是被存下来的 | 崩溃/OOM 后重放日志即可原样续跑 |
+| **被动状态机 + Inbox** | agent 从不主动干活，谁跟它说话谁拍醒它 | 排队、插队、并发会话互不干扰 |
+| **决策走钩子** | 循环里没有业务 `if`，策略由注册声明与钩子注入 | 加工具/改策略不碰框架代码 |
+
+---
+
+## 30 秒上手
 
 ```sh
-# 环境（Miniforge）
-conda create -n agent-demo python=3.13 pytest pytest-asyncio httpx -y
-conda activate agent-demo
+# ① 环境与安装（Python ≥ 3.11）
+python -m venv .venv && . .venv/bin/activate     # Windows: .venv\Scripts\activate
+pip install -e ".[dev]"                          # 装上依赖，并得到 my-coder / my-coder-web 命令
 
-# 安装本包（可选：装后可直接用 my-coder / my-coder-web 命令）
-pip install -e ".[dev]"
+# ② 离线跑一遍（脚本化假模型，不需要 key）
+my-coder --fake --workspace . "read README.md and summarize"
 
-# 离线演示（脚本化假模型，不联网、不需要 key，跑通工具循环）
-# --workspace 必填：工具只能读写这个目录（安全边界由你声明）
-# Windows 控制台是 GBK：conda run 加 --no-capture-output 避免中文乱码
-conda run --no-capture-output -n agent-demo python -m my_coder.cli --fake --workspace . "read README.md and summarize"
-
-# 恢复上次会话（JSONL 重放：队列、回合号、请求配置全部还原）
-conda run --no-capture-output -n agent-demo python -m my_coder.cli --fake --workspace . --resume "continue"
-
-# 交互式 REPL：不带任务参数即进入多轮对话（/exit 退出）
-conda run --no-capture-output -n agent-demo python -m my_coder.cli --fake --workspace .
-
-# 真实模型（DeepSeek 官方 API，OpenAI 兼容格式；敏感工具执行前会弹 [approval] 确认）
-# Windows PowerShell: $env:DEEPSEEK_API_KEY = "sk-..."
+# ③ 接真实模型（DeepSeek 官方 API，OpenAI 兼容）
+#    Windows PowerShell: $env:DEEPSEEK_API_KEY = "sk-..."
 export DEEPSEEK_API_KEY=sk-...
-conda run --no-capture-output -n agent-demo python -m my_coder.cli --workspace . "读一下 README.md 并用 todo_write 列出你的三步计划"
+my-coder --workspace . "给这个仓库补一个测试并跑通"
 
-# 测试 + 质量门（ruff / mypy 全绿才提交）
-conda run -n agent-demo python -m pytest -q
-conda run -n agent-demo python -m ruff check my_coder tests
-conda run -n agent-demo python -m mypy my_coder
+# ④ 浏览器版（默认 http://127.0.0.1:8000；--workspace 是新对话的默认工作区）
+my-coder-web --workspace . --fake
 ```
 
-思维链（如 DeepSeek 的 `reasoning_content`）默认会以彩色 `[思考]` 实时显示，
-但**不会回灌给模型**，只作为痕迹数据写入日志。不需要看思考过程时加 `--hide-reasoning`：
+> `--workspace` **必填**：它是工具唯一的读写边界，由你显式声明。
+> 不带任务参数启动 CLI 会进入 REPL（多轮对话，`/exit` 退出，`--resume` 续上上次）。
+> Windows 控制台是 GBK，前面加 `--no-capture-output`（用 conda 时）可避免中文乱码；
+> 本仓库的开发环境是 conda，具体环境名与等价命令见 `AGENTS.md`。
 
-```sh
-python -m my_coder.cli --fake --workspace . --hide-reasoning "read README.md and summarize"
-```
+---
 
-## Web UI（DeepSeek 风格对话）
+## 能做什么
 
-UI 是日志的投影的第二个渲染器：同一份事件流，CLI 渲染成终端、Web 渲染成 DOM。
+### 十个工具
 
-Web 前端也是"投影架构"：页面只持有一份从日志重建的投影状态（`nodes`
-数组），**实时 SSE 与 /history 全量加载收敛到同一份投影、走同一个渲染
-入口**——DOM 只是投影的画布，不再当状态。刷新/切会话 = 从 /history 重建
-投影；实时流 = 同一投影在尾部增量生长（chunk 带 turn/step 结构标记，与
-历史载荷同构，见 `web/PROJECTION_DESIGN.md`）。
+| 工具 | 说明 |
+|---|---|
+| `read_file` / `list_files` | 读文件（行号分页，大文件不会一次读爆上下文）、列目录 |
+| `grep` / `glob` | 按内容搜 / 按路径找；跳过 `.git`、`.env` 等隐藏条目 |
+| `edit` / `write_file` | 精确字符串替换（零匹配或多匹配都拒绝改）/ 整文件写入 |
+| `bash` | 跑命令；非零退出码以 `[exit code: N]` 回给模型，输出上限 8000 字符 |
+| `todo_write` | 跨回合的任务清单——模型每次重发整张表，完成一项标一项 |
+| `web_search` | 联网搜索：走 **DeepSeek 官方原生搜索**（服务端工具），不自己抓网页 |
+| `skill` | 按名字取技能正文（包内 `bundled_skills/` + 工作区 `skills/`），技能是"指令文件"不是新能力 |
 
-```sh
-# 启动 Web 服务（默认 http://127.0.0.1:8000）
-# --workspace 是**默认**工作区：新建对话时不另外指定，就用它
-conda run -n agent-demo python -m my_coder.web --workspace . --fake    # 离线（不需要 key）
-conda run -n agent-demo python -m my_coder.web --workspace .           # 真实模型
-```
+`edit` / `write_file` / `bash` 执行前会**停下来等你批准**（CLI 输 `y`，Web 点按钮）；
+拒绝不是失败：模型会收到一条"没执行"的结果，自己换方案。工具失败（坏参数、异常、超时）
+一律降级成一条 `is_error` 结果，**不会炸掉对话**。
 
-浏览器打开 http://127.0.0.1:8000：
-- **每个对话可以有自己的工作区**（对齐 DSH 的 `SessionHeader.cwd`）：点「＋ 新建会话」
-  会先让你填目录（预填宿主默认 + 最近用过的工作区），工具只能读写这个目录；
-  选择被写成一条 `session/workspace` 痕迹事件，**切换会话/重启服务都回到同一个目录**。
-  工作区在创建时固定——想换目录就新建一个对话（半个对话换了沙箱根，前几轮读 A、
-  后几轮写 B，语义上说不清楚）。本功能之前建的会话跟随宿主默认工作区。
-- 流式输出、可折叠"已深度思考"、工具调用卡片（变体图标/状态点/摘要）
-- 会话可新建/切换/删除/**双击改名**（自动标题：首条消息后由模型概括起名，
-  逐字复读会被拒绝退回摘要）
-- 敏感工具弹 **Web 批准/拒绝按钮**（不再依赖 CLI stdin）
-- **常驻 todo dock**：模型每次 todo_write 清单实时更新面板，有清单才显示
-- **运行中可插队（steer）**：agent 干活时输入框仍可打字，回车 = 插队当前
-  回合（下一步即时处理，事件沿原 SSE 流推回）；idle 时回车 = 开新回合。
-  两会话并行跑互不干扰（每会话独立 agent/事件流/审批，seat 化隔离）
-- **待处理消息分区显示（对齐 DSH）**：已发出但还没轮到的消息，按它"为什么在
-  等"分区——普通排队（next-turn）进输入框上方的**队列区**（可折叠；行内编辑 /
-  撤回 / 提升为插队；Ctrl+Enter 整队插队）；插队（next-step）画在**消息流尾部**
-  的待处理气泡（它马上就要进对话，用户必须立刻看见）。两者都恒定贴尾、不猜
-  位置；claim 之后靠提交身份（rpc_id）原子交接成正式消息——不重复也不留空档
-- 输入行旁一枚**上下文占用圆环**（dsh ContextMeter 同款）：常态只有 20px+
-  SVG 环不占布局，点击展开悬浮面板——当前占用 %、**全会话累计消耗 token**、
-  **全会话缓存命中率**（真实 usage 才显示）；面板底部有**压缩旧对话**按钮
-  （手动触发 compaction，见下）
+### 两个入口，同一份日志
 
-运行后所有事件落在 `.sessions/<id>.jsonl`（每行一条事件），日志本身就是
-调试器——模型每一步看到什么、工具干了什么，都按 seq 记录在案。
+**CLI** 渲染成终端，**Web** 渲染成 DOM——UI 只是日志的投影，框架代码一行不改。
 
-## 上下文压缩（compaction）
+Web 端：流式输出 + 可折叠思维链 + 工具卡片 · 多会话管理（新建/切换/删除/双击改名，
+首条消息后自动起名）· 批准按钮 · **每对话一个工作区**（创建时定下、写进日志、不可变）·
+常驻 todo dock · **运行中插队**（`steer`）· 待处理消息分区（排队进队列区，插队画在消息流尾部）·
+输入框旁的**上下文占用圆环**（占用 %、全会话 token、缓存命中率、手动压缩按钮）·
+两会话并行互不干扰（按 seat 隔离）。
 
-长会话自动/手动折叠旧回合为结构化 checkpoint（preamble +
-`<compacted-summary>` 标签），上下文不无限膨胀：
+### 长会话不会撑爆
 
-- **四步事务**：`compaction/start` → `compaction/summary` → checkpoint
-  surface replace（原位顶替旧回合，位置语义不切正在进行的工作）→
-  `compaction/end`——对齐 dsh 的 start→summary→replace→end
-- **自动触发两机制**：溢出恢复（模型报"上下文过长"→ 压缩后重试）+ 阈值
-  自动压缩（`turn/end` 后超 0.5M/1M 窗口一半 → 后台压缩，`--compact-at` 可调）
-- **手动**：Web 圆环面板的「压缩旧对话」按钮（`POST /compact`），fake
-  模式/运行中会拒绝并提示
+`compaction` 把旧回合折叠成结构化 checkpoint（四步事务 + `<compacted-summary>` 标签）：
+**溢出恢复**（模型报上下文过长 → 压缩后重试）+ **阈值自动压缩**（默认过半窗口即压）+
+**手动压缩**（圆环面板按钮）。token 成本与缓存命中率是日志的投影，不需要第二份记账。
 
-## 一句话架构
+### 崩溃自愈
+
+进程被 kill / 断电时，日志可能停在"工具已调用、结果未落"之间——这会让之后的请求**永久 400**。
+恢复入口会自动补一条 `is_error` 合成结果并留下修复痕迹（`my_coder/state/recovery.py`），
+**重放 + 自愈 = 零额外状态代码**地续跑。
+
+---
+
+## 架构一眼
 
 ```
 用户输入 ─▶ Inbox（持久化队列） ─▶ wake 唤醒被动状态机 ─▶ turn/step 两级循环
@@ -110,173 +136,64 @@ conda run -n agent-demo python -m my_coder.web --workspace .           # 真实�
                                唯一事实源，全部状态都是它的投影
 ```
 
-## 架构：四层单向依赖
+包结构按**分层**组织，依赖方向只有一条（上层依赖下层，下层不感知上层），
+并且由 `tests/test_architecture.py` **机械检查**——下层 `import` 上层当场红：
 
 ```
-入口层   cli.py / web/        CLI 与 Web 两个入口（经 app/factory.build_agent 组装）
-         │
-框架循环 runtime/agent.py     被动状态机：send → inbox → wake → driver → idle
-         runtime/loop.py      turn/step 两级循环 + 三个钩子
-         │
-状态层   state/session.py     追加式事件日志（唯一事实源）+ derive_messages 投影
-         state/inbox.py       双队列 pending 消息（spliced 事件的持久化投影）
-         state/prompt.py      sections 按 order 拼接 + {{变量}} 严格插值
-         state/registry.py    工具类型：ToolSpec（schema + executor + 模式）
-         state/recovery.py    悬空工具调用自愈（崩溃后重放时补记）
-         │
-能力层   capability/llm.py    LLM 客户端（OpenAI 兼容流式 + FakeLlm）
-         capability/hooks.py  三个决策钩子的类型
-         │
-值 层    values/messages.py   不可变 Message/SessionEvent/ToolOutcome + tagged dict 编解码
-         values/persistence.py JSONL 追加写 + 重放读
-         values/limits.py     跨层共享的常量（有更低层要用的数字就下沉到这里）
-
-应用内容（可整层替换）：app/factory.py 组装 + app/{constants,sandbox,ui,compaction,
-instructions,skills}.py + tools/（read_file/list_files/grep/glob/edit/write_file/
-bash/todo_write/web_search/skill）
+入口   my_coder/cli.py · my_coder/web/                CLI 与 Web 两个宿主
+框架   my_coder/runtime/{agent,loop}.py               被动状态机 · turn/step 循环（step = 一次模型请求）
+状态   my_coder/state/{session,inbox,prompt,registry,recovery,runtime_status}.py
+能力   my_coder/capability/{llm,hooks}.py
+值     my_coder/values/{messages,persistence,limits}.py
+应用   my_coder/app/{factory,constants,sandbox,workspace,ui,skills,instructions,compaction}.py
+       my_coder/tools/（十个工具）· my_coder/bundled_skills/（随包发布的技能）
 ```
-
-依赖方向只有一条：上层依赖下层，下层不感知上层。**这条不再只靠纪律**——
-`tests/test_architecture.py` 按包结构机械检查（下层 import 上层当场红），只留两条带
-issue 号的例外。
-
-## 一次回合的数据流
-
-```
-用户输入 → create_user_message（值层：blocks + source + id，不可变）
-  → send → inbox.append → 先落 agent/inbox/spliced 日志，再改内存（入队即记账）
-  → wake → turn/start → claim（认领也落一条 spliced 删除事件）
-  → pre_step 钩子（可改写消息或拒绝）→ user/message 落日志
-  → step（**一次模型请求**）：
-      request/header 落日志（含 system 全文，resume 时恢复路由）
-      → 流式：有内容的 chunk 落 assistant/chunk；有思维链时另落 assistant/reasoning/chunk
-      → 结束时落完整 assistant/reasoning（痕迹数据，不进模型记忆）
-      → assistant/message 落日志（usage、finish_reason）
-      → 有工具调用：按声明的并发模式分组（并行段并发、独占工具逐个、结果按模型
-        顺序落盘），每结果落 tool/result 表面日志（规则见 `ARCHITECTURE.md` §3.15）
-      → step/end；**下一轮外层循环重新 claim**，插队消息在这里被吸收，
-        再由下一次请求把工具结果和插队文本一起带给模型
-  → turn/end{reason: completed|max-tokens|blocked|aborted|error} → 回 idle
-```
-
-> step 的粒度是"一次请求"而不是"整段工具循环"——这样插队消息能在**一次模型
-> 往返内**生效（见 `ARCHITECTURE.md` §3.6 的实测教训）。
-
-所有事件追加写入 `.sessions/<id>.jsonl`；恢复 = 重放（+ 自愈：补上崩溃留下的悬空
-工具调用，见 `state/recovery.py`），零额外状态代码。
 
 ## 五条不变式
 
-1. **日志是唯一事实源**：没有状态不进日志（工具结果、注入、配置变更都记）
-2. **模型可见 ⟺ 可重建**：同一段日志 derive 出同一份消息序列（测试断言这一点）
-3. **入队即记账**：inbox 改动先落 spliced 事件再改内存；队列是日志的投影
-4. **决策走钩子**：pre_step / request / request_error 三个钩子，循环里没有业务 if
-5. **取消单向传播**：asyncio.CancelledError 沿 await 链贯穿流式与工具执行
+改动任何代码时不能破的规则（细节见 `AGENTS.md`）：
 
-## 日志长什么样
+1. **没有状态不进日志**——工具结果、注入、配置变更都要落事件
+2. **模型可见 ⟺ 可重建**——只有三类 surface 事件能进模型消息，`derive_messages()` 是纯函数
+3. **入队即记账**——inbox 先落 `spliced` 事件再改内存，磁盘日志永远 ≥ 内存状态
+4. **决策走钩子/注册声明**——`pre_step` / `request` / `request_error` + 工具注册声明，循环里不写业务 `if`
+5. **失败降级为结果**——工具失败变 `is_error` 结果不炸循环；`CancelledError` 沿 await 链单向传播
 
-```jsonl
-{"seq":0,"type":"agent/inbox/spliced","data":{"target":"next-turn","start":0,"removed_count":0,"inserted":[...]}}
-{"seq":1,"type":"turn/start","data":{"turn":1}}
-{"seq":2,"type":"agent/inbox/spliced","data":{"target":"next-turn","start":0,"removed_count":1,"inserted":[]}}
-{"seq":3,"type":"step/start","data":{"turn":1,"step":1}}
-{"seq":4,"type":"user/message","data":{"$message":{...}},"surface_op":"append"}
-{"seq":5,"type":"request/header","data":{"provider":"deepseek","model":"deepseek-v4-flash","system":"...","tools":[...]}}
-{"seq":6,"type":"assistant/chunk","data":{"chunk":{"text":"..."}}}
-{"seq":7,"type":"assistant/reasoning/chunk","data":{"reasoning":"..."}}
-{"seq":8,"type":"assistant/reasoning","data":{"reasoning":"..."}}
-{"seq":9,"type":"assistant/message","data":{"message":{...}},"surface_op":"append"}
-{"seq":10,"type":"tool/call","data":{"call_id":"call-1","name":"read_file","arguments":"{...}"}}
-{"seq":11,"type":"tool/result","data":{"$message":{...}},"surface_op":"append"}
-{"seq":12,"type":"step/end","data":{"turn":1,"step":1}}
-{"seq":13,"type":"turn/end","data":{"turn":1,"reason":"completed"}}
-```
+---
 
-关键点：`surface_op:"append"` 标记"这条事件会变成模型消息"；`derive_messages()`
-只折叠这三种类型（user/message、assistant/message、tool/result），chunk、
-思维链、边界、todo 等是痕迹数据，不进模型请求。
+## 文档地图
 
-## 模块清单
-
-包 `my_coder/`（框架四层 + 应用内容；全部经 `my_coder/__init__.py` 组织）：
-
-| 文件 | 角色 |
+| 文档 | 回答什么问题 |
 |---|---|
-| `values/messages.py` | 值层：不可变 Message/SessionEvent/**ToolOutcome**（工具执行返回值，与 ToolResultBlock 是同一件事的两个阶段）+ tagged dict 编解码 |
-| `values/limits.py` | **跨层共享的常量**（判据：有更低层要用就下沉到这里——`TOOL_RESULT_MAX_CHARS` 原先住应用层，状态层要用它就把方向弄反了） |
-| `state/session.py` | 日志 + surface 折叠投影（append / derive_messages / adopt / request_header） |
-| `state/inbox.py` | 双队列（next-turn / next-step）+ claim 语义 + 持久化重放 |
-| `state/prompt.py` | sections 按 order 拼接 + `{{var}}` 严格插值（未注册/无值抛错） |
-| `state/registry.py` | 工具类型（ToolSpec：schema + executor + 并发模式 + 卸载声明 + 超时 + requires_approval；返回值 `ToolOutcome` 在 `values/messages.py`） |
-| `capability/llm.py` | OpenAI 兼容 SSE 流式客户端 + 可脚本化 FakeLlm + wire 格式纯函数（含思维链字段解析） |
-| `capability/hooks.py` | pre_step / request / request_error 三钩子 + approval 钩子的类型 |
-| `runtime/loop.py` | turn/step 两级循环 + 流组装 + 工具分组执行 + 思维链痕迹落盘 |
-| `runtime/agent.py` | 被动状态机：wake / kick / when_idle / cancel |
-| `values/persistence.py` | JSONL 追加写 + 重放读 |
-| `state/recovery.py` | 会话自愈：恢复时给崩溃留下的悬空工具调用补 is_error 合成结果 + 修复痕迹 |
-| `state/runtime_status.py` | **每轮叠给模型的运行时状态**（注册制贡献者）：名字 + `build(session) -> str\|None`；贡献者在 `app/factory.py` 注册，循环只收集与审计（issue #19） |
-| `app/instructions.py` | 工作区项目指令文件（AGENTS.md/CLAUDE.md）：子目录清单（每回合重扫）+ 根文件**三态**探测（每请求；`lstat`/`stat` 分开 + 读完校验缓存键）+ 字符预算 + system live 段 |
-| `app/skills.py` | 按需技能：两来源（包内 `bundled_skills/` + 工作区 `skills/`）按名字合并、workspace 同名覆盖；目录文本 + 按名字解析正文；`SkillTable` 按内容指纹缓存（目录段是 live 段——技能文件改了，下一次请求就生效）+ **工作区来源的越界检查** |
-| `bundled_skills/` | **随 agent 发布的技能正文**（`project-instructions.md`：怎么写 AGENTS.md）；`pyproject` package-data 保证装到别处也在 |
-| `tools/` | 应用工具（file_io.py 读/写/编辑、search.py grep/glob、shell.py bash、todo.py、**web_search.py 联网搜索**、**skill.py 按名字取技能正文**）+ `build_tools(workspace, skills=…)` 组装 |
-| `app/sandbox.py` | workspace 路径边界：工具入参的轻量沙箱（归一化 + 前缀匹配）+ **宿主直读文件的越界判据**（指令文件与技能共用） |
-| `app/ui.py` | 终端渲染（_render_event / _paint，UI 是日志投影） |
-| `app/factory.py` | build_agent / load_env（CLI 与 Web 共用组装） |
-| `app/workspace.py` | **工作区选择策略**：把用户输入的目录解析成绝对路径（空→宿主默认、相对路径按进程 cwd、`~` 展开），显式路径必须存在且是目录；Web 的"每对话一个工作区"就从这里进 |
-| `cli.py` | CLI 入口（单次任务 / 无任务参数进 REPL） |
-| `web/` | Web 宿主：`app.py` 路由+装配 / `state.py` Seat+宿主状态 / `sessions.py` 会话生命周期（含**每会话工作区**的解析与落日志）/ `titles.py` 自动标题 / `payload.py` 纯函数投影（FastAPI + SSE：会话/标题/approval/手动压缩/steer 插队） |
-| `app/compaction.py` | 上下文压缩引擎（四步事务 + checkpoint + 会话 token 累计账） |
-| `tests/` | 154 个架构测试，按关注点分 14 个文件（值/日志投影、inbox、prompt、loop、llm、tools、todo、recovery、compaction、instructions、skills、web_search、web、cli）+ `conftest.py`（跨文件 helper）+ **`test_architecture.py`**（2 条：依赖方向 = 包结构，白名单不许长僵尸） |
+| **`USAGE_zh.md`** | 只想把 agent 跑起来 —— 参数、会话恢复、审批、FAQ |
+| **`ARCHITECTURE.md`** | 为什么这样设计 —— 21 个核心机制、数据流、日志样例、模块职责、路线图 |
+| **`agent.md`** | 别人怎么做的 —— DSH / PI / opencode 三家机制对照（参考手册，非规范） |
+| **`NEXT_STEPS.md`** | 做到哪一步了 —— 实施进度、已定设计决策、待办 |
+| **`AGENTS.md`** | 给（AI）协作者看的规则 —— 命令、不变式、约定 |
+| **`web/PROJECTION_DESIGN.md`** | 前端为什么这么写 —— nodes 投影模型与 SSE 帧协议 |
+| `show_memory.py` | 亲手验证"记忆 = 日志投影" —— 重放日志，打印每次请求时的消息序列 |
 
-> `web_search` 与 `skill` 是两个"读工作区之外"的工具：搜索由 **DeepSeek 官方在服务端**
-> 执行（Anthropic 兼容端点 + 原生服务端工具 `web_search_20250305`），我们只发请求、
-> 解析结构化结果块——不自己抓网页、不从模型正文里抠 URL；`skill` 按**名字**（不是路径）
-> 取技能正文，自带技能因此够得着包内文件，而模型没有机会拼出任意路径。两者都不走
-> workspace 沙箱、也不需要 approval；代价是一次搜索 = 一个完整模型轮次。
-
-## 与 harness 的保真度对照
-
-| 学到并实现 | 简化/未实现（harness 的生产级增量） |
-|---|---|
-| surface 事件标记 + 纯函数折叠投影；**replace 区间遮蔽（位置语义，compaction 用）** | 遮蔽区间溯源校验 |
-| Inbox 双队列 + claim 语义 + 持久化重放；**steer 插队（同回合 next-step）；step = 一次模型请求（插队一次往返内被吸收）** | 多宿主并发仲裁、turn-stopping 钩子、`concludesTurn` 提前收尾 |
-| sections + 严格 `{{var}}` 插值 | 作用域链 shadow（子 agent 换 persona）、complete 段 |
-| 工具分组执行 + 坏 JSON 兜底；**并发许可 fail-closed + 连续段分组 + 池上限 + 按模型顺序提交 + 取消补合成结果**；**approval/权限桥 + `[exit code: N]` 跨调用准则** | OS 级沙箱（landlock/bwrap/seatbelt）、事件瀑布审批 |
-| request/header 落日志 + resume 恢复路由；**checkpoint 策略（四步事务 + 结构化摘要）** | 持久化后端抽象、token 预算选段 |
-| 三个钩子（回调版） | 事件总线（emit/serial/waterfall + 作用域过滤） |
-| CancelledError 贯穿 + when_idle 收敛 | 三源 abort 熔合（调用方/owner fiber/工厂销毁） |
-| JSONL 追加 + adopt 重放 | 未知事件类型拒绝策略、ignorable 标记 |
-| OpenAI function-call wire 格式（真模型可调工具）；**compaction 触发（自动阈值 + 溢出恢复 + 手动）** | max-tokens 粘性续写、后台任务编排 |
-
-## 测试覆盖的架构行为
-
-- 日志推导：只有 surface 事件投影成消息，顺序可重建
-- Inbox：先记账后投影、重放恢复、claim 批次语义、重复 id 拒绝
-- 插值：严格校验、字面量大括号、嵌套大括号拒绝
-- 工具循环：假模型两步脚本（tool-call → 文本）跑通完整回合
-- 钩子：pre_step 改写/拒绝、request_error 重试（RATE_LIMIT 后恢复）
-- 取消：中途 cancel → turn/end 记 aborted → 状态机回 idle
-- 持久化：JSONL 回写回放、resume 恢复队列与回合号
-- wire 格式：OpenAI function 包装、tool_calls 回传、role:tool 结果
-- 工具：read_file 行号分页（offset/limit/line_numbers、越界与坏参数降级为 is_error）
-- 沙箱：workspace 边界（绝对路径越界、`..` 逃逸、越界写入不落盘、grep/glob 越界拒绝）
-- 工具：grep/glob 搜索（分组/截断/include）、edit 字面量唯一匹配（零/多匹配拒绝）、bash 退出码/截断/超时 kill
-- approval：敏感工具（bash/write_file/edit）执行前确认（拒绝 → tool/skipped + is_error 结果）
-- compaction：选区/遮蔽位置语义、事务事件序列、摘要失败降级、自动阈值触发、溢出恢复、会话 token 累计账、手动压缩 endpoint
+---
 
 ## 安全警告
 
-所有文件工具被限制在**当前对话的工作区**内（CLI 是 `--workspace`，**必填**；Web 是每个
-对话各自选的目录，见上文），越界读写返回 `path outside workspace` 错误结果——这是
-**纯用户态的路径边界**（归一化 + 前缀匹配，对齐 harness 的 fs-sandbox 思路），
-**不是 OS 级沙箱**：工作区内任意读写、TOCTOU 竞态（校验与访问之间的时间窗）、
-符号链接竞态都不设防。
-`bash` 工具**没有命令级沙箱**（命令可以删除工作区外的文件），刹车只有
-两道：`cwd` 限制 + approval 确认门（执行前人工确认，默认拒绝）。
+文件工具被限制在**当前对话的工作区**内（越界返回 `path outside workspace` 错误结果）。
+这是**纯用户态的路径边界**（归一化 + 前缀匹配），**不是 OS 级沙箱**：工作区内任意读写、
+TOCTOU 竞态、符号链接竞态都不设防。`bash` **没有命令级沙箱**（命令可以删除工作区外的文件），
+刹车只有两道：`cwd` 限制 + 审批确认门。
 
-**Web 的工作区选择是"信任界面使用者"模型**（对齐 DSH 的本地工具形态）：只校验
-"路径存在 + 是目录"，**没有白名单**——能点这个界面的人，本来就等于把该目录的读写
-交给 agent（Web 默认只绑 `127.0.0.1`，且不校验来源，所以**不要**把它暴露到网络上）。
-想收紧的话，判据只有一处（`my_coder/app/workspace.py` 的 `resolve_workspace`），
-在那里加白名单即可，调用方不用改。
-只用于本地学习，不要暴露给不可信的输入。
+Web 端默认只绑 `127.0.0.1` 且不校验来源——**不要**把它暴露到网络上。仅供本地学习与个人使用。
+
+## 开发
+
+```sh
+python -m ruff check my_coder tests   # 风格
+python -m mypy my_coder               # 类型
+python -m pytest                      # 154 个测试（3 条平台相关会 skip）
+```
+
+三绿才提交。测试按关注点分 15 个文件 + `conftest.py` + `test_architecture.py`（依赖方向 = 包结构）。
+
+## License
+
+MIT —— 声明在 `pyproject.toml` 的 `license` 字段（仓库暂未放 `LICENSE` 文件）。
