@@ -347,8 +347,9 @@ SystemContext 的形态一致，todo 只是通用状态栏的第一个贡献者�
   不进 derive_messages → 历史零污染 ✓
 - 缓存：状态栏在 messages 尾部 → 前缀（system+历史）稳定命中，只有尾部
   新内容 ✓（对比 system 动态段一变断全前缀）
-- **未来扩展**（已共识方向、非本期）：状态栏容器可含多块
-  （`<agent_status>` 内 `<todo_status>` + `<goal>` + 未来贡献者）；
+- **未来扩展**（已共识方向）：状态栏容器可含多块（`<agent_status>` 内 `<todo_status>` +
+  `<goal>` + 未来贡献者）——**容器这一层已经落地**（issue #19 的 `RuntimeStatusRegistry`，
+  加一块就是在 `app/factory.py` 注册一行，多个来源进 `request/header.runtime_status` 映射）；
   goal 语义与机制待单独讨论（DSH 参照：`<goal_round>` XML + objective/phase
   生命周期 + 独立 driver，与 runtime-context 是两套机制）
 
