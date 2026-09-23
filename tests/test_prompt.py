@@ -96,3 +96,6 @@ async def test_system_prompt_carries_general_discipline(tmp_path):
     # 通用段排在工具段之前；且"验证"不再等同于"执行"（理解代码不必跑命令）
     assert system.index('Scope:') < system.index('Use bash')
     assert 'reading code needs no execution' in system
+    # Evidence 的后半句：临时脚本/产物要自己收尾（真被踩过——一次会话在仓库根留下三个
+    # `_tmp_*` 扫描脚本，用户得先分辨哪些是垃圾才能看 diff）
+    assert 'clean up after yourself' in system
