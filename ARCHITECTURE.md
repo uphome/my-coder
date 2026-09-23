@@ -699,7 +699,7 @@ workspace 沙箱）；DSH 式沙箱承诺又把可读范围锁在工作区内。
 | `web/` | Web 宿主（入口层）：`app.py` FastAPI 路由 + `init_web` + `main`；`state.py` `Seat`/`WebState`/`state`；`sessions.py` seat 生命周期 + 会话文件 + 审批钩子 + **每会话工作区**（解析、落 `session/workspace` 事件、从日志读回）；`titles.py` 自动会话标题；`payload.py` 纯函数投影（不依赖 FastAPI）。seat 化并发隔离（每 seat 一份 `args`，**只有 workspace 不同**）；事件透传 turn/step + turn_start/user_message（带 message_id/rpc_id）/queue_update 帧供前端投影；队列项操作 `POST /queue/update`；`POST /sessions/new` 可带 `{"workspace": "…"}` |
 | `app/compaction.py` | 上下文压缩引擎（四步事务 + checkpoint + 会话 token 累计账） |
 | `show_memory.py` | 教学脚本：重放日志展示"记忆 = 投影" |
-| `tests/` | 141 个架构测试，**按关注点分文件**（2026-09 从单文件 `test_demo.py` 拆出）：`test_values_session.py` 值/日志投影、`test_inbox.py` 队列、`test_prompt.py` 提示词、`test_llm.py` LLM 客户端/wire 格式、`test_loop.py` 框架循环、`test_tools.py` 工具、`test_todo.py`、`test_recovery.py` 自愈、`test_compaction.py` 压缩、`test_instructions.py` / `test_skills.py` 宿主直读、`test_web_search.py`、`test_web.py` Web 宿主（含每对话工作区）、`test_cli.py`；跨文件 helper 在 `conftest.py`；**`test_architecture.py`**（2 条：依赖方向 = 包结构——下层 import 上层当场红，白名单里的例外必须仍然真实存在，不许长僵尸）。3 条平台相关（Windows 建不了符号链接时 skip） |
+| `tests/` | 142 个架构测试，**按关注点分文件**（2026-09 从单文件 `test_demo.py` 拆出）：`test_values_session.py` 值/日志投影、`test_inbox.py` 队列、`test_prompt.py` 提示词、`test_llm.py` LLM 客户端/wire 格式、`test_loop.py` 框架循环、`test_tools.py` 工具、`test_todo.py`、`test_recovery.py` 自愈、`test_compaction.py` 压缩、`test_instructions.py` / `test_skills.py` 宿主直读、`test_web_search.py`、`test_web.py` Web 宿主（含每对话工作区）、`test_cli.py`；跨文件 helper 在 `conftest.py`；**`test_architecture.py`**（2 条：依赖方向 = 包结构——下层 import 上层当场红，白名单里的例外必须仍然真实存在，不许长僵尸）。3 条平台相关（Windows 建不了符号链接时 skip） |
 
 ---
 

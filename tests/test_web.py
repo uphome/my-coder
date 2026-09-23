@@ -1065,6 +1065,41 @@ def test_resolve_workspace_policy(tmp_path):
         == (tmp_path / 'ghost-default').resolve()
 
 
+def test_web_list_and_seat_agree_on_a_hand_written_workspace(tmp_path, monkeypatch):
+    """列表与 seat 用**同一条规则**解释日志里的工作区（相对路径按进程 cwd）。
+
+    日志是我们自己写的（绝对路径），但手改过的日志可能是相对路径。这时"列表显示 `rel-ws`、
+    工具实际在 `<cwd>/rel-ws`"是最难查的一类不一致——两边单看都合理。所以解析规则只能有
+    一处实现（`app/workspace.py` 的 `normalize_recorded_workspace`），这条测试盯住它。
+    """
+    from pathlib import Path
+
+    from fastapi.testclient import TestClient
+
+    from agent_demo import web
+    from agent_demo.web.sessions import open_session_seat as _open_seat
+
+    sessions_dir = tmp_path / 'sess'
+    sessions_dir.mkdir()
+    (tmp_path / 'rel-ws').mkdir()
+    (sessions_dir / 'hand.jsonl').write_text(
+        json.dumps({'seq': 0, 'time': 0.0, 'type': 'session/workspace',
+                    'data': {'$dict': {'workspace': 'rel-ws', 'source': 'user'}},
+                    'surface_op': None, 'shadowed': None, 'ignorable': False}) + '\n',
+        encoding='utf-8')
+
+    host = tmp_path / 'host'
+    host.mkdir()
+    web.init_web(host, fake=True, sessions_dir=sessions_dir)
+    client = TestClient(web.app)
+    monkeypatch.chdir(tmp_path)          # 相对路径的解析基准 = 进程 cwd
+
+    items = {item['id']: item['workspace'] for item in client.get('/sessions').json()}
+    assert Path(items['hand']) == (tmp_path / 'rel-ws').resolve()
+    seat = _open_seat('hand', allow_missing=False)
+    assert Path(seat.args.workspace) == Path(items['hand'])   # 两处一致才是重点
+
+
 def test_web_new_session_ids_do_not_collide_within_a_second(tmp_path, monkeypatch):
     """同一秒内连开两个对话不能撞 id：撞了会**静默复用**上一个会话（工作区还被拒改）。
 

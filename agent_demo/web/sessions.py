@@ -27,7 +27,7 @@ from pathlib import Path
 from fastapi import HTTPException
 
 from ..app.factory import build_agent
-from ..app.workspace import resolve_workspace
+from ..app.workspace import normalize_recorded_workspace, resolve_workspace
 from ..capability.hooks import Hooks
 from ..state.recovery import repair_dangling_tool_calls
 from ..state.session import Session
@@ -174,8 +174,8 @@ def _resolve_seat_workspace(*, workspace: str | Path | None, logged: str | None)
             raise HTTPException(400, str(error)) from error
     if logged:
         # 日志里记的应该是绝对路径（我们自己写的），但手改过的日志可能有相对路径/`~`——
-        # 统一 resolve 一次再判断，判断与使用落在同一个值上
-        recorded = Path(logged).expanduser().resolve()
+        # 走 `normalize_recorded_workspace`（**与列表同一处实现**，这条判据不写第二遍）
+        recorded = normalize_recorded_workspace(logged)
         if not recorded.is_dir():
             raise HTTPException(
                 409, f'this session\'s workspace is gone: {recorded} — '
@@ -248,13 +248,18 @@ def scan_sessions() -> list[dict]:
                         title_source = data.get('source', '')
                     except (TypeError, ValueError, KeyError):
                         pass
-                # 最后一条 session/workspace 事件即当前工作区（同上）
+                # 最后一条 session/workspace 事件即当前工作区（同上）。
+                # 归一化走 `normalize_recorded_workspace`：列表与 seat 必须**同一条规则**
+                # （否则"列表显示 rel-ws、工具在 <cwd>/rel-ws"这类不一致最难查）；解析失败
+                # （坏路径/循环链接）就退回原字符串——列表只是信息，不该因一条坏记录整页报错
                 if '"type": "session/workspace"' in line:
                     try:
                         data = (json.loads(line).get('data') or {}).get('$dict') or {}
-                        workspace = data.get('workspace', '')
-                    except (TypeError, ValueError, KeyError):
-                        pass
+                        raw = data.get('workspace', '')
+                        if raw:
+                            workspace = str(normalize_recorded_workspace(raw))
+                    except (TypeError, ValueError, KeyError, OSError):
+                        workspace = raw if isinstance(raw, str) else ''
         items.append({
             'id': path.stem,
             'events': events,

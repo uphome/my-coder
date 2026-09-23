@@ -40,3 +40,17 @@ def resolve_workspace(raw: str | Path | None, *, default: Path) -> Path:
     if not resolved.is_dir():
         raise ValueError(f'workspace is not a directory: {resolved}')
     return resolved
+
+
+def normalize_recorded_workspace(raw: str) -> Path:
+    """**日志里记着**的工作区 → 绝对路径（相对路径按进程 cwd、`~` 展开）。
+
+    为什么单独一条：写入时我们记的是绝对路径，但日志是可以手改的（也可能来自更早的版本）。
+    **列表（`web/sessions.scan_sessions`）与 seat（`web/sessions._resolve_seat_workspace`）
+    必须用同一条规则解释它**——否则会出现"列表显示 `rel-ws`、工具实际在 `<cwd>/rel-ws`"
+    这种两处不一致，而这类不一致最难查（两边单看都合理）。
+
+    不检查存在性：**是否存在由调用方按各自语义处理**——列表照原样显示（它只是信息），
+    seat 发现不是目录就 409 报错（绝不静默回退）。
+    """
+    return Path(raw).expanduser().resolve()
