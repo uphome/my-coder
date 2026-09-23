@@ -93,7 +93,7 @@ class Agent:
     def last_turn(self) -> int:
         """最近一个**已开始**的回合号（0 = 还没跑过回合）。
 
-        live 段拿它当"刷新纪元"用（`app/app/factory.py` 的 instructions 段）：子目录清单是
+        live 段拿它当"刷新纪元"用（`app/factory.py` 的 instructions 段）：子目录清单是
         全树遍历，比一次 stat 贵三个数量级，所以按回合刷新而不是按请求刷新。
         """
         return self._last_turn
