@@ -533,7 +533,7 @@ pyproject.toml            打包 + ruff / mypy / pytest 配置 + console scripts
 ```
 
 - 步骤 1 模块化 ✅（38 测试全绿，git 全程识别 rename 保留历史）
-- 步骤 2 打包 ✅（`pip install -e .`，`MyCoder` / `my-coder-web` 命令）
+- 步骤 2 打包 ✅（`pip install -e .`，`my-coder` / `my-coder-web` 命令）
 - 步骤 3 工程化 ✅（ruff 清零 / mypy 清零；质量门三绿才提交。**CI 已按上面的理由移除**）
 - 步骤 4 功能：上下文压缩全套 + Web ContextMeter + Web 会话并发隔离 +
   steer 插队 + CLI REPL（已完成，见下节）；阶段四工程化打磨（配置/日志

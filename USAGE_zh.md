@@ -65,6 +65,10 @@ pip install -e ".[dev]"      # httpx / fastapi / uvicorn / ruff / mypy + my-code
 
 后续所有命令都在**仓库根目录**执行。
 
+> 环境里装过**旧名字**（`agent-demo`）的话，升级时先 `pip uninstall agent-demo` 再 `pip install -e ".[dev]"`：
+> pip 不会替你移除另一个发行名的旧 `dist-info`，留着的 `agent-demo` 命令脚本会直接报
+> `ModuleNotFoundError`（它指向的模块已经不存在了）。
+
 ## 2. 最快跑通（离线，30 秒）
 
 ```sh
