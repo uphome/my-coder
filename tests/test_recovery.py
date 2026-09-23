@@ -1,14 +1,13 @@
 """崩溃自愈：悬空工具调用补齐 + 修复痕迹 + 幂等（含 Web 入口级验证）。
 
-（2026-09 从单文件 tests/test_demo.py 按关注点拆出：**只搬家、不改断言**。）
+（2026-09 从单文件 tests/test_demo.py 按关注点拆出：**断言与用例体一字未改**；
+唯一差异是 26 处函数内冗余 import 被 ruff 的 F401/F811 删掉——那是拆分暴露出来的旧问题。）
 """
 from __future__ import annotations
 
 import json
 
-from agent_demo.llm import (
-    _to_wire_messages,
-)
+from agent_demo.llm import _to_wire_messages
 from agent_demo.persistence import load_events, save_event
 from agent_demo.recovery import dangling_tool_calls, repair_dangling_tool_calls
 from agent_demo.session import Session
@@ -20,6 +19,10 @@ from agent_demo.values import (
     create_tool_result_message,
     create_user_message,
 )
+
+# ---------------------------------------------------------------------------
+# 崩溃自愈：进程被 kill / 断电留下的"悬空工具调用"（恢复时补记，见 recovery.py）
+# ---------------------------------------------------------------------------
 
 
 def _write_crash_log(path, *, with_trace=True):

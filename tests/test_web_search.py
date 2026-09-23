@@ -1,6 +1,7 @@
 """web_search：结构化块解析、摘要合并、后端请求形状与失败降级。
 
-（2026-09 从单文件 tests/test_demo.py 按关注点拆出：**只搬家、不改断言**。）
+（2026-09 从单文件 tests/test_demo.py 按关注点拆出：**断言与用例体一字未改**；
+唯一差异是 26 处函数内冗余 import 被 ruff 的 F401/F811 删掉——那是拆分暴露出来的旧问题。）
 """
 from __future__ import annotations
 
@@ -11,6 +12,14 @@ import pytest
 
 from agent_demo.registry import ToolRegistry
 from agent_demo.session import Session
+
+# ============================================================
+# web_search —— DeepSeek 官方原生搜索（Anthropic 兼容 Messages 端点）
+#
+# 搜索由服务端 `web_search_20250305` 工具执行，我们只解析结构化块
+# （web_search_tool_result → web_search_result），绝不抓网页、绝不去
+# text 正文里抠 URL。夹具剪裁自真实响应（page_age 实测为 null）。
+# ============================================================
 
 # 夹具：含重复 URL（验证去重）、空 title（验证 label 退化到 hostname）、
 # 一条非 web_search_result 项（验证被跳过）。

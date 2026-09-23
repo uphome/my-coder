@@ -1,6 +1,7 @@
 """框架循环：turn/step 粒度、三个钩子、取消、工具并发调度与 steer 插队。
 
-（2026-09 从单文件 tests/test_demo.py 按关注点拆出：**只搬家、不改断言**。）
+（2026-09 从单文件 tests/test_demo.py 按关注点拆出：**断言与用例体一字未改**；
+唯一差异是 26 处函数内冗余 import 被 ruff 的 F401/F811 删掉——那是拆分暴露出来的旧问题。）
 """
 from __future__ import annotations
 
@@ -14,19 +15,11 @@ from conftest import make_agent
 from agent_demo import loop as loop_module
 from agent_demo.agent import Agent
 from agent_demo.hooks import Hooks, PreStepContext, RequestErrorContext
-from agent_demo.llm import (
-    FakeLlm,
-    StreamChunk,
-)
+from agent_demo.llm import FakeLlm, StreamChunk
 from agent_demo.prompt import PromptRegistry
 from agent_demo.registry import ToolOutcome, ToolRegistry, ToolSpec
 from agent_demo.session import Session
-from agent_demo.values import (
-    TextBlock,
-    ToolCallBlock,
-    ToolResultBlock,
-    create_user_message,
-)
+from agent_demo.values import TextBlock, ToolCallBlock, ToolResultBlock, create_user_message
 
 
 @pytest.mark.asyncio
@@ -148,6 +141,12 @@ async def test_cancel_aborts_turn():
     assert session.events[-1].data['reason'] == 'aborted'
     assert agent.status == 'idle'
     assert not agent.inbox.has_pending
+
+
+# ---------------------------------------------------------------------------
+# 工具并发调度：fail-closed 默认 / 连续段屏障 / 有序提交 / 池上限 / 卸载 / 取消补记账
+# 对齐 harness core/agent-loop/src/tool-calls.ts（普通说明见 loop._run_group 的注释）
+# ---------------------------------------------------------------------------
 
 
 def _spec(name, execute, *, execution_mode='sequential', offload=False,

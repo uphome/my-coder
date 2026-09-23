@@ -1,6 +1,7 @@
 """值层与日志投影：surface 折叠、persistence 往返、resume、replace 遮蔽。
 
-（2026-09 从单文件 tests/test_demo.py 按关注点拆出：**只搬家、不改断言**。）
+（2026-09 从单文件 tests/test_demo.py 按关注点拆出：**断言与用例体一字未改**；
+唯一差异是 26 处函数内冗余 import 被 ruff 的 F401/F811 删掉——那是拆分暴露出来的旧问题。）
 """
 from __future__ import annotations
 
@@ -9,11 +10,7 @@ from conftest import make_agent
 
 from agent_demo.persistence import load_events, save_event
 from agent_demo.session import Session
-from agent_demo.values import (
-    TextBlock,
-    create_assistant_message,
-    create_user_message,
-)
+from agent_demo.values import TextBlock, create_assistant_message, create_user_message
 
 
 def test_session_derive_only_surface_projects():

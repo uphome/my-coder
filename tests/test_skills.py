@@ -1,6 +1,7 @@
 """技能：两来源合并、目录注入、按名字取正文、新鲜度缓存与越界检查。
 
-（2026-09 从单文件 tests/test_demo.py 按关注点拆出：**只搬家、不改断言**。）
+（2026-09 从单文件 tests/test_demo.py 按关注点拆出：**断言与用例体一字未改**；
+唯一差异是 26 处函数内冗余 import 被 ruff 的 F401/F811 删掉——那是拆分暴露出来的旧问题。）
 """
 from __future__ import annotations
 
@@ -10,9 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_demo.llm import (
-    FakeLlm,
-)
+from agent_demo.llm import FakeLlm
 from agent_demo.session import Session
 from agent_demo.tools import build_tools
 
@@ -119,6 +118,12 @@ async def test_skill_catalog_injected_into_system(tmp_path):
 
     # 目录段在工具提示段之前（todo 为空时无 todo 段，取 bash 提示为序界）
     assert system.index('可用技能') < system.index('Use bash')
+
+
+# ---------------------------------------------------------------------------
+# 技能两个来源：bundled（随 agent 发布，包内）→ workspace（同名覆盖）
+# 背景与取舍见 agent_demo/skills.py 的模块 docstring（issue #22）
+# ---------------------------------------------------------------------------
 
 
 def test_bundled_skills_reach_an_arbitrary_workspace(tmp_path):

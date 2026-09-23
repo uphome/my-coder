@@ -1,6 +1,7 @@
 """工作区指令文件：三态探测、预算、live 段、子目录清单与越界检查。
 
-（2026-09 从单文件 tests/test_demo.py 按关注点拆出：**只搬家、不改断言**。）
+（2026-09 从单文件 tests/test_demo.py 按关注点拆出：**断言与用例体一字未改**；
+唯一差异是 26 处函数内冗余 import 被 ruff 的 F401/F811 删掉——那是拆分暴露出来的旧问题。）
 """
 from __future__ import annotations
 
@@ -13,10 +14,12 @@ from agent_demo.instructions import (
     INSTRUCTION_MAX_SOURCE_BYTES,
     InstructionLoader,
 )
-from agent_demo.llm import (
-    FakeLlm,
-)
+from agent_demo.llm import FakeLlm
 from agent_demo.session import Session
+
+# ---------------------------------------------------------------------------
+# 工作区项目指令文件（AGENTS.md / CLAUDE.md）：发现 + 预算 + live 注入（issue #6）
+# ---------------------------------------------------------------------------
 
 
 def test_instructions_section_reports_a_missing_file(tmp_path):

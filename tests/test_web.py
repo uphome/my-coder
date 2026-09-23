@@ -1,6 +1,7 @@
 """Web 宿主：SSE 流、会话管理/标题、队列动作、审批、并发隔离与断开取消。
 
-（2026-09 从单文件 tests/test_demo.py 按关注点拆出：**只搬家、不改断言**。）
+（2026-09 从单文件 tests/test_demo.py 按关注点拆出：**断言与用例体一字未改**；
+唯一差异是 26 处函数内冗余 import 被 ruff 的 F401/F811 删掉——那是拆分暴露出来的旧问题。）
 """
 from __future__ import annotations
 
@@ -10,12 +11,8 @@ import json
 import httpx
 import pytest
 
-from agent_demo.constants import (
-    MODEL_CONTEXT_WINDOW,
-)
-from agent_demo.llm import (
-    StreamChunk,
-)
+from agent_demo.constants import MODEL_CONTEXT_WINDOW
+from agent_demo.llm import StreamChunk
 from agent_demo.persistence import load_events, save_event
 from agent_demo.session import Session
 from agent_demo.values import (

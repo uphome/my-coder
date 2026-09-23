@@ -1,6 +1,7 @@
 """todo：整表写入、状态栏折叠成 messages 末尾的合成消息、跨回合持续。
 
-（2026-09 从单文件 tests/test_demo.py 按关注点拆出：**只搬家、不改断言**。）
+（2026-09 从单文件 tests/test_demo.py 按关注点拆出：**断言与用例体一字未改**；
+唯一差异是 26 处函数内冗余 import 被 ruff 的 F401/F811 删掉——那是拆分暴露出来的旧问题。）
 """
 from __future__ import annotations
 
@@ -9,9 +10,7 @@ import json
 
 import pytest
 
-from agent_demo.llm import (
-    FakeLlm,
-)
+from agent_demo.llm import FakeLlm
 from agent_demo.persistence import load_events, save_event
 from agent_demo.prompt import PromptRegistry
 from agent_demo.registry import ToolSpec
