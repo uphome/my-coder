@@ -858,6 +858,11 @@ def test_web_per_session_workspace_isolates_the_sandbox(tmp_path):
     web.init_web(root_a, fake=True, sessions_dir=tmp_path / 'sess')
     client = TestClient(web.app)
 
+    # /meta 给的是**宿主默认**工作区 + 进程 cwd（前端预填与相对路径提示用）
+    meta = client.get('/meta').json()
+    assert Path(meta['workspace']) == root_a.resolve()
+    assert Path(meta['cwd']) == Path.cwd().resolve()
+
     # 宿主默认会话（'web'）：没选工作区 → 宿主默认 A
     client.post('/chat', json={'message': 'read README.md and summarize'})
     assert any('# A' in text for text in _tool_texts(client))
@@ -960,6 +965,7 @@ def test_web_workspace_validation_and_immutability(tmp_path):
     from fastapi.testclient import TestClient
 
     from agent_demo import web
+    from agent_demo.web.sessions import WORKSPACE_FIXED_MESSAGE
     from agent_demo.web.sessions import open_session_seat as _open_seat
 
     root_a = tmp_path / 'a'
@@ -993,6 +999,14 @@ def test_web_workspace_validation_and_immutability(tmp_path):
     assert 'fixed' in error.value.detail
     assert Path(seat.args.workspace) == root_a.resolve()
     assert isinstance(seat.args, argparse.Namespace)
+
+    # 另一条入口也要拦：**磁盘上有日志、内存里还没 seat**（服务刚重启 / 重新 init）——
+    # 这条若"静默忽略"，调用方会以为换成功了，实际工具还在旧根上
+    web.init_web(root_a, fake=True, sessions_dir=tmp_path / 'sess')   # 清空 seat 注册表
+    with pytest.raises(HTTPException) as error:
+        _open_seat(sid, allow_missing=False, workspace=str(root_b))
+    assert error.value.status_code == 400
+    assert error.value.detail == WORKSPACE_FIXED_MESSAGE
 
 
 def test_web_reopening_a_session_whose_workspace_is_gone_is_loud(tmp_path):
@@ -1051,17 +1065,27 @@ def test_resolve_workspace_policy(tmp_path):
         == (tmp_path / 'ghost-default').resolve()
 
 
-def test_web_new_session_ids_do_not_collide_within_a_second(tmp_path):
-    """同一秒内连开两个对话不能撞 id：撞了会**静默复用**上一个会话（工作区还被拒改）。"""
+def test_web_new_session_ids_do_not_collide_within_a_second(tmp_path, monkeypatch):
+    """同一秒内连开两个对话不能撞 id：撞了会**静默复用**上一个会话（工作区还被拒改）。
+
+    把时钟钉死，让"基础 id 已被占用"这一态**确定性地**出现——否则只有恰好跨秒才走到
+    顺延分支，测试看起来绿其实没覆盖。（补丁打在标准库 `time.time` 上：路由就是通过
+    `time.time()` 取时间戳的，pytest 的 monkeypatch 会在用例结束还原。）
+    """
     from fastapi.testclient import TestClient
 
     from agent_demo import web
 
-    web.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
+    monkeypatch.setattr('time.time', lambda: 1_700_000_000.0)
+    sessions_dir = tmp_path / 'sess'
+    web.init_web(tmp_path, fake=True, sessions_dir=sessions_dir)
     client = TestClient(web.app)
+
     first = client.post('/sessions/new').json()['id']
+    assert first == 'web-1700000000'
     second = client.post('/sessions/new').json()['id']
-    assert first != second
-    assert second.startswith('web-')
-    assert len(client.get('/sessions').json()) == 3  # 'web' + 两个新会话，都在列表里
+    assert second == 'web-1700000000-2'          # 顺延分支
+    (sessions_dir / f'{second}.jsonl').touch()
+    assert client.post('/sessions/new').json()['id'] == 'web-1700000000-3'
+    assert len(client.get('/sessions').json()) == 4  # 'web' + 三个新会话，都在列表里
 

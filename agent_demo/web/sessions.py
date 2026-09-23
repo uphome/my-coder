@@ -40,6 +40,12 @@ from .state import Seat, state
 # 用户不点则 fail-safe 拒绝（防模型永久卡住）。
 APPROVAL_TIMEOUT_S = 300
 
+# 工作区在会话创建时定下，之后给已有会话再传 workspace 一律拒绝（两条入口共用一句话：
+# 一条是内存里已有 seat，一条是磁盘上有日志但还没建 seat——后者如果"静默忽略"，
+# 调用方会以为换成功了，实际工具还在旧根上，属于最坏的一类不一致）
+WORKSPACE_FIXED_MESSAGE = ('workspace is fixed when the session is created — '
+                           'start a new conversation to use another one')
+
 
 def spawn(coro) -> asyncio.Task:
     """创建并登记一个后台任务；完成时自动从注册表移除。"""
@@ -89,22 +95,24 @@ def open_session_seat(sid: str, *, allow_missing: bool,
     - 新建会话：用调用方给的 `workspace`（空 = 宿主默认），并**落一条
       `session/workspace` 痕迹事件**——"这个对话属于哪个文件夹"因此成为日志的事实，
       重开/重启都回到同一个地方；
-    - 打开已有会话：从日志里读回工作区（`session.workspace()`），忽略调用方给的
-      `workspace`（想换工作区就新建对话——半个对话换了沙箱根，前几轮读的是 A、
-      后几轮写的是 B，语义上说不清楚）；
+    - 打开已有会话：从日志里读回工作区（`session.workspace()`）；此时**再传 workspace
+      一律 400**（`WORKSPACE_FIXED_MESSAGE`）——想换工作区就新建对话（半个对话换了沙箱根，
+      前几轮读的是 A、后几轮写的是 B，语义上说不清楚）。两条入口都要拦：内存里已有 seat 的
+      那条，以及"磁盘上有日志但还没建 seat"的那条（后者若静默忽略，调用方会以为换成功了）；
     - 老会话（本功能之前建的，日志里没有这条事件）：跟随**宿主默认工作区**，
       并且**不回头改写它的日志**（历史保持原样）。
     """
     log_path = (state.sessions_dir or Path('.sessions')) / f'{sid}.jsonl'
     if not allow_missing and not log_path.exists():
         raise HTTPException(404, f'session {sid!r} not found')
+    is_new = not log_path.exists()
     seat = state.seats.get(sid)
     if seat is not None:
         if workspace:
-            raise HTTPException(400, 'workspace is fixed when the session is created — '
-                                     'start a new conversation to use another one')
+            raise HTTPException(400, WORKSPACE_FIXED_MESSAGE)
         return seat
-    is_new = not log_path.exists()
+    if not is_new and workspace:
+        raise HTTPException(400, WORKSPACE_FIXED_MESSAGE)
     session = Session(id=sid)
     if log_path.exists():
         for event in load_events(log_path):
