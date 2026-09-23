@@ -225,7 +225,7 @@ issue 号的例外。
 | `cli.py` | CLI 入口（单次任务 / 无任务参数进 REPL） |
 | `web/` | Web 宿主：`app.py` 路由+装配 / `state.py` Seat+宿主状态 / `sessions.py` 会话生命周期（含**每会话工作区**的解析与落日志）/ `titles.py` 自动标题 / `payload.py` 纯函数投影（FastAPI + SSE：会话/标题/approval/手动压缩/steer 插队） |
 | `app/compaction.py` | 上下文压缩引擎（四步事务 + checkpoint + 会话 token 累计账） |
-| `tests/` | 142 个架构测试，按关注点分 14 个文件（值/日志投影、inbox、prompt、loop、llm、tools、todo、recovery、compaction、instructions、skills、web_search、web、cli）+ `conftest.py`（跨文件 helper）+ **`test_architecture.py`**（2 条：依赖方向 = 包结构，白名单不许长僵尸） |
+| `tests/` | 146 个架构测试，按关注点分 14 个文件（值/日志投影、inbox、prompt、loop、llm、tools、todo、recovery、compaction、instructions、skills、web_search、web、cli）+ `conftest.py`（跨文件 helper）+ **`test_architecture.py`**（2 条：依赖方向 = 包结构，白名单不许长僵尸） |
 
 > `web_search` 与 `skill` 是两个"读工作区之外"的工具：搜索由 **DeepSeek 官方在服务端**
 > 执行（Anthropic 兼容端点 + 原生服务端工具 `web_search_20250305`），我们只发请求、

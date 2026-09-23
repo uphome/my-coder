@@ -1100,6 +1100,104 @@ def test_web_list_and_seat_agree_on_a_hand_written_workspace(tmp_path, monkeypat
     assert Path(seat.args.workspace) == Path(items['hand'])   # 两处一致才是重点
 
 
+def test_web_blank_recorded_workspace_means_no_record(tmp_path):
+    """日志里的工作区是**空白**时按"没记录过"处理（跟随宿主默认）。
+
+    空白不是路径。若放它进 `normalize_recorded_workspace`，`resolve()` 会把空白折叠成
+    **进程 cwd**——于是"日志说了一个目录、工具却跑在 cwd"这种最坏的不一致被静默放行，
+    而文档写的是"绝不静默回退"。判据必须落在"去掉空白后"的值上（与写入侧记 `source` 对称）。
+    """
+    from pathlib import Path
+
+    from fastapi.testclient import TestClient
+
+    from agent_demo import web
+
+    host = tmp_path / 'host'
+    host.mkdir()
+    sessions_dir = tmp_path / 'sess'
+    sessions_dir.mkdir()
+    (sessions_dir / 'blank.jsonl').write_text(
+        json.dumps({'seq': 0, 'time': 0.0, 'type': 'session/workspace',
+                    'data': {'$dict': {'workspace': '   ', 'source': 'user'}},
+                    'surface_op': None, 'shadowed': None, 'ignorable': False}) + '\n',
+        encoding='utf-8')
+
+    web.init_web(host, fake=True, sessions_dir=sessions_dir)
+    client = TestClient(web.app)
+    switched = client.post('/sessions/blank/switch')
+    assert switched.status_code == 200
+    assert Path(switched.json()['workspace']) == host.resolve()   # 宿主默认，不是进程 cwd
+    listing = {item['id']: item for item in client.get('/sessions').json()}
+    assert Path(listing['blank']['workspace']) == host.resolve()
+
+
+def test_web_sessions_report_whether_the_workspace_still_exists(tmp_path):
+    """列表带 `workspace_ok`：目录没了要提前标出来（切过去会被 409 拒，不能让用户点了没反应）。"""
+    from fastapi.testclient import TestClient
+
+    from agent_demo import web
+
+    host = tmp_path / 'host'
+    host.mkdir()
+    root_b = tmp_path / 'b'
+    root_b.mkdir()
+    web.init_web(host, fake=True, sessions_dir=tmp_path / 'sess')
+    client = TestClient(web.app)
+    sid = client.post('/sessions/new', json={'workspace': str(root_b)}).json()['id']
+
+    listing = {item['id']: item for item in client.get('/sessions').json()}
+    assert listing[sid]['workspace_ok'] is True
+    assert listing['web']['workspace_ok'] is True
+
+    root_b.rename(tmp_path / 'b-moved')          # 目录没了（删/改名/换成文件都算）
+    listing = {item['id']: item for item in client.get('/sessions').json()}
+    assert listing[sid]['workspace_ok'] is False
+    # 列表照实显示"记着的那个路径"，但**重新打开**这个会话会被 409 拒（两处不矛盾：
+    # 一个说记着什么，一个说能不能用）。注意 seat 已经开着时不会重新校验目录——
+    # 运行中的对话不因为它的目录被删就被打断（工具调用自己会报 file not found）
+    assert listing[sid]['workspace'] != ''
+    web.init_web(host, fake=True, sessions_dir=tmp_path / 'sess')   # 换宿主 = 丢掉内存里的 seat
+    assert client.post(f'/sessions/{sid}/switch').status_code == 409
+
+
+def test_web_new_session_rejects_non_string_workspace(tmp_path):
+    """`workspace` 必须是字符串：非字符串直接 400，且**不分配 sid**（不留半个会话）。"""
+    from fastapi.testclient import TestClient
+
+    from agent_demo import web
+
+    web.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
+    client = TestClient(web.app)
+    before = len(client.get('/sessions').json())
+
+    for bad in (123, True, ['x'], {'path': 'x'}):
+        response = client.post('/sessions/new', json={'workspace': bad})
+        assert response.status_code == 400, bad
+        assert 'must be a string' in response.json()['detail']
+    assert len(client.get('/sessions').json()) == before   # 一个都没建出来
+
+
+def test_web_fresh_sid_skips_ids_held_by_an_open_seat(tmp_path, monkeypatch):
+    """id 判据要看**内存里的 seat**，不只看磁盘文件。
+
+    "文件被删了但 seat 还开着"时，只看文件的判据会把这个 id 再发一次，而
+    `open_session_seat` 命中已有 seat 会**静默复用**它——响应里的工作区与真实座位对不上。
+    """
+    from agent_demo import web
+    from agent_demo.web.app import _fresh_sid
+    from agent_demo.web.sessions import open_session_seat as _open_seat
+
+    monkeypatch.setattr('time.time', lambda: 1_700_000_000.0)
+    sessions_dir = tmp_path / 'sess'
+    web.init_web(tmp_path, fake=True, sessions_dir=sessions_dir)
+
+    assert _fresh_sid() == 'web-1700000000'
+    _open_seat('web-1700000000', allow_missing=True)          # 占住这个 id
+    (sessions_dir / 'web-1700000000.jsonl').unlink()          # 文件没了，seat 还在
+    assert _fresh_sid() == 'web-1700000000-2'
+
+
 def test_web_new_session_ids_do_not_collide_within_a_second(tmp_path, monkeypatch):
     """同一秒内连开两个对话不能撞 id：撞了会**静默复用**上一个会话（工作区还被拒改）。
 

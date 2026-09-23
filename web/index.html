@@ -1425,7 +1425,7 @@ async function steerWholeQueue() {
   for (const id of ids) {
     const result = await queueAction(id, { kind: 'steer' }, { quiet: true });
     if (result.ok || result.code === 'queue-item-not-found') continue;
-    showSteerError(result.code === 'steer-unavailable'
+    showToast(result.code === 'steer-unavailable'
       ? 'agent 已空闲——排队消息会作为新回合处理'
       : '整队插队失败，请稍后再试');
     return;
@@ -1459,14 +1459,14 @@ async function queueAction(itemId, action, opts) {
     const code = data.code || (data.ok ? 'ok' : 'queue-item-not-found');
     if (!data.ok && !quiet) {
       if (code === 'steer-unavailable') {
-        showSteerError('agent 已空闲——这条会作为新回合处理，等它开始后再插队');
+        showToast('agent 已空闲——这条会作为新回合处理，等它开始后再插队');
       } else if (code === 'queue-item-not-found') {
-        showSteerError('这条已经开始了，改不了——直接发新指令纠正它');
+        showToast('这条已经开始了，改不了——直接发新指令纠正它');
       }
     }
     return { ok: !!data.ok, code };
   } catch (e) {
-    if (!quiet) showSteerError('队列操作失败：' + (e.message || e));
+    if (!quiet) showToast('队列操作失败：' + (e.message || e));
     return { ok: false, code: 'transport-error' };
   }
 }
@@ -1832,9 +1832,16 @@ async function loadSessions() {
       // 双击标题就地改名（title 事件落日志；user 手动覆盖 auto 自动）
       title.addEventListener('dblclick', (e) => { e.stopPropagation(); startRename(item, s); });
       const meta = el('div', 'meta');
-      // 每个对话自己的工作区（短名显示，全路径在 title 里）——"这个对话在哪个目录"一眼可见
-      meta.textContent = `${s.id} · ${s.events} 事件${s.workspace ? ` · ${shortWs(s.workspace)}` : ''}`;
-      if (s.workspace) meta.title = s.workspace;
+      // 每个对话自己的工作区（短名显示，全路径在 title 里）——"这个对话在哪个目录"一眼可见。
+      // workspace_ok=false 时不装作没事：那个目录已经不见了，切过去会被服务端 409 拒掉
+      const wsNote = s.workspace ? ` · ${shortWs(s.workspace)}` : '';
+      const badNote = s.workspace_ok === false ? ' · ⚠ 工作区已失效' : '';
+      meta.textContent = `${s.id} · ${s.events} 事件${wsNote}${badNote}`;
+      if (s.workspace) {
+        meta.title = s.workspace_ok === false
+          ? `${s.workspace}（已不存在——恢复它，或删掉这个会话）`
+          : s.workspace;
+      }
       item.appendChild(title);
       item.appendChild(meta);
       item.addEventListener('click', () => switchSession(s.id));
@@ -1888,10 +1895,18 @@ async function switchSession(sid) {
   if (busy || sid === currentSid) return;
   try {
     const res = await fetch(`/sessions/${encodeURIComponent(sid)}/switch`, { method: 'POST' });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (!res.ok) {
+      // 409 = 这个对话的工作区已经不在了（被删/改名/换成了文件）；必须在界面上说清，
+      // 否则用户看到的只是"点了没反应"
+      const detail = await res.json().catch(() => ({}));
+      showToast(detail.detail || `切换会话失败（HTTP ${res.status}）`);
+      return;
+    }
     applySession(await res.json());
     loadSessions();
-  } catch (e) { console.error('switch session failed', e); }
+  } catch (e) {
+    showToast(`切换会话失败：${e.message || e}`);
+  }
 }
 async function deleteSession(sid) {
   if (!confirm(`删除会话「${sid}」？对话记录将不可恢复。`)) return;
@@ -1940,11 +1955,19 @@ function rememberWorkspace(path) {
   try { localStorage.setItem(WS_RECENT_KEY, JSON.stringify(list)); } catch (e) { /* 忽略 */ }
 }
 function openWsPicker() {
-  if (busy) return;
+  if (busy) {
+    // 静默 return 会让用户以为按钮坏了——直接在面板里说明
+    wsPicker.hidden = false;
+    wsError.textContent = '回合进行中，等它结束后再新建对话';
+    wsError.hidden = false;
+    return;
+  }
   wsError.hidden = true;
   const recent = recentWorkspaces();
   wsInput.value = recent[0] || defaultWs || '';
-  wsInput.placeholder = defaultWs ? `留空 = 宿主默认（${defaultWs}）` : '目录路径';
+  // 提示里写清两件事：留空等于宿主默认；相对路径按**服务进程 cwd** 解析（不是相对默认工作区）
+  const defaultHint = defaultWs ? `留空 = 宿主默认（${defaultWs}）` : '目录路径';
+  wsInput.placeholder = hostCwd ? `${defaultHint} · 相对路径按 ${hostCwd} 解析` : defaultHint;
   wsRecentEl.innerHTML = '';
   for (const path of recent) {
     const chip = el('button', 'ws-chip');
@@ -2205,7 +2228,7 @@ async function steer(text) {
       input.value = text;
       input.style.height = 'auto';
       input.focus();
-      showSteerError(data.detail || `插队失败（HTTP ${res.status}）——回合可能已结束，按回车重新发送`);
+      showToast(data.detail || `插队失败（HTTP ${res.status}）——回合可能已结束，按回车重新发送`);
       return;
     }
     setQueue(data.queue);
@@ -2215,13 +2238,15 @@ async function steer(text) {
     input.value = text;
     input.style.height = 'auto';
     input.focus();
-    showSteerError('插队失败（网络错误）——按回车重新发送');
+    showToast('插队失败（网络错误）——按回车重新发送');
   } finally {
     finishSubmission(requestId, 'failed');    // 失败路径：立即撤掉回显
   }
 }
-/* 插队失败提示：输入行上方一条，6 秒后自动消失（不打断输入） */
-function showSteerError(message) {
+/* 一条 6 秒后自动消失的提示（输入行上方，不打断输入）。插队/队列操作一开始就用它，
+   现在切换会话失败（例如那个对话的工作区已经不在了 → 服务端 409）也用它——
+   这类失败必须让用户看见原因，不能只进 console。 */
+function showToast(message) {
   const tip = el('div', 'steer-error');
   tip.textContent = message;
   const footer = input.closest('footer');

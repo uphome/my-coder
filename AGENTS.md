@@ -9,7 +9,7 @@ Python 复刻 deepseek-harness 架构的教学 demo（agent 框架本身，不�
 # 质量门：ruff + mypy + pytest 三绿才可提交（pyproject.toml 已配好）
 conda run -n agent-demo python -m ruff check agent_demo tests
 conda run -n agent-demo python -m mypy agent_demo
-conda run -n agent-demo python -m pytest        # 142 个测试（3 条平台相关：Windows 建不了符号链接时 skip）
+conda run -n agent-demo python -m pytest        # 146 个测试（3 条平台相关：Windows 建不了符号链接时 skip）
 
 # CLI（可 pip install -e . 后直接 agent-demo；或模块方式跑）
 conda run --no-capture-output -n agent-demo python -m agent_demo.cli --workspace . --fake "read README.md and summarize"
@@ -126,7 +126,12 @@ conda run --no-capture-output -n agent-demo python -m agent_demo.web --workspace
     "每会话一套"就是"每会话一份 args"，不必再给 Seat 挂派生对象
   - **旧会话与三态**：本功能之前建的会话（日志里没有这条事件）**跟随宿主默认工作区**，
     且**不回头改写它的日志**；日志里记着的工作区**不存在了** → **409 + 明确原因**，
-    **绝不静默回退**（静默回退 = 工具指向另一个项目，而模型以为还在原目录）
+    **绝不静默回退**（静默回退 = 工具指向另一个项目，而模型以为还在原目录）。
+    **判据落在"去掉空白后"的值上**：记录是空白的（写坏/手改坏）按"没记录过"处理——
+    空白不是路径，若放它进 `resolve()` 会折叠成**进程 cwd**，那就是一次静默换根。
+    列表项同时给 `workspace_ok`（目录还在不在），目录已失效的会话在界面上提前标出来
+    （点开才会 409 的体验太差）；**已经开着的 seat 不因为目录被删而被打断**（工具调用
+    自己会报 file not found），只有**重新打开**时才校验
   - **选择策略 = 信任界面使用者**（对齐 DSH，它也没有 allowlist）：只校验"存在 + 是目录"，
     判据集中在 `app/workspace.py` 的 `resolve_workspace`（相对路径按**进程 cwd**、空 = 宿主
     默认）。想收紧就只改这一处。Web 默认只绑 `127.0.0.1`，能点界面的人本来就等于把该目录

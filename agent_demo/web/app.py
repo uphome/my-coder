@@ -108,8 +108,8 @@ async def new_session(request: Request) -> dict:
     """新建会话并切换；可选 `{"workspace": "<目录>"}` 指定这个对话的工作区。
 
     - 不带 body（旧前端/测试）→ 用宿主默认工作区；
-    - 带 `workspace`：只校验"存在 + 是目录"（策略见 `app/workspace.py`），
-      校验失败 400 并说明原因；
+    - 带 `workspace`：必须是**字符串**（别的类型直接 400，不做隐式 `str()`），
+      只校验"存在 + 是目录"（策略见 `app/workspace.py`），校验失败 400 并说明原因；
     - id 在同秒内保证唯一（`web-<ts>`，撞了就加 `-2`/`-3`…）：两个对话被塞进同一个
       sid 会**静默复用**上一个会话，而工作区在创建时固定——撞车时第二次选择还会被
       "workspace is fixed" 拒掉，看起来像功能坏了。
@@ -125,19 +125,30 @@ async def new_session(request: Request) -> dict:
         if body is not None and not isinstance(body, dict):
             raise HTTPException(400, 'body must be a JSON object')
         workspace = (body or {}).get('workspace')
+        if workspace is not None and not isinstance(workspace, str):
+            # 严格校验：`{"workspace": 123}` 若被 `str()` 化会变成"路径 123 不存在"这种
+            # 误导性报错，还可能被非字符串假值（`0`/`[]`）绕过"已固定"的守卫
+            raise HTTPException(400, 'workspace must be a string')
     return open_session(_fresh_sid(), allow_missing=True, workspace=workspace)
 
 
 def _fresh_sid() -> str:
-    """`web-<秒级时间戳>`，同秒撞车就顺延 `-2`/`-3`…（会话 id = 日志文件名）。"""
+    """`web-<秒级时间戳>`，同秒撞车就顺延 `-2`/`-3`…（会话 id = 日志文件名）。
+
+    判据同时看**磁盘文件**与**内存里的 seat**：只看文件时，"文件刚被删掉但 seat 还在"
+    或"另一个 worker 已经建了 seat 但文件还没落盘"都可能选出一个已在用的 id，
+    而 `open_session_seat` 命中已有 seat 会**静默复用**它（响应与真实座位的工作区对不上）。
+    真正防并发的是 `open_session_seat` 里的 `exist_ok=False` 原子占坑，这里只是把
+    两条已知来源都躲开。
+    """
     directory = state.sessions_dir or Path('.sessions')
     base = f'web-{int(time.time())}'
-    if not (directory / f'{base}.jsonl').exists():
-        return base
-    index = 2
-    while (directory / f'{base}-{index}.jsonl').exists():
+    index = 1
+    while True:
+        candidate = base if index == 1 else f'{base}-{index}'
+        if candidate not in state.seats and not (directory / f'{candidate}.jsonl').exists():
+            return candidate
         index += 1
-    return f'{base}-{index}'
 
 
 @app.post('/sessions/{sid}/switch')

@@ -105,12 +105,25 @@ def open_session_seat(sid: str, *, allow_missing: bool,
     log_path = (state.sessions_dir or Path('.sessions')) / f'{sid}.jsonl'
     if not allow_missing and not log_path.exists():
         raise HTTPException(404, f'session {sid!r} not found')
-    is_new = not log_path.exists()
     seat = state.seats.get(sid)
     if seat is not None:
         if workspace:
             raise HTTPException(400, WORKSPACE_FIXED_MESSAGE)
         return seat
+    # 新会话 = 磁盘上还没有它的文件；**空文件就是"这个会话存在"的事实**，所以这里用
+    # `exist_ok=False` **原子占坑**（不是先 exists() 再 touch()）：两个进程/两个请求同时
+    # 判定"这个 id 还没人用"时，只有一个能把文件建出来，另一个拿到 FileExistsError → 退回
+    # "已有会话"语义（工作区从那个文件里读）。单 worker 下这段本来没有 await、切不开，
+    # 但多 worker（各自内存、只共享磁盘）就是这么撞的。
+    is_new = not log_path.exists()
+    if is_new:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            log_path.touch(exist_ok=False)
+        except FileExistsError:
+            # 刚刚被别的进程抢先建了：当**已有会话**处理（我们不知道它记的工作区，
+            # 也不会拿自己的 workspace 去覆盖它——那正是"静默换根"）
+            is_new = False
     if not is_new and workspace:
         raise HTTPException(400, WORKSPACE_FIXED_MESSAGE)
     session = Session(id=sid)
@@ -127,9 +140,7 @@ def open_session_seat(sid: str, *, allow_missing: bool,
     resolved = _resolve_seat_workspace(workspace=workspace if is_new else None,
                                        logged=session.workspace() if not is_new else None)
     if is_new:
-        if not log_path.exists():
-            # 新会话立即落盘（空文件）：列表可见、可切换——"会话存在 = 有文件"
-            log_path.touch()
+        # 空文件已在上面原子占坑时建好（列表可见、可切换——"会话存在 = 有文件"）
         # source 用**去掉空白后**是否还有内容来判断：前端清空输入框提交的空串等于"没选"，
         # 记成 'user' 会让日后分不清"用户选的"与"跟随默认"（判据要落在同一个表示上）
         session.append('session/workspace', {
@@ -164,6 +175,11 @@ def _resolve_seat_workspace(*, workspace: str | Path | None, logged: str | None)
     日志里记着的工作区**必须仍然存在**，否则响亮报错：静默回退到宿主默认会让工具
     指向另一个项目，而模型以为自己还在这个对话原来的目录里——那是"看起来正常、
     实际读了别的仓库"的最坏情况。用户有两条出路：恢复那个目录，或删掉这个会话。
+
+    **判据落在"去掉空白后"的值上**（写入侧记 `source` 时就是同一个表示）：空白不是路径，
+    只可能是手改坏/写坏的记录，按"**没记录过**"处理（跟随宿主默认）——否则
+    `normalize_recorded_workspace('   ')` 会把空白折叠成**进程 cwd**，于是"日志说了一个
+    目录、工具却跑在 cwd"这种最坏的不一致就被静默放行了（review 逮到的正是这条）。
     """
     assert state.args is not None
     default = Path(state.args.workspace)
@@ -172,10 +188,11 @@ def _resolve_seat_workspace(*, workspace: str | Path | None, logged: str | None)
             return resolve_workspace(workspace, default=default)
         except ValueError as error:
             raise HTTPException(400, str(error)) from error
-    if logged:
+    recorded_text = str(logged or '').strip()
+    if recorded_text:
         # 日志里记的应该是绝对路径（我们自己写的），但手改过的日志可能有相对路径/`~`——
         # 走 `normalize_recorded_workspace`（**与列表同一处实现**，这条判据不写第二遍）
-        recorded = normalize_recorded_workspace(logged)
+        recorded = normalize_recorded_workspace(recorded_text)
         if not recorded.is_dir():
             raise HTTPException(
                 409, f'this session\'s workspace is gone: {recorded} — '
@@ -208,13 +225,17 @@ def validate_sid(sid: str) -> None:
 
 
 def scan_sessions() -> list[dict]:
-    """扫描会话目录：id / 事件数 / 更新时间 / 标题 / 首条用户消息摘要 / 工作区。
+    """扫描会话目录：id / 事件数 / 更新时间 / 标题 / 首条用户消息摘要 / 工作区 + 工作区是否还在。
 
     磁盘行内快扫（不整包解析）：标题 = 最后一条 session/title 事件的 title
     （user 手动 > auto 自动，按追加顺序后者覆盖）；无标题事件时列表显示
     首条 user/message 摘要作为 fallback（对齐 harness 的三级来源）。
-    工作区同理取最后一条 `session/workspace`（后写覆盖前写）；没有就报宿主默认——
-    列表里因此永远显示"这个对话实际上会用哪个目录"，不会有一栏空着。
+    工作区同理取最后一条 `session/workspace`（后写覆盖前写）；没有（或记录是空白）就报
+    宿主默认，所以这一栏不会空着。
+
+    **`workspace_ok` 是给前端的一栏诚实信息**：`workspace` 是"这个对话记着哪个目录"，
+    而目录可能已经不存在——那种会话切过去会被 seat 拒掉（409）。所以列表同时给出
+    `is_dir()` 的结果，前端就能提前显示"工作区已失效"，而不是把死路径当成"实际会用哪个目录"。
     """
     # 没记录工作区的旧会话显示**宿主默认的绝对路径**（`--workspace .` 要解析成实际目录：
     # 前端拿它做相对路径显示的前缀，给个 "." 会对不上任何消息里的绝对路径）
@@ -251,15 +272,17 @@ def scan_sessions() -> list[dict]:
                 # 最后一条 session/workspace 事件即当前工作区（同上）。
                 # 归一化走 `normalize_recorded_workspace`：列表与 seat 必须**同一条规则**
                 # （否则"列表显示 rel-ws、工具在 <cwd>/rel-ws"这类不一致最难查）；解析失败
-                # （坏路径/循环链接）就退回原字符串——列表只是信息，不该因一条坏记录整页报错
+                # （坏路径/循环链接）就退回原字符串——列表只是信息，不该因一条坏记录整页报错。
+                # 空白记录按"没记录"处理，与 seat 侧的判据一致（空白折叠成 cwd 是错的）
                 if '"type": "session/workspace"' in line:
                     try:
                         data = (json.loads(line).get('data') or {}).get('$dict') or {}
-                        raw = data.get('workspace', '')
+                        raw = str(data.get('workspace') or '').strip()
                         if raw:
                             workspace = str(normalize_recorded_workspace(raw))
                     except (TypeError, ValueError, KeyError, OSError):
-                        workspace = raw if isinstance(raw, str) else ''
+                        workspace = raw
+        effective = workspace or default_workspace
         items.append({
             'id': path.stem,
             'events': events,
@@ -267,7 +290,8 @@ def scan_sessions() -> list[dict]:
             'title': title or None,
             'title_source': title_source or None,
             'summary': title or summary or '(empty)',  # 标题优先，摘要兜底
-            'workspace': workspace or default_workspace,  # 没记录过 = 跟随宿主默认
+            'workspace': effective,                    # 没记录过 = 跟随宿主默认
+            'workspace_ok': Path(effective).is_dir() if effective else False,
         })
     items.sort(key=lambda item: item['updated'], reverse=True)
     return items
