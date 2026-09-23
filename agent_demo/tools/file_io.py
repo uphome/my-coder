@@ -11,7 +11,8 @@ from pathlib import Path
 
 from ..app.constants import READ_FILE_DEFAULT_LIMIT, READ_FILE_MAX_CHARS, READ_FILE_MAX_LIMIT
 from ..app.sandbox import occurrence_lines, resolve_in_workspace
-from ..state.registry import ToolOutcome, ToolSpec
+from ..state.registry import ToolSpec
+from ..values.messages import ToolOutcome
 
 
 def register(registry, workspace: Path) -> None:

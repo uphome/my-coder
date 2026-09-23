@@ -527,12 +527,14 @@ agent_demo/               包结构（取代平铺）
     ├── shell.py          bash + _run_command 执行后端
     └── todo.py           todo_write
 pyproject.toml            打包 + ruff / mypy / pytest 配置 + console scripts
-.github/workflows/ci.yml  CI（ruff + mypy + pytest × 3.11/3.12/3.13 + CLI 冒烟）
+（CI 不信 GitHub Actions：曾在 `447564c` 接过、又在 `eca8d98`（2026-09-05）移除——
+理由是 Python 3.12 的 pathlib `**` 语义差异让 glob 测试云端红，而单人本地开发收益低。
+要恢复先把跨版本 glob 语义问题修掉）
 ```
 
 - 步骤 1 模块化 ✅（38 测试全绿，git 全程识别 rename 保留历史）
 - 步骤 2 打包 ✅（`pip install -e .`，`agent-demo` / `agent-demo-web` 命令）
-- 步骤 3 工程化 ✅（ruff 清零 / mypy 清零 / CI workflow；质量门三绿才提交）
+- 步骤 3 工程化 ✅（ruff 清零 / mypy 清零；质量门三绿才提交。**CI 已按上面的理由移除**）
 - 步骤 4 功能：上下文压缩全套 + Web ContextMeter + Web 会话并发隔离 +
   steer 插队 + CLI REPL（已完成，见下节）；阶段四工程化打磨（配置/日志
   查看器）仍未开始
@@ -577,6 +579,15 @@ agent_demo/
 2. **函数体内的局部 import 要保留缩进**：替换文本顶到行首会把 `if` 块掏空（语法错误）；
 3. **`Path(__file__).parent` 类路径会随层数变化**：`app/skills.py` 找包内 `bundled_skills/`
    要用 `parents[1]`——写错时表现是"技能表静默变空"（7 条测试红，不是崩溃）。
+
+**第 4 步（同一条线的收尾，已完成）**：把"值对象住错层"和"常量住错层"两件事一起修掉——
+`ToolOutcome` 从 `state/registry.py` 搬进 `values/messages.py`（它和 `ToolResultBlock` 是
+同一件事的两个阶段：执行返回值 → 补 call_id 落日志的 wire 形态；`ToolSpec` 带 executor，
+是行为不是值，留在 registry）；`TOOL_RESULT_MAX_CHARS` 从 `app/constants.py` 下沉到
+`values/limits.py`（判据：**有更低层要用就下沉**——状态层要用应用层的常量，方向本来就反了）。
+两条都修完后，`KNOWN_VIOLATIONS` 只剩 issue #19 那一条（白名单僵尸检查会盯着删干净）。
+落地过程同样留记录：搬完后 `test_known_violations_are_still_real` **主动报红**"这条例外已经
+不再越界了，请从白名单删掉"——机制按设计工作。
 
 ## 实施约定（延续项目哲学）
 

@@ -33,7 +33,8 @@ conda run --no-capture-output -n agent-demo python -m agent_demo.web --workspace
 `tests/test_architecture.py` 的断言（下层 import 上层当场红）。四层单向，数字越小越底层：
 
 ```
-0 values/       值：values/messages.py（消息/事件词汇表）+ values/persistence.py（JSONL 读写）
+0 values/       值：values/messages.py（消息/事件/工具返回值的词汇表）+ values/persistence.py（JSONL 读写）
+                + values/limits.py（**跨层共享的常量**：有更低层要用的数字就下沉到这里）
 1 capability/   能力：capability/llm.py（LLM 客户端）、capability/hooks.py（三个决策钩子的类型）
 2 state/        状态：state/session.py（日志，唯一事实源）/ state/inbox.py / state/prompt.py / state/registry.py / state/recovery.py
 3 runtime/      框架循环：runtime/agent.py（被动状态机）、runtime/loop.py（turn/step 两级循环）
@@ -42,7 +43,7 @@ conda run --no-capture-output -n agent-demo python -m agent_demo.web --workspace
 5 web/          入口：Web 宿主（app / state / sessions / titles / payload）；cli.py
 ```
 
-规则：**一个模块只能 import 同层或更低层**。两条已知例外（`runtime → tools.todo`、`state/registry → app/constants`）带 issue 号记在 `KNOWN_VIOLATIONS` 里，修好即删（有测试盯着白名单不许长僵尸）。
+规则：**一个模块只能 import 同层或更低层**。常量同理：只在应用/工具层用的放 `app/constants.py`，**一旦有更低层要用就下沉到 `values/limits.py`**（`TOOL_RESULT_MAX_CHARS` 就是这么搬的）。唯一的已知例外（`runtime → tools.todo`）带 issue 号记在 `KNOWN_VIOLATIONS` 里，修好即删（有测试盯着白名单不许长僵尸）。
 
 技能正文在 `agent_demo/bundled_skills/`（随包发布，`pyproject` 的 package-data）与 `<workspace>/skills/`（项目自带），两边由 `app/skills.py` 按名字合并、`skill` 工具按名字取；工作区指令文件的发现与注入在 `app/instructions.py`（正文直接进 system，见约定）。上层依赖下层，下层不感知上层。
 

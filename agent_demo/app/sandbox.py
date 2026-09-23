@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from ..state.registry import ToolOutcome
+from ..values.messages import ToolOutcome
 
 
 def resolve_in_workspace(raw: str, workspace: Path) -> tuple[Path | None, ToolOutcome | None]:

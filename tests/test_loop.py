@@ -17,9 +17,15 @@ from agent_demo.capability.llm import FakeLlm, StreamChunk
 from agent_demo.runtime import loop as loop_module
 from agent_demo.runtime.agent import Agent
 from agent_demo.state.prompt import PromptRegistry
-from agent_demo.state.registry import ToolOutcome, ToolRegistry, ToolSpec
+from agent_demo.state.registry import ToolRegistry, ToolSpec
 from agent_demo.state.session import Session
-from agent_demo.values.messages import TextBlock, ToolCallBlock, ToolResultBlock, create_user_message
+from agent_demo.values.messages import (
+    TextBlock,
+    ToolCallBlock,
+    ToolOutcome,
+    ToolResultBlock,
+    create_user_message,
+)
 
 
 @pytest.mark.asyncio

@@ -653,11 +653,12 @@ workspace 沙箱）；DSH 式沙箱承诺又把可读范围锁在工作区内。
 
 | 文件 | 角色 |
 |---|---|
-| `values/messages.py` | 值层：不可变 Message/SessionEvent + tagged dict 编解码 |
+| `values/messages.py` | 值层：不可变 Message/SessionEvent/**ToolOutcome** + tagged dict 编解码 |
+| `values/limits.py` | 跨层共享的常量（判据：有更低层要用就下沉到值层——`TOOL_RESULT_MAX_CHARS` 从应用层搬来，修掉 `state → app` 那条反向依赖） |
 | `state/session.py` | 日志 + surface 折叠投影（append / derive_messages / adopt / request_header） |
 | `state/inbox.py` | 双队列（next-turn / next-step）+ claim 语义 + 持久化重放 + `queued_items()` 队列投影 |
 | `state/prompt.py` | sections 按 order 拼接 + `{{var}}` 严格插值 |
-| `state/registry.py` | 工具类型（ToolSpec：schema + executor + 并发模式 + 卸载声明 + 超时 + requires_approval） |
+| `state/registry.py` | 工具类型（ToolSpec：schema + executor + 并发模式 + 卸载声明 + 超时 + requires_approval；返回值 `ToolOutcome` 在 `values/messages.py`） |
 | `capability/llm.py` | 能力层：SSE 流式客户端 + FakeLlm + wire 双向翻译（含思维链字段解析） |
 | `capability/hooks.py` | 三个决策钩子的类型 |
 | `runtime/loop.py` | turn/step 两级循环 + 流组装 + 工具分组执行（自限池/有序提交/取消补记）+ 思维链痕迹落盘 + 四层兜底 |

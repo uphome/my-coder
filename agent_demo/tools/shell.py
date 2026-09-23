@@ -13,7 +13,8 @@ from pathlib import Path
 
 from ..app.constants import BASH_MAX_OUTPUT_CHARS
 from ..app.sandbox import resolve_in_workspace
-from ..state.registry import ToolOutcome, ToolSpec
+from ..state.registry import ToolSpec
+from ..values.messages import ToolOutcome
 
 
 async def _run_command(command: str, cwd: Path) -> tuple[int, str]:
