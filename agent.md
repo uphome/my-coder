@@ -250,10 +250,17 @@ gh-issue 技能 → Web/CLI 实测“处理 issue #N” → 质量门三绿提�
   可重建、可被 compaction 折叠、前端画成工具卡——换的只是"怎么找到文件"，不是
   "正文怎么进上下文"。
 
-## 4. 待讨论：todo 与"运行时状态栏"（2026-09 记录，未决）
+## 4. todo 与"运行时状态栏"：**注册制贡献者**（2026-09 已定稿并落地，issue #19）
 
 > 背景：讨论「模型每步是否知道自己在做什么、进行到哪一步」时，演化成
-> 「todo 是否该成为通用 agent 状态栏的一个贡献者」。本节记录问题与对照。
+> 「todo 是否该成为通用 agent 状态栏的一个贡献者」。本节留下调研与取舍；
+> **最终形态见 `ARCHITECTURE.md` §3.21、规则见 `AGENTS.md`**：
+> `state/runtime_status.py` 的 `RuntimeStatusRegistry`（`register(name, build)`，
+> `build(session) -> str | None`）→ `runtime/loop.py` 每请求 `collect()`、非空者各贴一条
+> 合成 user 消息在 messages 末尾、`request/header.runtime_status = {名字: 原文}` →
+> 贡献者在 `app/factory.py` 的 `_runtime_status()` 里一行注册。
+> **副产品**：`runtime/` 不再 import `tools.*`，`tests/test_architecture.py` 的依赖白名单
+> 清空（那条"例外必须仍然真实存在"的断言在改造完成的瞬间主动报红，逼你同步删条目）。
 
 ### 4.0 关键调研：DSH / opencode 的"运行时状态注入"机制（2026-09 实测源码）
 

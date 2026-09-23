@@ -15,6 +15,7 @@ from ..capability.hooks import Hooks
 from ..state.inbox import Inbox, InboxNotifications
 from ..state.prompt import PromptRegistry
 from ..state.registry import ToolRegistry
+from ..state.runtime_status import RuntimeStatusRegistry
 from ..state.session import Session
 from ..values.messages import Message, TextBlock, UserSource, create_user_message
 from .loop import run_turn
@@ -62,12 +63,17 @@ class Agent:
         tools: ToolRegistry,
         options: dict | None = None,
         hooks: Hooks | None = None,
+        runtime_status: RuntimeStatusRegistry | None = None,
     ) -> None:
         self.id = session.id
         self.session = session
         self.llm = llm
         self.prompt = prompt
         self.tools = tools
+        # 每轮叠给模型的运行时状态（注册制贡献者，见 state/runtime_status.py）：
+        # 与 prompt / tools 并列的第四个"可插拔面"。默认空注册表——没有贡献者时
+        # 循环一行都不会多叠，行为与加这条通道之前完全一致。
+        self.runtime_status = runtime_status if runtime_status is not None else RuntimeStatusRegistry()
         self.options = dict(options or {})
         self.hooks = hooks if hooks is not None else Hooks()
         self.phase = 'idle'

@@ -9,7 +9,7 @@ Python 复刻 deepseek-harness 架构的教学 demo（agent 框架本身，不�
 # 质量门：ruff + mypy + pytest 三绿才可提交（pyproject.toml 已配好）
 conda run -n agent-demo python -m ruff check agent_demo tests
 conda run -n agent-demo python -m mypy agent_demo
-conda run -n agent-demo python -m pytest        # 146 个测试（3 条平台相关：Windows 建不了符号链接时 skip）
+conda run -n agent-demo python -m pytest        # 150 个测试（3 条平台相关：Windows 建不了符号链接时 skip）
 
 # CLI（可 pip install -e . 后直接 agent-demo；或模块方式跑）
 conda run --no-capture-output -n agent-demo python -m agent_demo.cli --workspace . --fake "read README.md and summarize"
@@ -36,14 +36,15 @@ conda run --no-capture-output -n agent-demo python -m agent_demo.web --workspace
 0 values/       值：values/messages.py（消息/事件/工具返回值的词汇表）+ values/persistence.py（JSONL 读写）
                 + values/limits.py（**跨层共享的常量**：有更低层要用的数字就下沉到这里）
 1 capability/   能力：capability/llm.py（LLM 客户端）、capability/hooks.py（三个决策钩子的类型）
-2 state/        状态：state/session.py（日志，唯一事实源）/ state/inbox.py / state/prompt.py / state/registry.py / state/recovery.py
+2 state/        状态：state/session.py（日志，唯一事实源）/ state/inbox.py / state/prompt.py / state/registry.py
+                / state/recovery.py / state/runtime_status.py（每轮叠给模型的运行时状态贡献者）
 3 runtime/      框架循环：runtime/agent.py（被动状态机）、runtime/loop.py（turn/step 两级循环）
 4 app/          应用内容：app/factory.py（组装）+ app/constants.py / app/sandbox.py / app/instructions.py /
                 app/skills.py / app/compaction.py / app/ui.py / app/workspace.py（工作区选择策略）；tools/（工具实现）
 5 web/          入口：Web 宿主（app / state / sessions / titles / payload）；cli.py
 ```
 
-规则：**一个模块只能 import 同层或更低层**。常量同理：只在应用/工具层用的放 `app/constants.py`，**一旦有更低层要用就下沉到 `values/limits.py`**（`TOOL_RESULT_MAX_CHARS` 就是这么搬的）。唯一的已知例外（`runtime → tools.todo`）带 issue 号记在 `KNOWN_VIOLATIONS` 里，修好即删（有测试盯着白名单不许长僵尸）。
+规则：**一个模块只能 import 同层或更低层**。常量同理：只在应用/工具层用的放 `app/constants.py`，**一旦有更低层要用就下沉到 `values/limits.py`**（`TOOL_RESULT_MAX_CHARS` 就是这么搬的）。**依赖白名单现在是空的**：两条历史例外都已按"修好即删"清掉（`registry → app.constants` 靠常量下沉、`runtime.loop → tools.todo` 靠注册制贡献者，见 issue #19）；将来再加例外必须带 issue 号，测试盯着不许长僵尸。
 
 技能正文在 `agent_demo/bundled_skills/`（随包发布，`pyproject` 的 package-data）与 `<workspace>/skills/`（项目自带），两边由 `app/skills.py` 按名字合并、`skill` 工具按名字取；工作区指令文件的发现与注入在 `app/instructions.py`（正文直接进 system，见约定）。上层依赖下层，下层不感知上层。
 
@@ -104,6 +105,23 @@ conda run --no-capture-output -n agent-demo python -m agent_demo.web --workspace
     结果，否则模型记忆里会留下"带了 tool_calls 却没有结果"的 assistant 消息——
     wire 格式非法，下一轮请求直接 400。`tool/skipped` 这类痕迹事件不算数：
     它进不了 `derive_messages`
+- **每轮叠给模型的运行时状态走"注册制贡献者"**（落地规则，2026-09，issue #19；
+  DSH 的 runtime-context contributor 与 opencode 的 SystemContext 对照见 `agent.md` §4）：
+  - **形态**：`state/runtime_status.py` 的 `RuntimeStatusRegistry` —— 一个状态源 = 一个名字 +
+    `build(session) -> str | None`（**无内容返回 None**，那一轮就不出现，绝不用空串占位）；
+    `register` 对空名/重名**当场抛错**（重名会悄悄只留一个，到日志里谁也说不清是哪个），
+    返回注销函数。
+  - **通道**：`runtime/loop.py` 每请求 `collect()` 一次，**非空者各贴一条合成 user 消息**在
+    messages 末尾——不进日志、不进 `derive_messages`（历史零污染），放 system 则会把缓存
+    前缀每请求打碎（动态事实不该进稳定前缀）。
+  - **审计**：`request/header.runtime_status = {名字: 原文}`（映射形态，痕迹数据），回答
+    "这一轮模型被告知了哪些运行时状态"；多个来源不必加平铺字段。
+  - **加一个状态源 = `app/factory.py` 的 `_runtime_status()` 里一行注册，循环一行都不用改**
+    ——这就是这条通道的意义（此前是 `runtime/loop.py` 直接 import `tools.todo` 的反向依赖，
+    见 `tests/test_architecture.py` 那条已清空的白名单）。将来的 L0 会话目录 / M2 预算水位
+    （issue #3）也在这里各加一行。
+  - **`build` 必须是日志投影的纯函数**（同一段日志 → 同一份状态，符合"模型可见 ⟺ 可重建"），
+    且要便宜：**每个模型请求都会求值一次**。
 - **恢复要自愈"悬空工具调用"**（落地时遵循；实测证据与 400 原文见
   `ARCHITECTURE.md` §3.16）：取消路径能补记账，但**进程被 kill / 断电 / OOM** 时
   没有任何代码有机会跑——日志会停在 `tool/call`（痕迹已落）与 `tool/result`

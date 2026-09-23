@@ -96,7 +96,8 @@ async def test_todo_status_bar_in_messages(tmp_path):
 
     FakeLlm 两步：第一步 todo_write 规划 2 项，第二步纯文本。断言：
     - 第一步请求（规划前）：无状态栏（fold 无清单）
-    - 第二步请求（规划后）：request/header 记了 todo_status（审计字段），
+    - 第二步请求（规划后）：request/header.runtime_status 里记了 `todo`（审计字段，
+      注册制贡献者的映射形态，见 issue #19），
       且 system **不含** todo 清单（system 全静态）
     - 状态栏 XML 含两项与状态
     """
@@ -128,14 +129,14 @@ async def test_todo_status_bar_in_messages(tmp_path):
     assert len(headers) == 2, f'expected 2 model requests, got {len(headers)}'
 
     # 规划前：无状态栏
-    assert 'todo_status' not in headers[0]
+    assert 'runtime_status' not in headers[0]
     # system 里不再有 todo 清单（方案 A：system 全静态）
     assert 'step one' not in headers[0]['system']
     assert 'todo:state' not in headers[0]['system']
 
-    # 规划后：audit 字段带 XML 状态栏；system 仍不含清单
-    status = headers[1].get('todo_status')
-    assert status is not None, 'second request must carry todo_status audit field'
+    # 规划后：audit 字段带 XML 状态栏（映射形态：贡献者名 → 原文）；system 仍不含清单
+    status = headers[1].get('runtime_status', {}).get('todo')
+    assert status is not None, 'second request must carry runtime_status["todo"] audit field'
     assert status.startswith('<todo_status>') and status.endswith('</todo_status>')
     assert '[in_progress] step one' in status
     assert '[pending] step two' in status

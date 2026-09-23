@@ -13,8 +13,10 @@ from pathlib import Path
 from ..capability.llm import FakeLlm, OpenAiCompatibleLlm
 from ..runtime.agent import Agent
 from ..state.prompt import PromptRegistry
+from ..state.runtime_status import RuntimeStatusRegistry
 from ..state.session import Session
 from ..tools import build_tools
+from ..tools.todo import build_todo_status
 from .constants import DEFAULT_COMPACT_TOKENS, DEMO_SCRIPT
 from .instructions import InstructionLoader
 from .skills import SkillTable, format_catalog
@@ -33,6 +35,17 @@ def load_env(path: Path) -> None:
         key = key.strip()
         if key and key not in os.environ:
             os.environ[key] = value.strip()
+
+
+def _runtime_status() -> RuntimeStatusRegistry:
+    """每轮叠给模型的运行时状态：**注册在这里**（循环不认识具体来源，见 issue #19）。
+
+    加一个状态源 = 这个函数里一行：`status.register('<名字>', build_fn)`。
+    `build_fn(session) -> str | None`：无内容返回 None（那一轮就不叠）。
+    """
+    status = RuntimeStatusRegistry()
+    status.register('todo', build_todo_status)   # 清单进度栏（每步从日志 fold 现算）
+    return status
 
 
 def build_agent(session: Session, args, ui_state: dict, hooks=None) -> Agent:
@@ -115,6 +128,10 @@ def build_agent(session: Session, args, ui_state: dict, hooks=None) -> Agent:
         session=session, llm=llm, prompt=prompt, options=options, hooks=hooks,
         # 技能表（SkillTable）目录段与 skill 工具共用同一个实例（永不漂移）
         tools=build_tools(workspace=args.workspace, skills=_skills),
+        # 运行时状态贡献者（issue #19）：**加一个状态源 = 这里一行注册**，循环不用改。
+        # 目前只有 todo 状态栏（每步从日志 fold 现算，叠在 messages 末尾）；将来的
+        # L0 会话目录 / 预算水位（issue #3）也是在这里各加一行。
+        runtime_status=_runtime_status(),
     )
 
     def on_event(event) -> None:

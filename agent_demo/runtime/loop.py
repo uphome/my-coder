@@ -14,7 +14,6 @@ import logging
 
 from ..capability.hooks import PreStepContext, RequestContext, RequestErrorContext
 from ..capability.llm import LlmError, LlmRequest, StreamChunk
-from ..tools.todo import build_todo_status
 from ..values.messages import (
     Message,
     TextBlock,
@@ -187,20 +186,21 @@ async def _run_step(agent, turn: int, step: int, assembly: dict) -> str | None:
         model = config.get('model') or agent.options.get('model') or (header or {}).get('model', '')
         if not provider or not model:
             raise RuntimeError('agent has no provider/model: set options or supply both via the request hook')
-        # 方案 A（agent.md §4 问题 1）：todo 状态栏——从日志 fold 现算，作为
-        # 一条 user 合成消息叠在 messages 末尾。不进日志、不进 derive_messages
-        # （历史零污染），但可重建（fold 纯函数）；无清单/全 completed 时不叠。
-        # 它不是事件，但 request/header 会把原文记下来供审计。
-        todo_status = build_todo_status(session)
+        # 运行时状态（issue #19）：注册制贡献者——循环只知道"遍历 + 贴尾 + 记审计"，
+        # 不认识任何具体状态源。每个非空状态各作为一条合成 user 消息叠在 messages 末尾：
+        # 不进日志、不进 derive_messages（历史零污染），但可重建（贡献者都是日志投影的
+        # 纯函数）；无内容时贡献者返回 None，循环一行都不多叠。
+        # 它不是事件，但 request/header.runtime_status 会把 {名字: 原文} 记下来供审计。
+        statuses = agent.runtime_status.collect(session)
         messages = list(session.derive_messages())
-        if todo_status:
-            messages.append(create_user_message([TextBlock(text=todo_status)]))
+        for _, text in statuses:
+            messages.append(create_user_message([TextBlock(text=text)]))
         request = LlmRequest(
             provider=provider,
             model=model,
             # system 每次请求渲染一次：live 段（instructions）在这里重新求值。
             # 它只在工作区指令文件真的变了的时候才变字节，所以前缀缓存照样命中；
-            # todo 状态栏在 messages 末尾（每步都变的东西不该进稳定前缀）。
+            # 运行时状态在 messages 末尾（每步都变的东西不该进稳定前缀）。
             system=agent.prompt.render(assembly, ctx={'agent': agent}),
             messages=tuple(messages),
             tools=tuple(agent.tools.schemas()),
@@ -212,9 +212,10 @@ async def _run_step(agent, turn: int, step: int, assembly: dict) -> str | None:
             'model': request.model,
             'system': request.system,
             'tools': [tool['name'] for tool in request.tools],
-            # 审计字段：本轮叠给模型的状态栏原文（痕迹数据，不进模型上下文）。
-            # 状态栏本身不落事件，靠这里回答"这轮模型看到了什么 todo 状态"。
-            **({'todo_status': todo_status} if todo_status else {}),
+            # 审计字段：本轮叠给模型的运行时状态原文（痕迹数据，不进模型上下文）。
+            # 状态栏本身不落事件，靠这里回答"这轮模型被告知了哪些运行时状态"；
+            # 多个来源时是一个映射 {贡献者名: 原文}，加来源不必加平铺字段。
+            **({'runtime_status': dict(statuses)} if statuses else {}),
         })
         assembler = _BlockAssembler()
         try:

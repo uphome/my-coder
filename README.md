@@ -214,6 +214,7 @@ issue 号的例外。
 | `runtime/agent.py` | 被动状态机：wake / kick / when_idle / cancel |
 | `values/persistence.py` | JSONL 追加写 + 重放读 |
 | `state/recovery.py` | 会话自愈：恢复时给崩溃留下的悬空工具调用补 is_error 合成结果 + 修复痕迹 |
+| `state/runtime_status.py` | **每轮叠给模型的运行时状态**（注册制贡献者）：名字 + `build(session) -> str\|None`；贡献者在 `app/factory.py` 注册，循环只收集与审计（issue #19） |
 | `app/instructions.py` | 工作区项目指令文件（AGENTS.md/CLAUDE.md）：子目录清单（每回合重扫）+ 根文件**三态**探测（每请求；`lstat`/`stat` 分开 + 读完校验缓存键）+ 字符预算 + system live 段 |
 | `app/skills.py` | 按需技能：两来源（包内 `bundled_skills/` + 工作区 `skills/`）按名字合并、workspace 同名覆盖；目录文本 + 按名字解析正文；`SkillTable` 按内容指纹缓存（目录段是 live 段——技能文件改了，下一次请求就生效）+ **工作区来源的越界检查** |
 | `bundled_skills/` | **随 agent 发布的技能正文**（`project-instructions.md`：怎么写 AGENTS.md）；`pyproject` package-data 保证装到别处也在 |
@@ -225,7 +226,7 @@ issue 号的例外。
 | `cli.py` | CLI 入口（单次任务 / 无任务参数进 REPL） |
 | `web/` | Web 宿主：`app.py` 路由+装配 / `state.py` Seat+宿主状态 / `sessions.py` 会话生命周期（含**每会话工作区**的解析与落日志）/ `titles.py` 自动标题 / `payload.py` 纯函数投影（FastAPI + SSE：会话/标题/approval/手动压缩/steer 插队） |
 | `app/compaction.py` | 上下文压缩引擎（四步事务 + checkpoint + 会话 token 累计账） |
-| `tests/` | 146 个架构测试，按关注点分 14 个文件（值/日志投影、inbox、prompt、loop、llm、tools、todo、recovery、compaction、instructions、skills、web_search、web、cli）+ `conftest.py`（跨文件 helper）+ **`test_architecture.py`**（2 条：依赖方向 = 包结构，白名单不许长僵尸） |
+| `tests/` | 150 个架构测试，按关注点分 14 个文件（值/日志投影、inbox、prompt、loop、llm、tools、todo、recovery、compaction、instructions、skills、web_search、web、cli）+ `conftest.py`（跨文件 helper）+ **`test_architecture.py`**（2 条：依赖方向 = 包结构，白名单不许长僵尸） |
 
 > `web_search` 与 `skill` 是两个"读工作区之外"的工具：搜索由 **DeepSeek 官方在服务端**
 > 执行（Anthropic 兼容端点 + 原生服务端工具 `web_search_20250305`），我们只发请求、
