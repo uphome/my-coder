@@ -1,6 +1,9 @@
 # 上下文召回与预算管理：改动设计（issue #3）
 
-> **状态：🔶 设计中，未实现。本文是这次改动的执行说明**（怎么写、先写哪个、怎么验）。
+> **状态：🔶 设计中；M1 核心已落地**——`my_coder/app/recall.py`（L0/L1/L2 投影）+
+> `my_coder/tools/recall.py`（`session_manifest` / `read_turn`）+
+> `app/factory.py` 里的 L0 注册，测试在 `tests/test_recall.py`；
+> **端到端验收（§5）还没做**，受控构造器与 runner 是下一步。
 >
 > 分工：调研与决策档案在 `agent.md` §11；**落地后**把规则提炼进 `AGENTS.md`、机制摘要进
 > `ARCHITECTURE.md`、进度进 `NEXT_STEPS.md`、前端映射进 `web/PROJECTION_DESIGN.md`。
