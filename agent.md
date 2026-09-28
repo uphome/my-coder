@@ -874,4 +874,111 @@ TS 编译产物，符号名未压缩，所以下面的结论都带路径:行，�
 **将来若要补**（纯增量，不动现有语义）：`GET /fs/list?path=` + 前端分栏浏览（= DSH 的
 browse 后端）、工作区白名单（判据已收在 `app/workspace.py` 一处）。
 
+## 11. 上下文召回与预算管理（issue #3）—— 2026-09 调研与定稿（🔶 设计中）
+
+### 11.1 想要什么（issue #3 的原始诉求）
+
+issue #3 提的是「Token Budget（Token 额度感知）」，三层：
+
+1. **感知**：模型每轮推理都能知道上下文窗口还剩多少额度；
+2. **动作**：紧张时模型自己选——收尾当前任务 / 写交接笔记 / 调 `new_context`
+   开一个干净窗口；
+3. **连续性**：换窗口不等于失忆——`notes` 持久笔记负责交接、`history` 检索
+   完整原始会话。
+
+一句话：**让 agent 在长任务里自己管住上下文，而不是等系统硬压或等 provider 报错。**
+
+### 11.2 关键调研（2026-09 读源码实测）：**DSH 没有，Codex 三件齐全**
+
+> **勘误（同日补）**：本节最初只对标了 DSH，结论写成"这三件套一件都没有"。随后读 codex
+> 源码发现 **Codex 三件全都实现了**——`new_context` 工具（无参数、不摘要）、模型可见预算
+> （`get_context_remaining` + 一次性 reminder）、服务端 notes + history 检索（九个工具）。
+> 但它的**检索实现是闭源的**（仓库里只有客户端、工具 schema、注入槽位与 MCP bridge）。
+> 完整对照与"抄什么/不抄什么"见 `CONTEXT_BUDGET_DESIGN.md` §3。下面这段只针对 DSH。
+
+> 先在 `packages/` 全量搜过：`new_context|newContext` → **0 命中**；
+> `tokenBudget|remainingTokens|contextBudget|auto-compact` → **0 命中**。
+> 所以 issue #3 不是"DSH 有而我们缺"，是一次**有意的分歧设计**——可以走，
+> 但得知道在赌什么。
+
+DSH 的实际做法（逐条证据）：
+
+| 关注点 | DSH 怎么做 | 证据 |
+|---|---|---|
+| 何时压 | 自动：到**路由模型窗口的 0.8** 就压，保留最近 **0.16** 逐字；`/compact` 手动；确认溢出后压一次再重试（`maxOverflowRetries 1`） | `packages/compaction/compaction-basic/README.md`（`thresholdRatio` / `retainRatio` / `retainTokens` 配置表） |
+| 压不动的巨块 | `compaction-tool-result-pruner` 先修剪超大工具结果（**常常修剪完就不必再调摘要**）；超大文本另有 `spill`（存文件 + locator + retrievalHint） | 同上；`packages/spill/spill/README.md` |
+| 预算数字给谁 | **只给宿主与 UI**：`pressureTokens`（provider 实测的上次 prompt 大小）/ `projectedTokens`（pressure + 采样后 surface 增量的启发式重估价）/ `contextWindow`，消费方是圆环 | `packages/llm/token-meter/src/projection.ts`；`packages/client/ui-conversation/src/client/context-occupancy.ts` |
+| 模型跨窗口的记忆 | **`.agents/notes/` 是仓库约定**（markdown 笔记 + 归档 skill），不是框架机制；**没有 notes 工具** | `.agents/notes/`；`.agents/skills/dsh-archive-agent-notes` |
+| 回溯历史 | 5 个只读工具，**opt-in**（发行版 host 不挂）；授权 = 目标会话 cwd 与调用方**精确相等**；搜索**永远排除调用方自己**；结果封顶且**无游标** | `packages/session-query/tool-session-query/README.md` |
+
+**DSH 不给模型看数字的理由**（`projection.ts` 注释原文）：这个投影是
+*"a user-facing reference, **not a billing or gating input**"*，而且估算器
+*"systematically underprices CJK text and JSON schemas"*。**即"剩余额度"本身不可靠**，
+让模型拿不可靠的数做算术比不给更糟。这是本方案「只给状态、不给数字」的直接依据。
+
+> PI / opencode（本地源码已查）：**两家都没有**模型可见预算，也没有模型发起的窗口切换
+> 与跨窗口笔记。它们只有压缩——PI 是 `manual | threshold | overflow` 三态触发，
+> OpenCode 是 `compaction: { auto, tail_turns, preserve_recent_tokens, reserved }`
+> （token 预算口径，值得借命名）。**"回到原文"这一层，开源里基本是空白**：DSH 有 FTS5
+> 但 `unicode61` 对中文实测失效（`宽度` 查不到、整串中文被当成一个 token），
+> PI 只有按压缩边界扫分支，OpenCode 只有工具输出剪枝。
+
+### 11.3 本仓库现状与两个真缺口
+
+家底（`compaction.py`，473 行）：阈值自动压缩（`DEFAULT_COMPACT_TOKENS = 524288`）、
+溢出→压缩→重试、四步事务、8 段结构化 checkpoint + 代码拼入的文件清单、
+`estimate_context_tokens` / `session_token_totals` / `cache_hit_rate`、
+`POST /compact` + UI「压缩旧对话」按钮 + 圆环。模型侧：**零感知**。
+
+两个真缺口（比"加个预算数字"重要）：
+
+1. **自动压缩只挂在 `turn/end`**（外加 `request_error` 的被动兜底）。而 step 粒度
+   已经是"一次模型请求"，一个回合可以发 15+ 次请求（见 §4 问题 3 / issue #2）——
+   **单回合内膨胀到溢出时，主动压缩根本没有机会跑**，只能等 provider 报错，
+   而那时已经为一个满窗口的 prompt 付过费了。
+2. **选段单位是"回合数"（`keep_turns=3`），压力单位是 token**：一个回合 15 次请求
+   时，"保留最近 3 个回合"可能保留一整座山——单位不一致，阈值就调不准。
+
+### 11.4 定稿方案（**M1 召回 → M2 预算 → M3 切换**；细节见 `CONTEXT_BUDGET_DESIGN.md`）
+
+顺序翻转的理由：issue #3 三件里**只有"回溯原始会话"直接消除信息损失**；预算感知是
+"知道自己要丢了"，`new_context` 是"丢得更彻底"。**没有召回兜底时，切窗口＝真丢信息**
+（Codex 敢"不摘要就重开"，前提正是它有 history 工具）。
+
+| 阶段 | 内容 | 要点 |
+|---|---|---|
+| **M1 召回（核心）** | 三层目录导航：`list_sessions` → `session_manifest` → `read_turn`（+ `search_history` 兜底） | **不做相关性排序**，让模型自己导航；清单只收真人发言（排除 checkpoint 合成消息）、标插队、保留并标记已压缩；检索面＝曾进上下文的事件全集 |
+| M2 预算感知 | 预算投影（锚定法：只估增量）+ 每请求 `pre_step` 卡点 + 水位状态栏 + Convergence 通用规则 | 配套 |
+| M3 切换与笔记 | `new_context`（无参数）+ `context/switch` 事件 + 工作区 `notes/`（INDEX 注入） | 配套 |
+
+### 11.5 决策记录（2026-09 已拍板）
+
+1. **不做相关性排序，让 LLM 自己导航**：主路径是"目录 → 清单 → 明细"的结构化导航，
+   `search_history` 只作兜底（coverage 排序）。理由：语料是**自述的时间线**（对话）而不是
+   文档堆；没有标注数据，排序参数调不准；Codex 的实现印证了这条路（它的 `search_contents`
+   只有"字面量子串 + 结构过滤 + `recent_first`"，接口层不承诺相关性）。
+2. **检索面 = 曾经进过模型上下文的事件**（surface 三类的全集，含已被 `replace` 遮蔽的）。
+   痕迹事件（reasoning / chunk / request-header）**不进**检索面——它们从未进过上下文，
+   谈不上损失，且占日志 99.6% 的行数；可重建的投影（todo/context 状态栏）也不算损失。
+3. **入口是"用户话清单"（manifest）**：清单便宜到可以常驻（实测 44 回合会话的全部用户话
+   截断后 ≈1.1k 字符）。三条规则：**只收真人发言**（checkpoint 本身是一条 `user/message`，
+   实测会把 "This is an automatically generated checkpoint…" 混进清单）、**插队标来源**、
+   **被遮蔽的保留并标 `[已压缩]`**（用户话是约束来源，绝不能因压缩从目录里消失）。
+4. **富清单**：一行 = 用户话 + 该回合足迹（`N step` / 工具名 / 涉及文件 / 结局 /
+   结论摘录）。目的是让"模型推断这一回合发生了什么"**有据可查**，而不是凭记忆猜自己做过什么。
+5. **对模型暴露的坐标是 `turn`（可加 `step`）**，seq 只在内部使用（对齐 Codex 暴露
+   window_id + item_id 而不是内部偏移）。
+6. **`new_context` 的闸门**：一个回合最多一次 + **选段权在代码**（模型看不到 seq，
+   让它指定区间只会猜错）。第二层动机：能无限重置上下文的模型可以靠"重开"假装收敛
+   ——这正是 issue #2 的逃逸口，必须上闸。
+7. **笔记载体**：**不加新工具**（`write_file`/`edit` 已经够），约定工作区**非隐藏**目录
+   `notes/`。为什么必须非隐藏：隐藏目录被 `sandbox.iter_files` 跳过（`sandbox.py:44`），
+   `read_file` 按显式路径能读、但 `glob`/`grep` **发现不了**——下个窗口的模型会
+   "不知道自己有笔记"。`notes/INDEX.md` 在窗口切换时注入（索引注入 > 搜索，
+   与 `skill:catalog` 同一模式）。
+8. **切换标记**：**新增 `context/switch` 事件**（不动 `compaction/*` 四步事务的既有语义），
+   由它承载"谁发起的切换"（`trigger: model | auto | manual`）与遮蔽区间，供前端画分隔线
+   ——**硬切换必须对人类可见**（能悄悄重置上下文的模型，就能悄悄丢掉用户约束）。
+9. **当场砍掉、留档防复活**：`trace` 检索面、子块切分（实测最大事件 17k 字符）、
+   向量检索、FTS5（657 条事件线性打分是亚毫秒级）、相关性排序调参。
 

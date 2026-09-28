@@ -128,8 +128,10 @@ async def test_todo_status_bar_in_messages(tmp_path):
     headers = [e.data for e in session.events if e.type == 'request/header']
     assert len(headers) == 2, f'expected 2 model requests, got {len(headers)}'
 
-    # 规划前：无状态栏
-    assert 'runtime_status' not in headers[0]
+    # 规划前：没有 todo 那一项。
+    # 注意**不能**断言整个 `runtime_status` 缺席——issue #3 的 L0 会话目录也是贡献者，
+    # 它从第一个请求起就叠（模型一开始就该知道"我有历史"）；这里只问 todo 这一个键。
+    assert 'todo' not in headers[0].get('runtime_status', {})
     # system 里不再有 todo 清单（方案 A：system 全静态）
     assert 'step one' not in headers[0]['system']
     assert 'todo:state' not in headers[0]['system']

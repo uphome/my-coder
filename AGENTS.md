@@ -9,7 +9,7 @@ Python 复刻 deepseek-harness 架构的教学 demo（agent 框架本身，不�
 # 质量门：ruff + mypy + pytest 三绿才可提交（pyproject.toml 已配好）
 conda run -n agent-demo python -m ruff check my_coder tests
 conda run -n agent-demo python -m mypy my_coder
-conda run -n agent-demo python -m pytest        # 154 个测试（3 条平台相关：Windows 建不了符号链接时 skip）
+conda run -n agent-demo python -m pytest        # 175 个测试（3 条平台相关：Windows 建不了符号链接时 skip）
 
 # CLI（可 pip install -e . 后直接 my-coder；或模块方式跑）
 conda run --no-capture-output -n agent-demo python -m my_coder.cli --workspace . --fake "read README.md and summarize"
@@ -146,6 +146,49 @@ conda run --no-capture-output -n agent-demo python -m my_coder.web --workspace .
     `is_error` 结果——那是模型输入可能不合法的通道；而**注册时刻**的空名/重名/不可调用仍然
     当场抛，那是宿主写错了代码）。`except Exception` **不捕 `BaseException`**：`CancelledError`
     照常穿透，"取消单向传播"不被这条兜底破坏（有用例钉住）。
+- **上下文召回（issue #3 的 M1）的落地规则**（2026-09 已落地；设计说明与实测见
+  `CONTEXT_BUDGET_DESIGN.md`、`agent.md` §11）：压缩只改变"模型看得见什么"，不改变
+  "存在什么"（`replace` 只动 `Session._surface` 索引，`_log` 一个字不动），三层把这个
+  差补上——**L0 会话目录**（运行时状态贡献者，每请求；走 `state/runtime_status.py` 通道）→
+  **L1 用户话清单**（`session_manifest` 工具）→ **L2 回合明细**（`read_turn` 工具）。
+  - **检索面 = 曾经进过模型上下文的事件**（`user/message`/`assistant/message`/
+    `tool/result` 的**全集**，含被 `replace` 遮蔽的）。痕迹事件（chunk/reasoning/
+    `request/header`）**不进**检索面——它们从未进过上下文，谈不上损失，且占日志 99.6%
+    的行数。可重建的投影（todo/context 状态栏）也不算损失。
+  - **清单只收真人发言**：checkpoint 本身是一条 `user/message`（`surface_op='replace'`），
+    不排除就会把 "This is an automatically generated checkpoint…" 混进目录；插队要标
+    `(插队)`；**被遮蔽的真人发言必须保留并标 `[已压缩]`**（用户话是约束来源，
+    绝不能因为压缩就从目录里消失）。
+  - **不做相关性排序，让模型自己导航**：语料是自述的时间线而不是文档堆，导航靠
+    "顺序 + 回合号 + 足迹（结论摘录 / step / 工具 / 文件 / 结局）"；兜底的字面检索
+    v1 不做（`CONTEXT_BUDGET_DESIGN.md` §4.5 留了实测反例）。
+  - **对模型暴露的坐标是回合号**（可加 `step`），seq 只在内部用——模型按回合思考，
+    日志按 seq 存。**L2 必须有界**：实测回合 p95 十万字符、最大 22 万，无条件整段倒出
+    一次就是几万 token；超限要**明说被截断**、**并列出本回合实际有哪些 `step`**——
+    "用 `step` 精读"这句话不给目录就是空头支票，模型只能猜（旧日志的 `step/start`
+    还可能整段缺失）。`scope='trace'` 的推理痕迹**同样**受 step 过滤与字符/事件双上限
+    约束：它是"顺带看看推理"，不是绕过有界性的后门。
+  - **跨工作区不放行**：只允许读**同一工作区**的会话（`session/workspace` 判据，
+    与"每对话一个工作区"同一条规则）；跨区请求返回 is_error，**错误里不泄漏对方的目录**。
+  - **三条缓存/新鲜度规则（都是实测踩出来的）**：① L0 扫**别的**会话按 `(mtime_ns, size)`
+    键控缓存（冷 278 ms → 暖 0.1 ms）；**键必须含所有影响那一行的输入**——行里的
+    `workspace` 是"日志记录值 **or 宿主默认值**"，而 Web 宿主**每个 seat 各有默认工作区**，
+    少这一维就会把别的 seat 的归属算成自己的（L0 列错会话，更糟的是**跨工作区授权**
+    也建在这一行上）；② **当前会话必须排除在磁盘扫描之外**——它每请求
+    都在长，任何 stat 缓存都会失效（否则每请求重扫整个日志）；③ 当前会话由**增量游标**
+    投影（只走新增事件），**不许碰"整表"**：`session.events` 每次访问都拷贝整个事件元组
+    （20 万条 ≈20 ms）、`session.workspace()` 是反向全扫（旧会话 ≈10 ms）。用
+    `event_count` / `events_since` 与自己的游标。合计：L0 每请求 **0.1~0.2 ms**（首帧约
+    35 ms 建游标）。同类坑：按 `id(obj)` 记的内存缓存要**存下并核对 `obj.id`**——
+    `id()` 会在对象回收后被复用，撞车表现为"新会话凭空继承旧会话的计数"。
+  - **工具入参要自己较真类型**：注册表只查 required/未知字段（**不做类型校验**），
+    所以工具体内的宽松写法会把坏值静默变成别的语义——`bool("false")` 是 `True`、
+    `bool` 是 `int` 的子类（`turn=true` 变成回合 1）、未知 `scope` 当成默认值。判据同
+    不变式 5：**降级成 `is_error` 结果**让模型自己改，别猜它的意思。
+  - **两个工具声明 `execution_mode='parallel'` + `offload=True`**：纯读（并发安全）+
+    体内全是同步读盘/JSON 解析（没有 await，不卸载会堵住事件循环与超时定时器）。
+  - **已知成本（待优化，见 `NEXT_STEPS.md`）**：读**别的**巨型会话要重放整份日志
+    （实测 54 MB → 2.3 s）；已卸载到工作线程不阻塞循环，但同一会话连读两次会付两遍。
 - **恢复要自愈"悬空工具调用"**（落地时遵循；实测证据与 400 原文见
   `ARCHITECTURE.md` §3.16）：取消路径能补记账，但**进程被 kill / 断电 / OOM** 时
   没有任何代码有机会跑——日志会停在 `tool/call`（痕迹已落）与 `tool/result`
@@ -307,6 +350,6 @@ conda run --no-capture-output -n agent-demo python -m my_coder.web --workspace .
 - `my_coder/cli.py`：CLI 入口；`--fake` 用脚本化假模型离线跑通全流程（不需要 API key）；`--resume` 演示日志重放恢复
 - `my_coder/web/`：Web 宿主（入口层，FastAPI + SSE，会话管理/标题/approval/工作区）——拆成 `app.py`（路由+装配）/ `state.py`（Seat+宿主状态，Seat 带自己的 `args`）/ `sessions.py`（seat 生命周期 + 每会话工作区）/`titles.py`（自动标题）/ `payload.py`（纯函数投影，不依赖 FastAPI）；`python -m my_coder.web` 是它的入口，`app/factory.py` 的 `build_agent`/`load_env` 被 CLI 与 Web 共用；Web 的 `--workspace` 是**默认**工作区，每个对话可在界面上另选一个（见约定"每对话一个工作区"）
 - `show_memory.py`：教学脚本，重放日志展示"记忆 = 日志投影"
-- 工具在 `my_coder/tools/`：`build_tools(workspace, skills=…)` 组装（read_file 行号分页 / list_files / grep / glob / edit / write_file / bash / todo_write / web_search / **skill**（按名字取技能正文）），工具类型（`ToolSpec`：schema + executor + 并发模式 + 卸载声明 + 超时 + requires_approval）在 `state/registry.py`；`--workspace` 在 CLI 是**必填的路径边界**、在 Web 是**默认工作区**（每个对话可另选，见约定"每对话一个工作区"），边界实现同在 `app/sandbox.py`；bash/write_file/edit 执行前需人工确认；阶段一实施进度见 `NEXT_STEPS.md`
-- `web_search` 与 `skill` 是两个"读工作区之外"的工具：前者的**搜索能力由 DeepSeek 官方在服务端提供**（Anthropic 兼容 `.../anthropic/v1/messages` + 原生服务端工具 `web_search_20250305`），我们只做"发请求 + 解析结构化块"——绝不自己抓网页、绝不从模型正文里抠 URL；没有结果块要**响亮报错**而不是退化成"没找到"；后者按**名字**（不是路径）取包内/bundled 技能正文，模型没有机会拼出任意路径。两个都不读工作区文件、无副作用，所以**不走 workspace 沙箱、也不需要 approval**（web_search 与 DSH 一致，见 `agent.md` §6）
+- 工具在 `my_coder/tools/`：`build_tools(workspace, skills=…, sessions_dir=…, default_workspace=…)` 组装（read_file 行号分页 / list_files / grep / glob / edit / write_file / bash / todo_write / web_search / **skill**（按名字取技能正文）/ **session_manifest** + **read_turn**（上下文召回，issue #3）），工具类型（`ToolSpec`：schema + executor + 并发模式 + 卸载声明 + 超时 + requires_approval）在 `state/registry.py`；`--workspace` 在 CLI 是**必填的路径边界**、在 Web 是**默认工作区**（每个对话可另选，见约定"每对话一个工作区"），边界实现同在 `app/sandbox.py`；bash/write_file/edit 执行前需人工确认；阶段一实施进度见 `NEXT_STEPS.md`
+- `web_search` / `skill` / 召回工具是三个"读工作区边界之外"的东西：web_search 的**搜索能力由 DeepSeek 官方在服务端提供**（Anthropic 兼容 `.../anthropic/v1/messages` + 原生服务端工具 `web_search_20250305`），我们只做"发请求 + 解析结构化块"——绝不自己抓网页、绝不从模型正文里抠 URL；没有结果块要**响亮报错**而不是退化成"没找到"；skill 按**名字**（不是路径）取包内/bundled 技能正文，模型没有机会拼出任意路径；**召回工具读的是会话日志目录**（`--sessions`，默认 `.sessions`，可能不在当前工作区内），授权判据是"目标会话与当前会话**同一工作区**"，模型同样只能给会话 id、拼不出路径。三者都不写工作区文件、无副作用，所以**不走 workspace 沙箱、也不需要 approval**（web_search 与 DSH 一致，见 `agent.md` §6；召回的取舍见"上下文召回"约定）
 - `.env` 存 `DEEPSEEK_API_KEY`/`DEEPSEEK_BASE_URL`；`.sessions/`、`.codegraph/`、`.env` 均不入库

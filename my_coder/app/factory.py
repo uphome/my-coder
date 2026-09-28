@@ -19,6 +19,7 @@ from ..tools import build_tools
 from ..tools.todo import build_todo_status
 from .constants import DEFAULT_COMPACT_TOKENS, DEMO_SCRIPT
 from .instructions import InstructionLoader
+from .recall import session_index_text
 from .skills import SkillTable, format_catalog
 from .ui import render_event
 
@@ -37,7 +38,7 @@ def load_env(path: Path) -> None:
             os.environ[key] = value.strip()
 
 
-def _runtime_status() -> RuntimeStatusRegistry:
+def _runtime_status(sessions_dir: Path, default_workspace: str) -> RuntimeStatusRegistry:
     """每轮叠给模型的运行时状态：**注册在这里**（循环不认识具体来源，见 issue #19）。
 
     加一个状态源 = 这个函数里一行：`status.register('<名字>', build_fn)`。
@@ -45,6 +46,13 @@ def _runtime_status() -> RuntimeStatusRegistry:
     """
     status = RuntimeStatusRegistry()
     status.register('todo', build_todo_status)   # 清单进度栏（每步从日志 fold 现算）
+
+    def sessions(session: Session) -> str | None:
+        # L0 会话目录（issue #3 的 M1）：模型据此知道"我有历史"。
+        # 只列同一工作区的会话；每请求求值一次，所以扫描走 stat 键控缓存。
+        return session_index_text(session, sessions_dir, default_workspace)
+
+    status.register('sessions', sessions)
     return status
 
 
@@ -115,6 +123,11 @@ def build_agent(session: Session, args, ui_state: dict, hooks=None) -> Agent:
     # 都读磁盘、都做 stat 键控缓存（文件没变时字节不变，缓存前缀照样命中）。todo 不在
     # 这里：它是 messages 末尾的合成状态栏（loop 每轮从日志 fold 现算）。
     _skills = SkillTable(args.workspace)
+    # 召回（issue #3 的 M1）的注入点：宿主告诉应用层"日志放哪、默认工作区是哪个"。
+    # 表达式与 `cli.py` 写日志时一致（同一个目录，否则召回去扫别处）；state 层不认识
+    # 磁盘布局，所以路径只在这里注入，不往低层漏。
+    _sessions_dir = Path(getattr(args, 'sessions', '.sessions') or '.sessions')
+    _default_workspace = str(Path(args.workspace).expanduser().resolve())
     prompt.section('skill:catalog', 95, lambda ctx: format_catalog(_skills.skills()))
     prompt.section('tool:todo', 110, 'Use todo_write to plan multi-step work before you start.')
     prompt.section('tool:bash', 105, 'Use bash to run things: verify changes (tests, git status) and inspect runtime state. Output is capped: redirect large outputs to a file and read it with read_file. In this repo run tests with "conda run -n agent-demo python -m pytest -q".')
@@ -140,12 +153,13 @@ def build_agent(session: Session, args, ui_state: dict, hooks=None) -> Agent:
 
     agent = Agent(
         session=session, llm=llm, prompt=prompt, options=options, hooks=hooks,
-        # 技能表（SkillTable）目录段与 skill 工具共用同一个实例（永不漂移）
-        tools=build_tools(workspace=args.workspace, skills=_skills),
+        # 技能表（SkillTable）目录段与 skill 工具共用同一个实例（永不漂移）；
+        # sessions_dir 与宿主默认工作区注入召回工具（state 层不认识磁盘布局）
+        tools=build_tools(workspace=args.workspace, skills=_skills,
+                          sessions_dir=_sessions_dir, default_workspace=_default_workspace),
         # 运行时状态贡献者（issue #19）：**加一个状态源 = 这里一行注册**，循环不用改。
-        # 目前只有 todo 状态栏（每步从日志 fold 现算，叠在 messages 末尾）；将来的
-        # L0 会话目录 / 预算水位（issue #3）也是在这里各加一行。
-        runtime_status=_runtime_status(),
+        # 目前是 todo 状态栏 + L0 会话目录（issue #3 的 M1）；将来的预算水位（M2）同理。
+        runtime_status=_runtime_status(_sessions_dir, _default_workspace),
     )
 
     def on_event(event) -> None:

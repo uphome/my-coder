@@ -18,11 +18,12 @@ from pathlib import Path
 
 from ..app.skills import SkillTable
 from ..state.registry import ToolRegistry
-from . import file_io, search, shell, skill, todo, web_search
+from . import file_io, recall, search, shell, skill, todo, web_search
 
 
 def build_tools(
     workspace: Path | None, bash_timeout_s: float = 60.0, skills: SkillTable | None = None,
+    sessions_dir: Path | None = None, default_workspace: str = '',
 ) -> ToolRegistry:
     """工具注册表：全部文件工具共用一个 workspace 边界（轻量沙箱）。
 
@@ -30,6 +31,10 @@ def build_tools(
     `factory.build_agent` 构造好的技能表：**同一个实例**同时喂给目录段（live 段
     provider）与 skill 工具，两处永不漂移，会话中途新增的技能也两边同时可见；
     不传就自己建一个（测试与单独用 build_tools 的场景）。
+
+    `sessions_dir` / `default_workspace` 只喂给召回工具（`session_manifest` /
+    `read_turn`）：前者是"别的会话的日志在哪"，后者用于**跨工作区授权**
+    （只许读同一工作区的会话）。不传就不注册这两个工具——纯单会话场景不需要它们。
     """
     if workspace is None:
         raise ValueError('build_tools requires an explicit workspace（安全边界必须显式声明）')
@@ -42,4 +47,6 @@ def build_tools(
     shell.register(registry, workspace, bash_timeout_s=bash_timeout_s)
     todo.register(registry)
     web_search.register(registry)
+    if sessions_dir is not None:
+        recall.register(registry, sessions_dir, default_workspace)
     return registry
