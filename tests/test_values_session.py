@@ -33,6 +33,28 @@ def test_surface_events_require_marker():
         session.append('turn/start', {'turn': 1}, surface_op='append')
 
 
+def test_incremental_event_accessors():
+    """增量投影用的两个访问器：`event_count` 是 O(1)、`events_since` 只给新增段。
+
+    存在理由（审核发现，issue #3 的 M1）：`session.events` 每次访问都拷贝整个事件元组
+    ——20 万事件的会话上就是 ~20 ms，而运行时会话目录**每个请求**都要跑一遍。
+    所以那条路径必须能"只拿长度、只拿新增"，并有测试钉住语义。
+    """
+    session = Session(id='accessors')
+    assert session.event_count == 0
+    assert session.events_since(0) == ()
+
+    first = session.append('turn/start', {'turn': 1})
+    second = session.append('user/message', create_user_message([TextBlock(text='hi')]),
+                            surface_op='append')
+    assert session.event_count == 2
+    assert session.events_since(0) == (first, second)
+    assert session.events_since(1) == (second,)      # 只要新增的那一段
+    assert session.events_since(2) == ()             # 追平之后为空（稳态：每请求 O(1)）
+    # 与整表视图是同一批对象（不是复制品），所以两边永不漂移
+    assert session.events_since(0)[0] is session.events[0]
+
+
 def test_persistence_roundtrip(tmp_path):
     session = Session(id='s1')
     message = create_user_message([TextBlock(text='hello')])

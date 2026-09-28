@@ -87,7 +87,7 @@ my-coder-web --workspace . --fake
 
 ## 能做什么
 
-### 十个工具
+### 十二个工具
 
 | 工具 | 说明 |
 |---|---|
@@ -98,6 +98,7 @@ my-coder-web --workspace . --fake
 | `todo_write` | 跨回合的任务清单——模型每次重发整张表，完成一项标一项 |
 | `web_search` | 联网搜索：走 **DeepSeek 官方原生搜索**（服务端工具），不自己抓网页 |
 | `skill` | 按名字取技能正文（包内 `bundled_skills/` + 工作区 `skills/`），技能是"指令文件"不是新能力 |
+| `session_manifest` / `read_turn` | **上下文召回**（见下）：列某个会话的用户话清单 / 按回合号读回原文 |
 
 `edit` / `write_file` / `bash` 执行前会**停下来等你批准**（CLI 输 `y`，Web 点按钮）；
 拒绝不是失败：模型会收到一条"没执行"的结果，自己换方案。工具失败（坏参数、异常、超时）
@@ -118,6 +119,15 @@ Web 端：流式输出 + 可折叠思维链 + 工具卡片 · 多会话管理（
 `compaction` 把旧回合折叠成结构化 checkpoint（四步事务 + `<compacted-summary>` 标签）：
 **溢出恢复**（模型报上下文过长 → 压缩后重试）+ **阈值自动压缩**（默认过半窗口即压）+
 **手动压缩**（圆环面板按钮）。token 成本与缓存命中率是日志的投影，不需要第二份记账。
+
+### 压缩丢了细节，还能回到原文
+
+**压缩不是删除**：`replace` 只改"模型看得见什么"（surface 投影），日志一个字不动。
+所以召回分三层——**L0 会话目录**（每请求叠在状态栏：有哪些会话、各有多少回合/被压缩过几次）→
+**L1 用户话清单**（`session_manifest`：每个回合的用户原话 + 足迹——结论摘录、step 数、
+用过的工具、动过的文件、结局、是否已被压缩）→ **L2 回合明细**（`read_turn`：按回合号读回
+原文，超限会明说被截断并让你按 `step` 精读，`scope='trace'` 还能带出当时的推理痕迹）。
+**不做相关性排序**：语料是自述的时间线，模型看清单自己挑回合；只允许读**同一工作区**的会话。
 
 ### 崩溃自愈
 
@@ -145,8 +155,8 @@ Web 端：流式输出 + 可折叠思维链 + 工具卡片 · 多会话管理（
 状态   my_coder/state/{session,inbox,prompt,registry,recovery,runtime_status}.py
 能力   my_coder/capability/{llm,hooks}.py
 值     my_coder/values/{messages,persistence,limits}.py
-应用   my_coder/app/{factory,constants,sandbox,workspace,ui,skills,instructions,compaction}.py
-       my_coder/tools/（十个工具）· my_coder/bundled_skills/（随包发布的技能）
+应用   my_coder/app/{factory,constants,sandbox,workspace,ui,skills,instructions,compaction,recall}.py
+       my_coder/tools/（十二个工具）· my_coder/bundled_skills/（随包发布的技能）
 ```
 
 ## 五条不变式
