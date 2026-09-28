@@ -82,6 +82,22 @@ class SessionRow:
 _SCAN_CACHE: dict[str, tuple[tuple[int, int], SessionRow]] = {}
 
 
+@dataclass
+class _LiveCounter:
+    """当前会话的**增量**目录账（事件只追加，所以游标只前进）。"""
+    indexed: int = 0
+    user_messages: int = 0
+    turns: int = 0
+    compactions: int = 0
+    title: str = ''
+    first_user: str = ''
+    workspace: str = ''
+
+
+# 按**会话对象身份**记增量账（同一个 agent 的会话对象是长命的；换了对象就重建）
+_LIVE_CACHE: dict[int, _LiveCounter] = {}
+
+
 def _scan_one(path: Path, default_workspace: str) -> SessionRow:
     """逐行扫一个日志：只做行内子串匹配 + 命中行才 `json.loads`（实测快 6 倍）。
 
@@ -98,17 +114,22 @@ def _scan_one(path: Path, default_workspace: str) -> SessionRow:
     with path.open(encoding='utf-8') as handle:
         for line in handle:
             events += 1
-            if not summary and '"type": "user/message"' in line:
-                try:
-                    payload = (json.loads(line).get('data') or {}).get('$message') or {}
-                    for block in payload.get('content') or []:
-                        if '$text' in block:
-                            summary = block['$text'][:60]
-                            break
-                except (TypeError, ValueError, KeyError):
-                    pass
             if '"type": "user/message"' in line:
+                # **checkpoint 也是一条 user/message**（`surface_op='replace'` 写的合成消息）：
+                # 不许算进"用户话数"，否则目录里的条数和 L1 清单的行数对不上——
+                # 而"清单只收真人发言"是我们自己定的规则（AGENTS.md 的召回归约）。
+                if CHECKPOINT_MARK in line:
+                    continue
                 user_messages += 1
+                if not summary:
+                    try:
+                        payload = (json.loads(line).get('data') or {}).get('$message') or {}
+                        for block in payload.get('content') or []:
+                            if '$text' in block:
+                                summary = block['$text'][:60]
+                                break
+                    except (TypeError, ValueError, KeyError):
+                        pass
             elif '"type": "turn/start"' in line:
                 turns += 1
             elif '"type": "compaction/start"' in line:
@@ -146,10 +167,19 @@ def _scan_one(path: Path, default_workspace: str) -> SessionRow:
     return row
 
 
-def scan_sessions(sessions_dir: Path, default_workspace: str = '') -> list[SessionRow]:
-    """扫会话目录（最近更新的在前）。**唯一实现**：web 的列表也走这里。"""
+def scan_sessions(sessions_dir: Path, default_workspace: str = '',
+                  exclude: str = '') -> list[SessionRow]:
+    """扫会话目录（最近更新的在前）。**唯一实现**：web 的列表也走这里。
+
+    `exclude` 是要跳过的会话 id——**当前会话必须排除**：它每追加一条事件就变，
+    stat 键控缓存必然失效，于是"每请求求值一次"的 L0 会**每次重扫整个日志**
+    （实测 54 MB 的会话逐行扫 278 ms/次）。当前会话的行由内存算（见
+    `session_index_text`），不读盘——这也正是设计文档里写下的规则。
+    """
     rows: list[SessionRow] = []
     for path in sorted(sessions_dir.glob('*.jsonl')):
+        if exclude and path.stem == exclude:
+            continue
         try:
             rows.append(_scan_one(path, default_workspace))
         except OSError as error:      # 单个文件读不了不该让整张列表消失
@@ -361,7 +391,12 @@ def render_turn(session: Session, turn: int, *, step: int | None = None,
     实测回合尺寸：中位 1,340 字符 / p95 102,801 / 最大 219,323——所以**不能**无条件
     把整回合倒给模型（一次就是几万 token）。`step` 为空时给"回合头 + 步骤目录 + 装得下
     的步"，超限就明说被截断、让模型按 `step` 精读。
+
+    `scope='trace'` 额外带上该回合的**推理痕迹**（`assistant/reasoning`）——它能解释
+    "当时为什么这么决定"，是读回时的上下文；默认关（痕迹不是模型曾经见过的内容，
+    体积也不小）。`request/header` 里的 system 快照**不**回灌：它很长、而且随时可重建。
     """
+    trace = scope == 'trace'
     lines: list[str] = []
     total = 0
     truncated = False
@@ -373,7 +408,16 @@ def render_turn(session: Session, turn: int, *, step: int | None = None,
             current_turn = data.get('turn', 0)
         elif event.type == 'step/start':
             current_step = data.get('step', 0)
-        if current_turn != turn or event.type not in SURFACE:
+        if current_turn != turn:
+            continue
+        if trace and event.type == 'assistant/reasoning':
+            body = ' '.join(str(data.get('reasoning', '')).split())
+            if body:
+                line = f'[turn {turn} · step {current_step} · reasoning] {body[:600]}'
+                lines.append(line)
+                total += len(line)
+            continue
+        if event.type not in SURFACE:
             continue
         if step is not None and current_step != step:
             continue
@@ -403,48 +447,73 @@ def load_session_log(path: Path, session_id: str = '') -> Session:
 
 def row_from_session(session: Session, default_workspace: str = '',
                      updated: float = 0.0) -> SessionRow:
-    """当前会话的目录行（**从内存算**，不读盘）。
+    """当前会话的目录行（**增量投影**，不读盘、不重扫内存）。
 
-    只在"当前会话还没落盘"（测试、或宿主没 `bind_store`）时兜底用；正常路径下磁盘
-    扫描已经把当前会话数进去了，不必额外遍历一遍内存事件（那可是十几万条）。
+    为什么必须增量：L0 每个请求都要求值一次，而当前会话**每个请求都在长**——所以
+    任何"整表记忆化"都等于每次失效。实测（54 MB / 20 万事件）整表遍历 ≈ 120 ms/请求，
+    而增量只走新事件（稳态≈0）。
+    做法：按会话对象记一个游标 `indexed`，只处理 `events[indexed:]`，把用户话数 /
+    回合数 / 压缩数 / 标题 / 首个用户话 / 工作区累加进去。事件只追加，所以游标只前进。
+    （`session.workspace()` 是**反向全扫**，在"没有这条事件的旧会话"上等于每请求一次
+    全遍历——所以工作区也在增量游标里记，不调它。）
     """
-    user_messages = turns = compactions = 0
-    for event in session.events:
+    key = id(session)
+    counter = _LIVE_CACHE.get(key)
+    total = session.event_count
+    if counter is None or counter.indexed > total:
+        counter = _LiveCounter()
+        _LIVE_CACHE[key] = counter
+    # `events_since` 只拷贝新增段；**不能**用 `session.events`——那个 property 每次
+    # 访问都拷贝整个元组，在 20 万事件的会话上就是 ~20 ms/请求（实测踩到过）
+    for event in session.events_since(counter.indexed):
         if event.type == 'user/message':
-            user_messages += 1
+            # checkpoint 是 `surface_op='replace'` 写的合成 user/message，不算"用户话"
+            if not is_checkpoint(event):
+                counter.user_messages += 1
+                if not counter.first_user:
+                    counter.first_user = ' '.join(
+                        message_text(message_of(event)).split())[:60]
         elif event.type == 'turn/start':
-            turns += 1
+            counter.turns += 1
         elif event.type == 'compaction/start':
-            compactions += 1
-    title = ''
-    for event in session.events:
-        if event.type == 'session/title' and isinstance(event.data, dict):
-            title = str(event.data.get('title') or title)
-    first = ''
-    for turn in build_turns(session):
-        if turn.user_texts:
-            first = turn.user_texts[0][:60]
-            break
-    workspace = session.workspace() or default_workspace
+            counter.compactions += 1
+        elif event.type == 'session/title' and isinstance(event.data, dict):
+            counter.title = str(event.data.get('title') or counter.title)
+        elif event.type == 'session/workspace' and isinstance(event.data, dict):
+            raw = str(event.data.get('workspace') or '').strip()
+            if raw:
+                try:
+                    counter.workspace = str(normalize_recorded_workspace(raw))
+                except OSError:
+                    counter.workspace = raw
+    counter.indexed = total
+
+    workspace = counter.workspace or default_workspace
     return SessionRow(
-        session_id=session.id, events=len(session.events), updated=updated,
-        title=title, title_source='', summary=title or first or '(empty)',
+        session_id=session.id, events=total, updated=updated,
+        title=counter.title, title_source='',
+        summary=counter.title or counter.first_user or '(empty)',
         workspace=workspace, workspace_ok=Path(workspace).is_dir() if workspace else False,
-        user_messages=user_messages, turns=turns, compactions=compactions,
+        user_messages=counter.user_messages, turns=counter.turns,
+        compactions=counter.compactions,
     )
 
 
 def session_index_text(session: Session, sessions_dir: Path, default_workspace: str = '',
                        limit: int = 5) -> str | None:
-    """L0 的完整构造：扫目录 + 兜底当前会话 → 渲染。
+    """L0 的完整构造：扫**别的**会话 + 当前会话走内存 → 渲染。
 
-    给 `app/factory.py` 的 runtime status 贡献者用（每请求求值一次，所以扫描必须
-    命中 stat 缓存；未落盘的当前会话才走内存兜底）。
+    给 `app/factory.py` 的 runtime status 贡献者用（每请求求值一次）：所以
+    ① 别的会话走 stat 键控缓存（文件不变就只做 stat）；
+    ② **当前会话排除在磁盘扫描之外**、由**增量游标**投影（它每请求都在长）。
+    实测（54 MB / 20 万事件会话）：求值 ≈ 0.3 ms；曾在这里踩到三处 O(n)
+    ——整表记忆化、`session.events` 的整表拷贝、以及 `session.workspace()` 的反向全扫。
     """
-    rows = list(scan_sessions(sessions_dir, default_workspace))
-    if not any(row.session_id == session.id for row in rows):
-        rows.append(row_from_session(session, default_workspace))
+    current_row = row_from_session(session, default_workspace)
+    rows = list(scan_sessions(sessions_dir, default_workspace, exclude=session.id))
+    rows.append(current_row)
+    # 用 `current_row.workspace`（增量游标里记着，O(1)）而不是 `session.workspace()`：
+    # 后者是**反向全扫**，在没有那条事件的旧会话上等于每请求扫完整个日志（实测 ~10 ms）
     return render_session_index(
-        rows, current_id=session.id,
-        workspace=session.workspace() or default_workspace, limit=limit,
+        rows, current_id=session.id, workspace=current_row.workspace, limit=limit,
     )

@@ -20,6 +20,7 @@ from my_coder.app.recall import (
     render_turn,
     row_from_session,
     scan_sessions,
+    session_index_text,
     shadowed_seqs,
 )
 from my_coder.capability.llm import FakeLlm
@@ -248,5 +249,82 @@ def test_row_from_session_counts_from_memory():
     assert row.session_id == 'mem'
     assert row.turns == 2
     assert row.compactions == 0
-    assert row.user_messages >= 3          # 三条真人发言（含插队）
+    assert row.user_messages == 3        # 三条真人发言（含插队）；checkpoint 不算
     assert row.summary == '召回测试'        # 标题优先
+
+
+# ---------- 审核（2026-09）查出的三个缺陷，各留一条回归 ----------
+
+def test_checkpoint_is_not_counted_as_a_user_message(tmp_path):
+    """审核发现：L0 的"用户话数"原先把 checkpoint 也算进去了。
+
+    checkpoint 是 `surface_op='replace'` 写的 `user/message`（合成消息），而"清单只收
+    真人发言"是我们自己定的规则——两边对不上时，模型会看到"74 条用户话"却只有 70 行清单。
+    """
+    sessions_dir = tmp_path / 'sess'
+    sessions_dir.mkdir()
+    session = _compacted_session('counted', workspace=str(tmp_path),
+                                 store=sessions_dir / 'counted.jsonl')
+    rows = scan_sessions(sessions_dir, default_workspace=str(tmp_path))
+    row = next(r for r in rows if r.session_id == 'counted')
+    assert row.user_messages == 3, '磁盘扫描：checkpoint 不算用户话'
+    assert row_from_session(session).user_messages == 3, '内存兜底同理'
+
+
+def test_session_index_uses_memory_for_the_current_session(tmp_path):
+    """审核发现：L0 每请求会**重扫当前会话的整个日志**（它每请求都在变，缓存必失效）。
+
+    修法是把当前会话排除在磁盘扫描之外、由内存投影。这条测试用一个**过期的磁盘副本**
+    （只有 1 条用户话）反证：目录里读到的是内存里的 3 条，不是磁盘上的 1 条。
+    """
+    sessions_dir = tmp_path / 'sess'
+    sessions_dir.mkdir()
+    live = _compacted_session('live', workspace=str(tmp_path))
+    (sessions_dir / 'live.jsonl').write_text(
+        json.dumps({'seq': 0, 'time': 0.0, 'type': 'user/message',
+                    'data': {'$message': {'id': 'x', 'role': 'user',
+                                          'content': [{'$text': '过期副本'}]}},
+                    'surface_op': 'append', 'shadowed': None, 'ignorable': False},
+                   ensure_ascii=False) + '\n', encoding='utf-8')
+    text = session_index_text(live, sessions_dir, default_workspace=str(tmp_path))
+    assert text is not None
+    assert '3 条用户话' in text, f'应以内存为准，实际：{text}'
+
+
+@pytest.mark.asyncio
+async def test_legacy_session_without_workspace_follows_host_default(tmp_path):
+    """审核发现：跨工作区授权原先 fail-open（目标工作区判不出来就放行）。
+
+    旧会话（日志里没有 `session/workspace`）按"跟随宿主默认"处理：当前会话也在默认
+    工作区 → 允许；当前会话在**自定义**工作区 → 拒绝（它其实属于另一个目录）。
+    """
+    sessions_dir = tmp_path / 'sess'
+    sessions_dir.mkdir()
+    # 无 workspace 事件的旧会话（落盘时也不写 `session/workspace`）
+    _compacted_session('legacy', store=sessions_dir / 'legacy.jsonl')
+
+    custom = _compacted_session('custom', workspace=str(tmp_path / 'custom-ws'))
+    registry = build_tools(workspace=tmp_path, sessions_dir=sessions_dir,
+                           default_workspace=str(tmp_path))
+    agent = SimpleNamespace(session=custom)
+    denied = await registry.execute('session_manifest', {'session_id': 'legacy'}, agent)
+    assert denied.is_error and 'another workspace' in denied.content
+
+    # 当前会话就在宿主默认工作区 → 同一个"跟随默认"的旧会话应当放行
+    inside = _compacted_session('inside', workspace=str(tmp_path))
+    agent = SimpleNamespace(session=inside)
+    allowed = await registry.execute('session_manifest', {'session_id': 'legacy'}, agent)
+    assert not allowed.is_error
+
+
+def test_read_turn_trace_scope_adds_reasoning():
+    """`scope='trace'` 带上推理痕迹（默认不带）：痕迹能解释"当时为什么这么决定"。"""
+    session = _compacted_session()
+    session.append('turn/start', {'turn': 3})
+    session.append('step/start', {'turn': 3, 'step': 1})
+    session.append('assistant/reasoning', {'turn': 3, 'step': 1, 'reasoning': '因为 X 所以选 Y'})
+    session.append('user/message', create_user_message([TextBlock(text='第三回合')]),
+                   surface_op='append')
+    assert 'reasoning' not in render_turn(session, 3)
+    traced = render_turn(session, 3, scope='trace')
+    assert '因为 X 所以选 Y' in traced and 'reasoning' in traced

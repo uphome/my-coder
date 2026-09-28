@@ -167,8 +167,13 @@ conda run --no-capture-output -n agent-demo python -m my_coder.web --workspace .
     一次就是几万 token；超限要**明说被截断**并让模型按 `step` 精读。
   - **跨工作区不放行**：只允许读**同一工作区**的会话（`session/workspace` 判据，
     与"每对话一个工作区"同一条规则）；跨区请求返回 is_error，**错误里不泄漏对方的目录**。
-  - **两条缓存/新鲜度规则**：L0 扫目录按 `(mtime_ns, size)` 键控缓存（实测冷 278 ms →
-    暖 0.3 ms，因为每请求都要求值）；**当前会话直接用内存里的 `Session`，绝不重读盘**。
+  - **三条缓存/新鲜度规则（都是实测踩出来的）**：① L0 扫**别的**会话按 `(mtime_ns, size)`
+    键控缓存（冷 278 ms → 暖 0.1 ms）；② **当前会话必须排除在磁盘扫描之外**——它每请求
+    都在长，任何 stat 缓存都会失效（否则每请求重扫整个日志）；③ 当前会话由**增量游标**
+    投影（只走新增事件），**不许碰"整表"**：`session.events` 每次访问都拷贝整个事件元组
+    （20 万条 ≈20 ms）、`session.workspace()` 是反向全扫（旧会话 ≈10 ms）。用
+    `event_count` / `events_since` 与自己的游标。合计：L0 每请求 **0.1~0.2 ms**（首帧约
+    35 ms 建游标）。
   - **两个工具声明 `execution_mode='parallel'` + `offload=True`**：纯读（并发安全）+
     体内全是同步读盘/JSON 解析（没有 await，不卸载会堵住事件循环与超时定时器）。
   - **已知成本（待优化，见 `NEXT_STEPS.md`）**：读**别的**巨型会话要重放整份日志

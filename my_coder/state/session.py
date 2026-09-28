@@ -45,8 +45,25 @@ class Session:
 
     @property
     def events(self) -> tuple[SessionEvent, ...]:
-        """完整事件序列（不可变视图）。"""
+        """完整事件序列（不可变视图）。
+
+        **注意它是 O(n) 的**（每次访问拷贝整个元组）：只要长度或增量，用
+        `event_count` / `events_since`——每个请求都要跑一遍的投影（如运行时会话目录）
+        在这里付过一次 20 万事件的拷贝（实测 ~20 ms/请求）。
+        """
         return tuple(self._log)
+
+    @property
+    def event_count(self) -> int:
+        """日志长度（O(1)，不拷贝）——增量投影的游标用。"""
+        return len(self._log)
+
+    def events_since(self, index: int) -> tuple[SessionEvent, ...]:
+        """从 `index` 起的事件（只拷贝新增的那一段）。
+
+        给"事件只追加"的增量投影用：整表 `events` 在这个场景下等于每请求重扫一遍。
+        """
+        return tuple(self._log[index:])
 
     @property
     def surface(self) -> tuple[int, ...]:
@@ -156,6 +173,11 @@ class Session:
 
         注意它是**痕迹事件**：不进 `derive_messages`（不变式 ②），但随日志重放，
         所以换个进程、隔几天再打开，这个会话仍然回到自己的工作区。
+
+        **性能警告：它是 O(n) 的反向扫描**——会话里**没有**这条事件时（旧会话）
+        要把整个日志扫一遍，实测 20 万事件的会话 ~10 ms。所以别把它放进"每个请求都要
+        跑"的路径：运行时会话目录在那里踩过一次（见 `app/recall.py` 的增量游标，
+        它自己记工作区，不调这里）。
         """
         for event in reversed(self._log):
             if event.type == 'session/workspace':

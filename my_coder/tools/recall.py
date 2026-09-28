@@ -59,12 +59,19 @@ def _resolve_session(session_id: str, agent, sessions_dir: Path,
     if not path.exists():
         return None, f'no session named {session_id!r}'
     mine = current.workspace() or default_workspace
-    theirs = ''
+    theirs = None
     for row in scan_sessions(sessions_dir, default_workspace):
         if row.session_id == session_id:
-            theirs = row.workspace
+            # 没记录工作区的旧会话 = 跟随宿主默认（与工作区选择策略同一判据），
+            # 所以要把 default 补上再比；否则"旧会话"会被当成"工作区为空"而放行
+            theirs = row.workspace or default_workspace
             break
-    if mine and theirs and mine != theirs:
+    if theirs is None:
+        # **fail-closed**：判不出目标归属就不读（读不了 / 坏行都会走到这里）。
+        # 放行的代价是可能的跨工作区泄漏，拒绝的代价只是模型换一条路——不对称
+        return None, (f'cannot determine the workspace of session {session_id!r}; '
+                      'refusing to read it')
+    if mine != theirs:
         return None, (f'session {session_id!r} belongs to another workspace; '
                       'this conversation can only recall its own workspace')
     try:
@@ -104,7 +111,8 @@ def register(registry, sessions_dir: Path, default_workspace: str = '') -> None:
         step = args.get('step')
         if step is not None and not isinstance(step, int):
             return ToolOutcome(content='step must be an integer when given', is_error=True)
-        text = render_turn(session, raw_turn, step=step)
+        text = render_turn(session, raw_turn, step=step,
+                           scope=str(args.get('scope') or 'surface'))
         if not text:
             known = ', '.join(str(t.turn) for t in build_turns(session))[:200] or '(none)'
             return ToolOutcome(
@@ -156,6 +164,13 @@ def register(registry, sessions_dir: Path, default_workspace: str = '') -> None:
                 'session_id': {
                     'type': 'string',
                     'description': 'Session to read from; omit for the current session.',
+                },
+                'scope': {
+                    'type': 'string',
+                    'enum': ['surface', 'trace'],
+                    'description': "Default 'surface' (what the model saw). 'trace' also "
+                                   "includes that turn's reasoning — useful to recover why a "
+                                   'decision was made.',
                 },
             },
             'required': ['turn'],
