@@ -2,7 +2,7 @@
 
 > **状态：🔶 设计中，未实现。本文是这次改动的执行说明**（怎么写、先写哪个、怎么验）。
 >
-> 分工：调研与决策档案在 `agent.md` §9；**落地后**把规则提炼进 `AGENTS.md`、机制摘要进
+> 分工：调研与决策档案在 `agent.md` §11；**落地后**把规则提炼进 `AGENTS.md`、机制摘要进
 > `ARCHITECTURE.md`、进度进 `NEXT_STEPS.md`、前端映射进 `web/PROJECTION_DESIGN.md`。
 > 按项目惯例，那些文档在实现时同步，本文不作规范。
 >
@@ -46,7 +46,7 @@
 
 ### 2.1 已有的家底
 
-`agent_demo/compaction.py`（473 行）：阈值自动压缩（`DEFAULT_COMPACT_TOKENS = 524288`）、
+`my_coder/app/compaction.py`（阈值/四步事务/checkpoint 全在这）：阈值自动压缩（`DEFAULT_COMPACT_TOKENS = 524288`）、
 溢出→压缩→重试、四步事务（start/summary/replace/end）、8 段结构化 checkpoint +
 由代码拼入的 `fileOps` 文件清单、`estimate_context_tokens` / `session_token_totals` /
 `cache_hit_rate`、`POST /compact` + UI「压缩旧对话」按钮 + 上下文圆环。
@@ -122,7 +122,7 @@
 
 | 类别 | 原文 | 摘要保留 | 丢失 | 丢掉的例子 |
 |---|---|---|---|---|
-| 路径/文件 | 71 | 24 | **47（66%）** | `agent_demo/persistence.py`、`agent_demo/compaction.py` |
+| 路径/文件 | 71 | 24 | **47（66%）** | `my_coder/values/persistence.py`、`my_coder/app/compaction.py` |
 | 数字/阈值 | 26 | 1 | **25（96%）** | `1_000_000`、`1000 行`、`1500 行`、`2.29s` |
 | 标识符/测试名 | 177 | 18 | **159（90%）** | `test_surface_replace_shadows_and_derives_in_place` |
 | 大写常量/错误码 | 55 | 9 | **46（84%）** | `DEFAULT_COMPACT_TOKENS`、`ALLOW_PARALLEL_IN_PROGRESS` |
@@ -252,7 +252,13 @@ L0 常驻在**运行时状态栏**里（与 todo 并列的 runtime status 贡献
 
 - 数据来自 `session/title`、首条用户话、用户话计数、文件 mtime、`compaction/start` 次数；
 - **只放最近 N 个**（默认 5）+ 当前会话永远在内；总数超限时补一行 `…（另有 K 个更早会话）`；
-- 成本：每会话一行（≈60~100 字符），可忽略；而且是 append-only 的稳定前缀，利于缓存；
+- **只列同一工作区的会话**（2026-09 起每个对话有自己的工作区，见 `agent.md` §10）：
+  会话日志里记着 `session/workspace`，L0/L1 只列与当前会话**同一工作区**的那些——
+  否则会把别的项目的会话目录念给模型（对齐 DSH 的 exact-cwd 授权）。旧会话（日志里
+  没有这条事件）按"跟随宿主默认工作区"处理，与工作区选择策略同一判据。
+- 成本：每会话一行（≈60~100 字符），可忽略；而且**走的是"每请求叠在 messages 末尾的
+  合成消息"通道**（`state/runtime_status.py`，issue #19 已落地），**不进 system**——
+  所以不会打碎缓存稳定前缀；
 - **风险**：常驻状态会变墙纸（模型很快不看）→ 所以 L0 只给"目录"，真正的导航靠 L1。
 
 > 为什么 L0 常驻而 L1 按需：模型**需要知道自己有历史**（否则不会想到去查，
@@ -386,14 +392,14 @@ search_history(query: str, session_id: str = '', kind: str = '', limit: int = 20
 
 | 文件 | 动作 | 内容 |
 |---|---|---|
-| `agent_demo/recall.py` | **新增** | 检索面投影（surface 全集 + live/shadowed）、L0 会话目录、L1 清单与足迹、L2 回合渲染 |
-| `agent_demo/tools/recall.py` | **新增** | 两个工具：`session_manifest` / `read_turn`（兜底 `search_history` v1 不做） |
-| `agent_demo/runtime_status.py` + `factory.py` | 改 | L0 会话目录做成 runtime status 贡献者（与 todo 并列） |
-| `agent_demo/tools/__init__.py` | 改 | 注册新工具 |
-| `agent_demo/compaction.py` | 改 | checkpoint 增加 `<compacted-source …/>` 指针与线索字段 |
-| `agent_demo/constants.py` | 改 | 上限常量（清单行宽、明细事件/字符上限、检索封顶） |
-| `agent_demo/factory.py` | 改 | 注册工具；`discipline` 增加"恢复历史"的通用规则（§4.9） |
-| `tests/test_demo.py` | 改 | §4.10 测试 |
+| `my_coder/state/recall.py` | **新增** | 检索面投影（surface 全集 + live/shadowed）、L0 会话目录、L1 清单与足迹、L2 回合渲染（**纯函数**，只读传入的日志/目录，不 import 上层） |
+| `my_coder/tools/recall.py` | **新增** | 两个工具：`session_manifest` / `read_turn`（兜底 `search_history` v1 不做）；按 main 的新约定声明 `execution_mode`/`offload` |
+| `my_coder/app/factory.py` | 改 | L0 会话目录在 `_runtime_status()` 里**加一行注册**（注册制已在 issue #19 落地，`state/runtime_status.py` 不用动） |
+| `my_coder/tools/__init__.py` | 改 | `build_tools` 组装新工具 |
+| `my_coder/app/compaction.py` | 改 | checkpoint 增加 `<compacted-source …/>` 指针与线索字段 |
+| `my_coder/app/constants.py`（必要时 `values/limits.py`） | 改 | 上限常量（清单行宽、明细事件/字符上限、检索封顶）；**有更低层要用就下沉** |
+| `my_coder/app/factory.py` | 改 | 注册工具；`discipline` 增加"恢复历史"的通用规则（§4.9） |
+| `tests/`（含 `test_architecture.py` 的分层断言） | 改 | §4.10 测试 |
 
 ### 4.9 提示词（通用规则，不写事故细节）
 
@@ -665,8 +671,11 @@ class Budget:
 ### 6.2 每请求卡点 + 水位状态栏
 
 - 压缩检查挂 `pre_step`（每请求，同步），`turn/end` 降为兜底，`request_error` 溢出恢复保留；
-- 状态栏走**注册制 runtime contributor**（todo 与 context 各一个），审计字段从
-  `todo_status` 改为 `runtime_status: {name: 原文}`；
+- 状态栏**复用现成的注册制**（2026-09 已由 issue #19 落地，写设计时它还只是个方案）：
+  `state/runtime_status.py` 的 `RuntimeStatusRegistry` + `app/factory.py` 的
+  `_runtime_status()`，审计已是 `request/header.runtime_status: {名字: 原文}` 的映射形态，
+  通道也已定为"每请求非空者各贴一条合成 user 消息在 messages 末尾"。
+  **M2 只加一行注册，循环一行都不用改**；
 - **水位触发**：`tight ≥ 0.7`、`critical ≥ 0.9`，低于水位不叠（零成本）；
 - 规则与事实分层：**"该收尾"是 system 的通用规则**（`discipline` 的 Convergence），
   **"什么时候算紧张"是运行时事实**（状态栏给）。

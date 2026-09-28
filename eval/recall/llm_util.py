@@ -1,6 +1,6 @@
 """eval 用的 LLM 小工具：复用产品的 OpenAI 兼容客户端，不另造一份。
 
-为什么复用：wire 格式、超时、错误分类都在 `agent_demo/llm.py` 里，
+为什么复用：wire 格式、超时、错误分类都在 `my_coder/capability/llm.py` 里，
 自己拿 httpx 再写一份，迟早和产品行为漂移（评测就失真了）。
 """
 from __future__ import annotations
@@ -16,9 +16,9 @@ REPO = Path(__file__).resolve().parents[2]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-from agent_demo.factory import load_env                       # noqa: E402
-from agent_demo.llm import LlmRequest, OpenAiCompatibleLlm    # noqa: E402
-from agent_demo.values import TextBlock, create_user_message  # noqa: E402
+from my_coder.app.factory import load_env                            # noqa: E402
+from my_coder.capability.llm import LlmRequest, OpenAiCompatibleLlm  # noqa: E402
+from my_coder.values.messages import TextBlock, create_user_message  # noqa: E402
 
 DEFAULT_MODEL = 'deepseek-v4-flash'
 _engine: OpenAiCompatibleLlm | None = None

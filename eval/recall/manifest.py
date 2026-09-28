@@ -1,4 +1,4 @@
-"""L0/L1/L2 三层投影（评测版；落地时搬进 `agent_demo/recall.py`）。
+"""L0/L1/L2 三层投影（评测版；落地时搬进 `my_coder/state/recall.py`）。
 
 **复用产品自己的投影代码**：`persistence.load_events` + `Session.adopt` 重建
 surface 投影与类型化块（`TextBlock` / `ToolCallBlock` / `ToolResultBlock`），
@@ -21,13 +21,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
-if str(REPO) not in sys.path:          # 让 eval 脚本能 import agent_demo
+if str(REPO) not in sys.path:          # 让 eval 脚本能 import my_coder
     sys.path.insert(0, str(REPO))
 
-from agent_demo.persistence import load_events             # noqa: E402
-from agent_demo.session import Session                     # noqa: E402
-from agent_demo.values import (Message, TextBlock,         # noqa: E402
-                               ToolCallBlock, ToolResultBlock)
+from my_coder.state.session import Session                       # noqa: E402
+from my_coder.values.messages import (Message, TextBlock,        # noqa: E402
+                                      ToolCallBlock, ToolResultBlock)
+from my_coder.values.persistence import load_events              # noqa: E402
 
 SESSIONS = REPO / '.sessions'
 SURFACE = ('user/message', 'assistant/message', 'tool/result')
