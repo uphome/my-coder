@@ -146,6 +146,33 @@ conda run --no-capture-output -n agent-demo python -m my_coder.web --workspace .
     `is_error` 结果——那是模型输入可能不合法的通道；而**注册时刻**的空名/重名/不可调用仍然
     当场抛，那是宿主写错了代码）。`except Exception` **不捕 `BaseException`**：`CancelledError`
     照常穿透，"取消单向传播"不被这条兜底破坏（有用例钉住）。
+- **上下文召回（issue #3 的 M1）的落地规则**（2026-09 已落地；设计说明与实测见
+  `CONTEXT_BUDGET_DESIGN.md`、`agent.md` §11）：压缩只改变"模型看得见什么"，不改变
+  "存在什么"（`replace` 只动 `Session._surface` 索引，`_log` 一个字不动），三层把这个
+  差补上——**L0 会话目录**（运行时状态贡献者，每请求；走 `state/runtime_status.py` 通道）→
+  **L1 用户话清单**（`session_manifest` 工具）→ **L2 回合明细**（`read_turn` 工具）。
+  - **检索面 = 曾经进过模型上下文的事件**（`user/message`/`assistant/message`/
+    `tool/result` 的**全集**，含被 `replace` 遮蔽的）。痕迹事件（chunk/reasoning/
+    `request/header`）**不进**检索面——它们从未进过上下文，谈不上损失，且占日志 99.6%
+    的行数。可重建的投影（todo/context 状态栏）也不算损失。
+  - **清单只收真人发言**：checkpoint 本身是一条 `user/message`（`surface_op='replace'`），
+    不排除就会把 "This is an automatically generated checkpoint…" 混进目录；插队要标
+    `(插队)`；**被遮蔽的真人发言必须保留并标 `[已压缩]`**（用户话是约束来源，
+    绝不能因为压缩就从目录里消失）。
+  - **不做相关性排序，让模型自己导航**：语料是自述的时间线而不是文档堆，导航靠
+    "顺序 + 回合号 + 足迹（结论摘录 / step / 工具 / 文件 / 结局）"；兜底的字面检索
+    v1 不做（`CONTEXT_BUDGET_DESIGN.md` §4.5 留了实测反例）。
+  - **对模型暴露的坐标是回合号**（可加 `step`），seq 只在内部用——模型按回合思考，
+    日志按 seq 存。**L2 必须有界**：实测回合 p95 十万字符、最大 22 万，无条件整段倒出
+    一次就是几万 token；超限要**明说被截断**并让模型按 `step` 精读。
+  - **跨工作区不放行**：只允许读**同一工作区**的会话（`session/workspace` 判据，
+    与"每对话一个工作区"同一条规则）；跨区请求返回 is_error，**错误里不泄漏对方的目录**。
+  - **两条缓存/新鲜度规则**：L0 扫目录按 `(mtime_ns, size)` 键控缓存（实测冷 278 ms →
+    暖 0.3 ms，因为每请求都要求值）；**当前会话直接用内存里的 `Session`，绝不重读盘**。
+  - **两个工具声明 `execution_mode='parallel'` + `offload=True`**：纯读（并发安全）+
+    体内全是同步读盘/JSON 解析（没有 await，不卸载会堵住事件循环与超时定时器）。
+  - **已知成本（待优化，见 `NEXT_STEPS.md`）**：读**别的**巨型会话要重放整份日志
+    （实测 54 MB → 2.3 s）；已卸载到工作线程不阻塞循环，但同一会话连读两次会付两遍。
 - **恢复要自愈"悬空工具调用"**（落地时遵循；实测证据与 400 原文见
   `ARCHITECTURE.md` §3.16）：取消路径能补记账，但**进程被 kill / 断电 / OOM** 时
   没有任何代码有机会跑——日志会停在 `tool/call`（痕迹已落）与 `tool/result`
@@ -307,6 +334,6 @@ conda run --no-capture-output -n agent-demo python -m my_coder.web --workspace .
 - `my_coder/cli.py`：CLI 入口；`--fake` 用脚本化假模型离线跑通全流程（不需要 API key）；`--resume` 演示日志重放恢复
 - `my_coder/web/`：Web 宿主（入口层，FastAPI + SSE，会话管理/标题/approval/工作区）——拆成 `app.py`（路由+装配）/ `state.py`（Seat+宿主状态，Seat 带自己的 `args`）/ `sessions.py`（seat 生命周期 + 每会话工作区）/`titles.py`（自动标题）/ `payload.py`（纯函数投影，不依赖 FastAPI）；`python -m my_coder.web` 是它的入口，`app/factory.py` 的 `build_agent`/`load_env` 被 CLI 与 Web 共用；Web 的 `--workspace` 是**默认**工作区，每个对话可在界面上另选一个（见约定"每对话一个工作区"）
 - `show_memory.py`：教学脚本，重放日志展示"记忆 = 日志投影"
-- 工具在 `my_coder/tools/`：`build_tools(workspace, skills=…)` 组装（read_file 行号分页 / list_files / grep / glob / edit / write_file / bash / todo_write / web_search / **skill**（按名字取技能正文）），工具类型（`ToolSpec`：schema + executor + 并发模式 + 卸载声明 + 超时 + requires_approval）在 `state/registry.py`；`--workspace` 在 CLI 是**必填的路径边界**、在 Web 是**默认工作区**（每个对话可另选，见约定"每对话一个工作区"），边界实现同在 `app/sandbox.py`；bash/write_file/edit 执行前需人工确认；阶段一实施进度见 `NEXT_STEPS.md`
-- `web_search` 与 `skill` 是两个"读工作区之外"的工具：前者的**搜索能力由 DeepSeek 官方在服务端提供**（Anthropic 兼容 `.../anthropic/v1/messages` + 原生服务端工具 `web_search_20250305`），我们只做"发请求 + 解析结构化块"——绝不自己抓网页、绝不从模型正文里抠 URL；没有结果块要**响亮报错**而不是退化成"没找到"；后者按**名字**（不是路径）取包内/bundled 技能正文，模型没有机会拼出任意路径。两个都不读工作区文件、无副作用，所以**不走 workspace 沙箱、也不需要 approval**（web_search 与 DSH 一致，见 `agent.md` §6）
+- 工具在 `my_coder/tools/`：`build_tools(workspace, skills=…, sessions_dir=…, default_workspace=…)` 组装（read_file 行号分页 / list_files / grep / glob / edit / write_file / bash / todo_write / web_search / **skill**（按名字取技能正文）/ **session_manifest** + **read_turn**（上下文召回，issue #3）），工具类型（`ToolSpec`：schema + executor + 并发模式 + 卸载声明 + 超时 + requires_approval）在 `state/registry.py`；`--workspace` 在 CLI 是**必填的路径边界**、在 Web 是**默认工作区**（每个对话可另选，见约定"每对话一个工作区"），边界实现同在 `app/sandbox.py`；bash/write_file/edit 执行前需人工确认；阶段一实施进度见 `NEXT_STEPS.md`
+- `web_search` / `skill` / 召回工具是三个"读工作区边界之外"的东西：web_search 的**搜索能力由 DeepSeek 官方在服务端提供**（Anthropic 兼容 `.../anthropic/v1/messages` + 原生服务端工具 `web_search_20250305`），我们只做"发请求 + 解析结构化块"——绝不自己抓网页、绝不从模型正文里抠 URL；没有结果块要**响亮报错**而不是退化成"没找到"；skill 按**名字**（不是路径）取包内/bundled 技能正文，模型没有机会拼出任意路径；**召回工具读的是会话日志目录**（`--sessions`，默认 `.sessions`，可能不在当前工作区内），授权判据是"目标会话与当前会话**同一工作区**"，模型同样只能给会话 id、拼不出路径。三者都不写工作区文件、无副作用，所以**不走 workspace 沙箱、也不需要 approval**（web_search 与 DSH 一致，见 `agent.md` §6；召回的取舍见"上下文召回"约定）
 - `.env` 存 `DEEPSEEK_API_KEY`/`DEEPSEEK_BASE_URL`；`.sessions/`、`.codegraph/`、`.env` 均不入库
