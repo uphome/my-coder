@@ -79,12 +79,18 @@ class SessionRow:
 
 
 # stat 键控缓存：value = (键, 行)。键不变就复用——L0 每请求都要，不能每次重扫。
-_SCAN_CACHE: dict[str, tuple[tuple[int, int], SessionRow]] = {}
+#
+# **键必须含 `default_workspace`**：行里的 `workspace` 是"日志记录值 or 宿主默认值"，
+# 而 Web 宿主**每个 seat 有自己的工作区**（`Seat.args` 只换 workspace）。少这一维时，
+# 第二个 seat 会拿到第一个 seat 的归属判定——L0 会列错会话，更糟的是**跨工作区授权
+# 会算错**（旧会话被算到别的 seat 的工作区上）。
+_SCAN_CACHE: dict[tuple[str, str], tuple[tuple[int, int], SessionRow]] = {}
 
 
 @dataclass
 class _LiveCounter:
     """当前会话的**增量**目录账（事件只追加，所以游标只前进）。"""
+    session_id: str = ''
     indexed: int = 0
     user_messages: int = 0
     turns: int = 0
@@ -105,7 +111,8 @@ def _scan_one(path: Path, default_workspace: str) -> SessionRow:
     """
     stat = path.stat()
     key = (stat.st_mtime_ns, stat.st_size)
-    cached = _SCAN_CACHE.get(str(path))
+    cache_key = (str(path), default_workspace)  # 见 _SCAN_CACHE 注释：缺第二维会串工作区
+    cached = _SCAN_CACHE.get(cache_key)
     if cached is not None and cached[0] == key:
         return cached[1]
 
@@ -163,7 +170,7 @@ def _scan_one(path: Path, default_workspace: str) -> SessionRow:
         workspace_ok=Path(effective).is_dir() if effective else False,
         user_messages=user_messages, turns=turns, compactions=compactions,
     )
-    _SCAN_CACHE[str(path)] = (key, row)
+    _SCAN_CACHE[cache_key] = (key, row)
     return row
 
 
@@ -389,43 +396,78 @@ def render_turn(session: Session, turn: int, *, step: int | None = None,
     """L2：某回合的原文（有界；超限明确告知被截断）。
 
     实测回合尺寸：中位 1,340 字符 / p95 102,801 / 最大 219,323——所以**不能**无条件
-    把整回合倒给模型（一次就是几万 token）。`step` 为空时给"回合头 + 步骤目录 + 装得下
-    的步"，超限就明说被截断、让模型按 `step` 精读。
+    把整回合倒给模型（一次就是几万 token）。第一行是回合头 `[turn N · K 步 · M 条事件]`
+    （`K` = 本回合出现过的 step 数），超限时**明说被截断并把可用的 step 列出来**，
+    好让模型按 `step` 精读——不给目录的"用 step 精读"是空头支票。
 
     `scope='trace'` 额外带上该回合的**推理痕迹**（`assistant/reasoning`）——它能解释
     "当时为什么这么决定"，是读回时的上下文；默认关（痕迹不是模型曾经见过的内容，
     体积也不小）。`request/header` 里的 system 快照**不**回灌：它很长、而且随时可重建。
     """
     trace = scope == 'trace'
-    lines: list[str] = []
-    total = 0
-    truncated = False
+    # `session.events` 每次访问都拷贝整个元组（见 `state/session.py`），而下面要扫两遍
+    # ——所以先存进局部变量，别让它变成一遍一次拷贝
+    events = session.events
+
+    def keep(event, cur_turn: int, cur_step: int) -> bool:
+        """这个事件属于本次渲染吗（回合 / step / 检索面三重过滤，两遍共用同一判据）。"""
+        if cur_turn != turn:
+            return False
+        if step is not None and cur_step != step:
+            return False
+        if event.type in SURFACE:
+            return not is_checkpoint(event)   # checkpoint 是合成 user/message，不是原文
+        return trace and event.type == 'assistant/reasoning'
+
+    # 第一遍：本回合存在吗、有哪些 step。**不是**为了"预览内容"——而是因为截断时我们
+    # 叫模型"用 step 精读"，却从不告诉它有哪些 step 可选，那它只能猜（旧日志里
+    # `step/start` 还可能整段缺失，`step` 一律是 0）。给不出目录的截断提示是空头支票。
+    steps: list[int] = []
+    matched = 0
     current_turn = 0
     current_step = 0
-    for event in session.events:
+    for event in events:
         data = event.data if isinstance(event.data, dict) else {}
         if event.type == 'turn/start':
             current_turn = data.get('turn', 0)
         elif event.type == 'step/start':
             current_step = data.get('step', 0)
-        if current_turn != turn:
+        if keep(event, current_turn, current_step):
+            matched += 1
+            if current_step not in steps:
+                steps.append(current_step)
+    if not matched:
+        return ''   # 空串 = "没有这个回合"，调用方据此报 is_error（别用回合头冒充内容）
+
+    header = (f'[turn {turn} · {len(steps)} 步 · {matched} 条事件'
+              + (f' · 只看 step {step}' if step is not None else '') + ']')
+    lines: list[str] = [header]
+    total = len(header)
+    truncated = False
+    current_turn = 0
+    current_step = 0
+    for event in events:
+        data = event.data if isinstance(event.data, dict) else {}
+        if event.type == 'turn/start':
+            current_turn = data.get('turn', 0)
+        elif event.type == 'step/start':
+            current_step = data.get('step', 0)
+        # 顺序要紧：**step 过滤与容量上限必须在 trace 分支之前**。放后面时 `step=N`
+        # 会把该回合所有步的推理都吐出来（一步最多 600 字符 × 几十步），而且 trace 行
+        # 一条都不计入 max_events/max_chars——"L2 必须有界"这条规则就被 reasoning 旁路了
+        # （实测旧日志里单步推理可上万字符）。
+        if not keep(event, current_turn, current_step):
             continue
-        if trace and event.type == 'assistant/reasoning':
+        if len(lines) - 1 >= max_events or total >= max_chars:
+            truncated = True
+            break
+        if event.type == 'assistant/reasoning':
             body = ' '.join(str(data.get('reasoning', '')).split())
             if body:
                 line = f'[turn {turn} · step {current_step} · reasoning] {body[:600]}'
                 lines.append(line)
                 total += len(line)
             continue
-        if event.type not in SURFACE:
-            continue
-        if step is not None and current_step != step:
-            continue
-        if is_checkpoint(event):
-            continue
-        if len(lines) >= max_events or total >= max_chars:
-            truncated = True
-            break
         kind = {'user/message': 'user', 'assistant/message': 'assistant',
                 'tool/result': 'tool_result'}[event.type]
         for body in render_message(message_of(event)):
@@ -433,7 +475,9 @@ def render_turn(session: Session, turn: int, *, step: int | None = None,
             lines.append(line)
             total += len(line)
     if truncated:
-        lines.append('…（本回合内容超过上限被截断；用 step 参数精读某一步）')
+        lines.append('…（本回合内容超过上限被截断；本回合的 step：'
+                     + ', '.join(str(s) for s in steps)
+                     + '——用 step 参数精读其中一步）')
     return '\n'.join(lines)
 
 
@@ -460,8 +504,14 @@ def row_from_session(session: Session, default_workspace: str = '',
     key = id(session)
     counter = _LIVE_CACHE.get(key)
     total = session.event_count
-    if counter is None or counter.indexed > total:
-        counter = _LiveCounter()
+    # `id()` 会在对象被回收后**被复用**，所以光比对 id 会撞车：一个已死会话的游标
+    # 被记在新会话名下 → 新会话的目录行凭空继承别人的用户话数/回合数。存下 `session.id`
+    # 做身份核对，对不上就重建。
+    # （`counter.indexed > total` 是另一条独立的防护：日志本该只追加，真变短了说明
+    #  重放/换文件之类的意外——游标越界时必须重建，不能拿着它去切片。）
+    if (counter is None or counter.session_id != session.id
+            or counter.indexed > total):
+        counter = _LiveCounter(session_id=session.id)
         _LIVE_CACHE[key] = counter
     # `events_since` 只拷贝新增段；**不能**用 `session.events`——那个 property 每次
     # 访问都拷贝整个元组，在 20 万事件的会话上就是 ~20 ms/请求（实测踩到过）

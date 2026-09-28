@@ -328,3 +328,120 @@ def test_read_turn_trace_scope_adds_reasoning():
     assert 'reasoning' not in render_turn(session, 3)
     traced = render_turn(session, 3, scope='trace')
     assert '因为 X 所以选 Y' in traced and 'reasoning' in traced
+
+
+# ---------- 第二轮自审（2026-09）查出的四个缺陷 + 一个文档/实现漂移 ----------
+
+def test_scan_cache_does_not_leak_workspace_across_host_defaults(tmp_path):
+    """缺陷：`_SCAN_CACHE` 的键只有 `(mtime_ns, size)`，而行里的 `workspace` 是
+    "记录值 or 宿主默认值"——Web 宿主**每个 seat 有各自的默认工作区**，于是第二个
+    seat 会命中第一个 seat 缓存的旧会话行，把别人的默认工作区当成自己的。
+
+    后果不只是 L0 列错会话：跨工作区授权判据（`mine != theirs`）也建立在同一行上，
+    错判就是**放行读另一个项目的会话**。
+    """
+    sessions_dir = tmp_path / 'sess'
+    sessions_dir.mkdir()
+    _compacted_session('legacy', store=sessions_dir / 'legacy.jsonl')   # 无 workspace 事件
+    seat_a, seat_b = str(tmp_path / 'seat-a'), str(tmp_path / 'seat-b')
+
+    row_a = next(r for r in scan_sessions(sessions_dir, seat_a) if r.session_id == 'legacy')
+    row_b = next(r for r in scan_sessions(sessions_dir, seat_b) if r.session_id == 'legacy')
+    assert row_a.workspace == seat_a
+    assert row_b.workspace == seat_b, '第二个 seat 拿到了第一个 seat 的默认工作区'
+
+
+def test_trace_scope_respects_the_step_filter():
+    """缺陷：trace 分支写在 step 过滤**之前**，`step=2` 会把整回合所有步的推理都带出来
+    （一步最多 600 字符 × 几十步）——模型点开一步，却拿到整回合的私密推理。"""
+    session = Session(id='trace-steps')
+    session.append('turn/start', {'turn': 1})
+    for number in (1, 2):
+        session.append('step/start', {'turn': 1, 'step': number})
+        session.append('assistant/reasoning',
+                       {'turn': 1, 'step': number, 'reasoning': f'第{number}步的想法'})
+        session.append('user/message',
+                       create_user_message([TextBlock(text=f'第{number}步的话')]),
+                       surface_op='append')
+
+    text = render_turn(session, 1, step=2, scope='trace')
+    assert '第2步的想法' in text
+    assert '第1步的想法' not in text, 'step 过滤必须同样作用于推理痕迹'
+    assert '第1步的话' not in text
+
+
+def test_trace_lines_count_toward_the_output_budget():
+    """缺陷：trace 行既不进 `max_events` 也不进 `max_chars`——"L2 必须有界"被 reasoning
+    旁路了（旧日志单步推理可上万字符）。"""
+    session = Session(id='trace-budget')
+    session.append('turn/start', {'turn': 1})
+    for number in range(1, 6):
+        session.append('step/start', {'turn': 1, 'step': number})
+        session.append('assistant/reasoning',
+                       {'turn': 1, 'step': number, 'reasoning': 'x' * 400})
+
+    text = render_turn(session, 1, scope='trace', max_chars=1000)
+    assert '被截断' in text, '痕迹超预算时同样要说被截断'
+    assert len(text) < 3000, f'痕迹必须受字符上限约束，实际 {len(text)}'
+
+
+def test_turn_header_lists_steps_and_truncation_names_them():
+    """漂移：设计文档承诺"回合头 + 步骤目录"，实现只给了一行"用 step 精读"——却从不
+    告诉模型有哪些 step，等于让它猜（旧日志 `step/start` 还可能整段缺失）。
+    另：不存在的回合必须仍然渲染成空串，否则回合头会让工具把"没有这个回合"报成成功。"""
+    session = Session(id='catalog')
+    session.append('turn/start', {'turn': 1})
+    for number in (1, 2, 3):
+        session.append('step/start', {'turn': 1, 'step': number})
+        session.append('user/message',
+                       create_user_message([TextBlock(text=f'第{number}步的话')]),
+                       surface_op='append')
+
+    full = render_turn(session, 1)
+    assert full.splitlines()[0].startswith('[turn 1 · 3 步 · 3 条事件]'), full.splitlines()[0]
+
+    cut = render_turn(session, 1, max_events=1)
+    assert '被截断' in cut and '1, 2, 3' in cut, f'截断提示要给可用 step，实际：{cut}'
+
+    assert render_turn(session, 99) == '', '不存在的回合不许有害羞的回合头'
+    assert render_turn(session, 1, step=9) == ''
+
+
+@pytest.mark.asyncio
+async def test_recall_tools_reject_mistyped_arguments(tmp_path):
+    """缺陷：入参校验过松——`scope='traces'` 静默当 surface（模型以为读了推理、据此
+    断言"当时没推理"）；`"false"` 是**真值**（`include_shadowed` 反而全都要）；
+    `bool` 是 `int` 子类（`turn=true` 变成回合 1）。坏值一律降级成 is_error。"""
+    session = _compacted_session()
+    registry = build_tools(workspace=tmp_path, sessions_dir=tmp_path)
+    agent = SimpleNamespace(session=session)
+    for name, args in (
+        ('read_turn', {'turn': 1, 'scope': 'traces'}),
+        ('read_turn', {'turn': 1, 'scope': 0}),
+        ('read_turn', {'turn': True}),
+        ('read_turn', {'turn': 1, 'step': '1'}),
+        ('session_manifest', {'include_shadowed': 'false'}),
+        ('session_manifest', {'with_commands': 1}),
+    ):
+        outcome = await registry.execute(name, args, agent)
+        assert outcome.is_error, f'{name}{args} 应当被拒：{outcome.content}'
+    # 显式 `null` 是"没给"（与省略同义），不是坏值——这条边界也要钉住，
+    # 否则"严格"会连正常的 `{"scope": null}` 一起拒掉
+    plain = await registry.execute('read_turn', {'turn': 1, 'scope': None}, agent)
+    assert not plain.is_error and '先探索这个项目' in plain.content
+    # 边界：**缺** required 参数是注册表层的 ValueError（由 loop._run_one 降级成结果），
+    # 与上面这些"值给歪了"是两层，别混在一起测
+    with pytest.raises(ValueError, match='missing required'):
+        await registry.execute('read_turn', {}, agent)
+
+
+def test_live_counter_is_discarded_when_the_object_id_is_reused():
+    """缺陷：`_LIVE_CACHE` 只按 `id(session)` 记，而 `id()` 在对象回收后**会被复用**
+    ——一个已死会话的增量游标会被记到新会话名下，新会话的目录行凭空继承别人的计数。"""
+    from my_coder.app import recall as recall_module
+
+    session = _compacted_session('reused')
+    recall_module._LIVE_CACHE[id(session)] = recall_module._LiveCounter(
+        session_id='someone-else', indexed=0, user_messages=99, turns=7)
+    row = row_from_session(session, default_workspace='')
+    assert (row.user_messages, row.turns) == (3, 2), '身份对不上的游标必须重建'

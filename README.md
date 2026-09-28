@@ -9,7 +9,7 @@
 `日志是唯一事实源` · `模型可见 ⟺ 可重建` · `被动状态机 + Inbox` · `决策走钩子`
 
 ![Python](https://img.shields.io/badge/Python-3.13-3776AB?logo=python&logoColor=white)
-![tests](https://img.shields.io/badge/tests-154%20passing-3fb950)
+![tests](https://img.shields.io/badge/tests-175%20passing-3fb950)
 ![license](https://img.shields.io/badge/license-MIT-4d6bfe)
 ![web](https://img.shields.io/badge/Web%20UI-%E9%9B%B6%E6%9E%84%E5%BB%BA%20%C2%B7%20%E5%8D%95%E6%96%87%E4%BB%B6-39c5cf)
 
@@ -199,7 +199,7 @@ Web 端默认只绑 `127.0.0.1` 且不校验来源——**不要**把它暴露�
 ```sh
 python -m ruff check my_coder tests   # 风格
 python -m mypy my_coder               # 类型
-python -m pytest                      # 154 个测试（3 条平台相关会 skip）
+python -m pytest                      # 175 个测试（3 条平台相关会 skip）
 ```
 
 三绿才提交。测试按关注点分 15 个文件 + `conftest.py` + `test_architecture.py`（依赖方向 = 包结构）。

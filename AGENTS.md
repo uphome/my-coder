@@ -9,7 +9,7 @@ Python 复刻 deepseek-harness 架构的教学 demo（agent 框架本身，不�
 # 质量门：ruff + mypy + pytest 三绿才可提交（pyproject.toml 已配好）
 conda run -n agent-demo python -m ruff check my_coder tests
 conda run -n agent-demo python -m mypy my_coder
-conda run -n agent-demo python -m pytest        # 154 个测试（3 条平台相关：Windows 建不了符号链接时 skip）
+conda run -n agent-demo python -m pytest        # 175 个测试（3 条平台相关：Windows 建不了符号链接时 skip）
 
 # CLI（可 pip install -e . 后直接 my-coder；或模块方式跑）
 conda run --no-capture-output -n agent-demo python -m my_coder.cli --workspace . --fake "read README.md and summarize"
@@ -164,16 +164,27 @@ conda run --no-capture-output -n agent-demo python -m my_coder.web --workspace .
     v1 不做（`CONTEXT_BUDGET_DESIGN.md` §4.5 留了实测反例）。
   - **对模型暴露的坐标是回合号**（可加 `step`），seq 只在内部用——模型按回合思考，
     日志按 seq 存。**L2 必须有界**：实测回合 p95 十万字符、最大 22 万，无条件整段倒出
-    一次就是几万 token；超限要**明说被截断**并让模型按 `step` 精读。
+    一次就是几万 token；超限要**明说被截断**、**并列出本回合实际有哪些 `step`**——
+    "用 `step` 精读"这句话不给目录就是空头支票，模型只能猜（旧日志的 `step/start`
+    还可能整段缺失）。`scope='trace'` 的推理痕迹**同样**受 step 过滤与字符/事件双上限
+    约束：它是"顺带看看推理"，不是绕过有界性的后门。
   - **跨工作区不放行**：只允许读**同一工作区**的会话（`session/workspace` 判据，
     与"每对话一个工作区"同一条规则）；跨区请求返回 is_error，**错误里不泄漏对方的目录**。
   - **三条缓存/新鲜度规则（都是实测踩出来的）**：① L0 扫**别的**会话按 `(mtime_ns, size)`
-    键控缓存（冷 278 ms → 暖 0.1 ms）；② **当前会话必须排除在磁盘扫描之外**——它每请求
+    键控缓存（冷 278 ms → 暖 0.1 ms）；**键必须含所有影响那一行的输入**——行里的
+    `workspace` 是"日志记录值 **or 宿主默认值**"，而 Web 宿主**每个 seat 各有默认工作区**，
+    少这一维就会把别的 seat 的归属算成自己的（L0 列错会话，更糟的是**跨工作区授权**
+    也建在这一行上）；② **当前会话必须排除在磁盘扫描之外**——它每请求
     都在长，任何 stat 缓存都会失效（否则每请求重扫整个日志）；③ 当前会话由**增量游标**
     投影（只走新增事件），**不许碰"整表"**：`session.events` 每次访问都拷贝整个事件元组
     （20 万条 ≈20 ms）、`session.workspace()` 是反向全扫（旧会话 ≈10 ms）。用
     `event_count` / `events_since` 与自己的游标。合计：L0 每请求 **0.1~0.2 ms**（首帧约
-    35 ms 建游标）。
+    35 ms 建游标）。同类坑：按 `id(obj)` 记的内存缓存要**存下并核对 `obj.id`**——
+    `id()` 会在对象回收后被复用，撞车表现为"新会话凭空继承旧会话的计数"。
+  - **工具入参要自己较真类型**：注册表只查 required/未知字段（**不做类型校验**），
+    所以工具体内的宽松写法会把坏值静默变成别的语义——`bool("false")` 是 `True`、
+    `bool` 是 `int` 的子类（`turn=true` 变成回合 1）、未知 `scope` 当成默认值。判据同
+    不变式 5：**降级成 `is_error` 结果**让模型自己改，别猜它的意思。
   - **两个工具声明 `execution_mode='parallel'` + `offload=True`**：纯读（并发安全）+
     体内全是同步读盘/JSON 解析（没有 await，不卸载会堵住事件循环与超时定时器）。
   - **已知成本（待优化，见 `NEXT_STEPS.md`）**：读**别的**巨型会话要重放整份日志

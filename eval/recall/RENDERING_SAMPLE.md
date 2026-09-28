@@ -78,6 +78,7 @@
 （足迹：2 step · read_file,grep · agent_demo/skills.py,agent_demo/factory.py,agent_demo/tools/todo.py(+24) · completed）
 
 ```
+[turn 32 · 2 步 · 62 条事件]
 [turn 32 · step 1 · user] 继续读。
 [turn 32 · step 1 · assistant] tool_call read_file({"file_path": "agent_demo/skills.py"})
 [turn 32 · step 1 · assistant] tool_call read_file({"file_path": "agent_demo/factory.py"})
@@ -85,20 +86,21 @@
 [turn 32 · step 1 · assistant] tool_call read_file({"file_path": "agent_demo/tools/__init__.py"})
 [turn 32 · step 1 · tool_result] tool_result 1: """应用层：按需技能（skill）——技能 = 文件，目录静态注入 system，正文按需 read。 2: 3: 对齐三家（详见 agent.md §1/§3，落地规则以 AGENTS.md 约定节为准）： 4: 5: - 技能 = `skills/<name>.md` 文件 + YAML frontmatter（name/description）， 6: 正文是操作指南（纯指令，不携带执行代码） 7: - **目录（catalog）静态注入 system**：只放 name + description + 相对 8: workspace 的路径，正文绝不进 system——目录字节稳定，处于缓存稳定前缀 9: - **正文 = 工具结果注入**：模型判断任务匹配某技能后，用现有 read_file 10: 按目录里的路径读文件 → 正文作为 tool/result 进 derive_messages，与读 11: 任何文件机制一致（落日志可重建、可被 compaction 折叠） 12: - 不新增 skill() 专用加载工具（对比 DSH/opencode 的取舍背景见 agent.md） 13: 14: 本模块三个职责： 15: 1. Skill 值对象：frontmatter 解析结果（frozen，供扫描与目录格式化共用） 16: 2. scan_skills(dir)：扫目录解析技能（dir 参数化——为将来多 agent 各自 17: 传技能根目录留缝，不用重构） 18: 3. format_catalog(skills)：目录 → system 注入文本（纯文本行 + read 指引） 19: """ 20: from __future__ import annotations 21: 22: import re 23: import sys 24: from dataclasses import dataclass 25: from pathlib import Path 26: 27: # 技能名只允许小写字母/数字/连字符（对齐 Agent Skills 约定的名字规则）。 28: _NAME = re.compile(r'^[a-z0-9]+(?:-[a-z0-9]+)*$') 29: 30: 31: @dataclass(frozen=True) 32: class Skill: 33: """一条技能：目录里的一行（name/description）+ 取正文的路径。 34: 35: path 是文件绝对路径；相对 workspace 的路径由调用方（目录格式化）生成， 36: 因为只有它知道 workspace 根。 37: """ 38: name: str 39: description: str 40: path: Path 41: 42: 43: def scan_skills(root: Path) -> list[Skill]: 44: """扫描技能目录：每个 .md 文件即一个技能（解析 frontmatter 取 name/description）。 45: 46: 只扫顶层 *.md（扁平形态，教学够用）；SKILL.md 目录形态等有需要再加。 47: 解析容错：坏技能（不可读/无 frontmatter/缺 name 或 description/名字非法） 48: **跳过并打诊断**（对齐项目"宁炸勿静默"——技能作者要能发现自己写坏了； 49: 但技能坏了不炸 system，只…
 [turn 32 · step 1 · tool_result] tool_result 1: """应用层：agent 工厂——build_agent() 组装一次完整 agent（CLI / Web 共用）。 2: 3: system prompt 由 PromptRegistry 的 section 拼装（identity/persona/工具提示， 4: 按 order 排序）；{{model}}/{{workspace}} 是严格插值变量，组装时求值。 5: 真实模型从环境变量取 key；--fake 注入脚本化假模型（离线演示，不需 key）。 6: 渲染订阅（session.on_event → render_event）也在这里挂——UI 是日志投影。 7: """ 8: from __future__ import annotations 9: 10: import os 11: from pathlib import Path 12: 13: from .agent import Agent 14: from .constants import DEFAULT_COMPACT_TOKENS, DEMO_SCRIPT 15: from .llm import FakeLlm, OpenAiCompatibleLlm 16: from .prompt import PromptRegistry 17: from .session import Session 18: from .skills import format_catalog, scan_skills 19: from .tools import build_tools 20: from .ui import render_event 21: 22: 23: def load_env(path: Path) -> None: 24: """把 .env 里的 KEY=VALUE 注入进程环境；已存在的环境变量优先（不覆盖）。""" 25: if not path.exists(): 26: return 27: for line in path.read_text(encoding='utf-8').splitlines(): 28: line = line.strip() 29: if not line or line.startswith('#') or '=' not in line: 30: continue 31: key, _, value = line.partition('=') 32: key = key.strip() 33: if key and key not in os.environ: 34: os.environ[key] = value.strip() 35: 36: 37: def build_agent(session: Session, args, ui_state: dict, hooks=None) -> Agent: 38: prompt = PromptRegistry() 39: prompt.section('identity', -100, 'You are {{model}}, a coding agent that helps with programming tasks. Read, search, edit, and run commands in the workspace to help the user — verify your work instead of guessing. Never …
-[turn 32 · step 1 · tool_result] tool_result 1: """应用层工具：todo_write——结构化任务清单（记录 + 更新 + 读回）。 2: 3: 对齐 harness tool-todo 的语义：每次调用发送 ENTIRE 整表（整表替换，无 4: 部分更新），每项带 status（pending / in_progress / completed）。清单是 5: "模型跨工具调用的记忆锚点"——关键在**读回**：折叠出日志里最后一次 6: todo/write 快照注入 prompt 上下文，模型每轮都看到当前清单、完成一项 7: 标一项 completed，不会重复规划或忘记进行到哪。 8: 9: 不变式：todo/write 仍是痕迹事件（非 surface，不进 derive_messages）—— 10: 它不污染模型消息历史，而是以"当前状态"的形式从上下文注入（与 harness 11: 的 sessionProjections 同构，只是我们用日志折叠实现投影）。 12: """ 13: from __future__ import annotations 14: 15: from ..registry import ToolOutcome, ToolSpec 16: 17: # 合法状态：pending（未开始）/ in_progress（正在做）/ completed（已完成） 18: TODO_STATUSES = ('pending', 'in_progress', 'completed') 19: # 默认单活动任务纪律（顺序执行 agent 的常态；未来并行执行再放开） 20: ALLOW_PARALLEL_IN_PROGRESS = False 21: 22: _DESCRIPTION = ( 23: 'Record and update a structured task list for the current work. Send the ENTIRE ' 24: 'list every call — it REPLACES the previous list (there are no partial updates, ' 25: 'no per-item edits). Use it to plan multi-step work and show progress: add one ' 26: 'todo per concrete step before you start. ' 27: 'Keep AT MOST ONE todo `in_progress` at a time; while work remains, exactly one ' 28: 'active task should be `in_progress`. ' 29: 'Mark a todo `completed` the moment it is done (do not batch completions), and ' 30: 'allow no `in_progress` item only once all work is complete. Skip the list for ' 31: 'trivial single-step tasks. Statuses: `pending` (not started), `in_progress` ' 32: '(being worked on now), `completed` (finished).' 33:…
-…（截断展示；本回合完整渲染 12,785 字符）
+…（截断展示；本回合完整渲染 12,827 字符）
 ```
 
-截断规则：`max_events=80` / `max_chars=12000` 双上限，超限追加一句"…（本回合内容超过上限被截断；用 step 参数精读某一步）"。
+截断规则：`max_events=80` / `max_chars=12000` 双上限（**痕迹行同样计入**），超限追加一句"…（本回合内容超过上限被截断；本回合的 step：…）"——截断提示必须给出可用的 step，否则"用 step 精读"是空头支票。
+
+第一行是**回合头** `[turn N · K 步 · M 条事件]`：先告诉模型这个回合有多大（`K` = 出现过的 step 数），被截断时再给出可选的 step 列表。
 
 ## 规模统计
 
 | 会话 | 回合（有用户话） | L1 清单 | L2 中位 | L2 最大 |
 |---|---|---|---|---|
-| `web-1788604766.jsonl` | 59（59） | 9,386 字符 | 1,409 | 62,577 |
-| `web.jsonl` | 9（9） | 1,808 字符 | 2,512 | 44,839 |
-| `web-1789573652.jsonl` | 5（5） | 747 字符 | 534 | 8,996 |
-| `main.jsonl` | 3（3） | 355 字符 | 412 | 1,737 |
+| `web-1788604766.jsonl` | 59（59） | 9,386 字符 | 1,433 | 62,602 |
+| `web.jsonl` | 9（9） | 1,808 字符 | 2,535 | 44,863 |
+| `web-1789573652.jsonl` | 5（5） | 747 字符 | 557 | 9,020 |
+| `main.jsonl` | 3（3） | 355 字符 | 435 | 1,760 |
 
 ## 评审时看到的五个问题（待定）
 
@@ -106,4 +108,4 @@
 2. **结论摘录长度**：现在 60 字符；缩到 40 能省约 1k 字符/会话。
 3. **L2 里的工具结果**：现在原样回灌（一次 `read_file` 可能就是一整份文件，单回合最大 6 万字符）。建议按工具类型分级：`read_file`/`list_files`/`glob` 只给指针（文件还在工作区、且是**当前版本**），`bash`/`grep` 这类不可重得的才回灌。
 4. **重复用户话**：同一请求被反复发时清单里会出现几行近似（导航歧义）——要不要折叠成一行 + `×N`？
-5. **`N step` 在旧日志里不准**（旧实现 step = 整段工具循环）。要不要改用"工具调用次数"当足迹（更稳、与 step 语义无关）？
+5. **`N step` 在旧日志里不准**（旧实现 step = 整段工具循环，`step/start` 可能整段缺失 → 全部事件算在 step 0，回合头会写成"1 步"）。已做的缓解：截断时**列出**实际存在的 step（模型不必猜）；未决：要不要改用"工具调用次数"当足迹（更稳、与 step 语义无关），以及"1 步"这种可疑行要不要显式标"step 不可用"。

@@ -80,10 +80,39 @@ def _resolve_session(session_id: str, agent, sessions_dir: Path,
         return None, f'cannot read session {session_id!r}: {error}'
 
 
+def _bad_flag(args: dict, name: str) -> str:
+    """布尔入参必须**真的是**布尔。
+
+    为什么较真：Python 的 `bool("false") == True`——模型给字符串 `"false"` 时
+    `bool(args.get(...))` 会把"关掉"读成"打开"（`include_shadowed=false` 反而全都要），
+    而这是**静默**的方向性错误。工具参数的坏值按不变式 5 降级成 `is_error` 结果，
+    让模型自己改，而不是我们猜它的意思。
+    """
+    if name in args and not isinstance(args[name], bool):
+        return f'{name} must be a boolean'
+    return ''
+
+
+def _bad_int(args: dict, name: str, *, required: bool = False) -> str:
+    """整数入参同理：`bool` 是 `int` 的子类，`turn=true` 会被 `isinstance` 放行成 1。"""
+    if name not in args or args[name] is None:
+        return f'{name} is required' if required else ''
+    value = args[name]
+    if isinstance(value, bool) or not isinstance(value, int):
+        return f'{name} must be an integer'
+    return ''
+
+
 def register(registry, sessions_dir: Path, default_workspace: str = '') -> None:
     """注册两个召回工具。`sessions_dir` 由 host 注入（state 层不认识磁盘布局）。"""
 
     async def session_manifest(args, agent, signal):
+        # `with_footprint` 目前不在 schema 里（注册表会先把未知字段拒掉），留着是防它
+        # 将来被加回 schema——**同一个 executor 的入参校验不该依赖 schema 的当前形状**
+        for name in ('include_shadowed', 'with_footprint', 'with_commands'):
+            error = _bad_flag(args, name)
+            if error:
+                return ToolOutcome(content=error, is_error=True)
         session_id = str(args.get('session_id') or '').strip()
         session, error = _resolve_session(session_id, agent, sessions_dir, default_workspace)
         if session is None:
@@ -91,9 +120,9 @@ def register(registry, sessions_dir: Path, default_workspace: str = '') -> None:
         turns = build_turns(session)
         text = render_manifest(
             turns,
-            include_shadowed=bool(args.get('include_shadowed', True)),
-            with_footprint=bool(args.get('with_footprint', True)),
-            with_commands=bool(args.get('with_commands', False)),
+            include_shadowed=args.get('include_shadowed', True),
+            with_footprint=args.get('with_footprint', True),
+            with_commands=args.get('with_commands', False),
         )
         if not text:
             return ToolOutcome(
@@ -101,18 +130,24 @@ def register(registry, sessions_dir: Path, default_workspace: str = '') -> None:
         return ToolOutcome(content=text)
 
     async def read_turn(args, agent, signal):
+        error = _bad_int(args, 'turn', required=True) or _bad_int(args, 'step')
+        if error:
+            return ToolOutcome(content=error, is_error=True)
+        scope = args.get('scope')
+        if scope is None:      # 显式 null 当"没给"（与省略同义）；但 0/False 是类型错，不许蒙混
+            scope = 'surface'
+        # 未知 scope 不许静默当 surface：模型以为在读痕迹、实际拿到的是 surface，
+        # 它会据此断言"当时没有推理"——错的是我们，代价记在它头上
+        if scope not in ('surface', 'trace'):
+            return ToolOutcome(
+                content="scope must be 'surface' or 'trace'", is_error=True)
         session_id = str(args.get('session_id') or '').strip()
         session, error = _resolve_session(session_id, agent, sessions_dir, default_workspace)
         if session is None:
             return ToolOutcome(content=error, is_error=True)
-        raw_turn = args.get('turn')
-        if not isinstance(raw_turn, int):
-            return ToolOutcome(content='turn must be an integer', is_error=True)
+        raw_turn = args['turn']
         step = args.get('step')
-        if step is not None and not isinstance(step, int):
-            return ToolOutcome(content='step must be an integer when given', is_error=True)
-        text = render_turn(session, raw_turn, step=step,
-                           scope=str(args.get('scope') or 'surface'))
+        text = render_turn(session, raw_turn, step=step, scope=scope)
         if not text:
             known = ', '.join(str(t.turn) for t in build_turns(session))[:200] or '(none)'
             return ToolOutcome(

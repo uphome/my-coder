@@ -795,7 +795,7 @@ DSH / PI / opencode / Codex 的对照见 `agent.md` §11。
 | `web/` | Web 宿主（入口层）：`app.py` FastAPI 路由 + `init_web` + `main`；`state.py` `Seat`/`WebState`/`state`；`sessions.py` seat 生命周期 + 会话文件 + 审批钩子 + **每会话工作区**（解析、落 `session/workspace` 事件、从日志读回）；`titles.py` 自动会话标题；`payload.py` 纯函数投影（不依赖 FastAPI）。seat 化并发隔离（每 seat 一份 `args`，**只有 workspace 不同**）；事件透传 turn/step + turn_start/user_message（带 message_id/rpc_id）/queue_update 帧供前端投影；队列项操作 `POST /queue/update`；`POST /sessions/new` 可带 `{"workspace": "…"}` |
 | `app/compaction.py` | 上下文压缩引擎（四步事务 + checkpoint + 会话 token 累计账） |
 | `show_memory.py` | 教学脚本：重放日志展示"记忆 = 投影" |
-| `tests/` | 168 个架构测试，**按关注点分文件**（2026-09 从单文件 `test_demo.py` 拆出）：`test_values_session.py` 值/日志投影、`test_inbox.py` 队列、`test_prompt.py` 提示词、`test_llm.py` LLM 客户端/wire 格式、`test_loop.py` 框架循环（含运行时状态贡献者）、`test_tools.py` 工具、`test_todo.py`、`test_recovery.py` 自愈、`test_compaction.py` 压缩、`test_recall.py` 上下文召回（三层投影 + 两个工具 + 审核回归）、`test_instructions.py` / `test_skills.py` 宿主直读、`test_web_search.py`、`test_web.py` Web 宿主（含每对话工作区）、`test_cli.py`；跨文件 helper 在 `conftest.py`；**`test_architecture.py`**（2 条：依赖方向 = 包结构——下层 import 上层当场红，白名单里的例外必须仍然真实存在，不许长僵尸）。3 条平台相关（Windows 建不了符号链接时 skip） |
+| `tests/` | 175 个测试，**按关注点分文件**（2026-09 从单文件 `test_demo.py` 拆出）：`test_values_session.py` 值/日志投影、`test_inbox.py` 队列、`test_prompt.py` 提示词、`test_llm.py` LLM 客户端/wire 格式、`test_loop.py` 框架循环（含运行时状态贡献者）、`test_tools.py` 工具、`test_todo.py`、`test_recovery.py` 自愈、`test_compaction.py` 压缩、`test_recall.py` 上下文召回（三层投影 + 两个工具 + 两轮审核回归）、`test_instructions.py` / `test_skills.py` 宿主直读、`test_web_search.py`、`test_web.py` Web 宿主（含每对话工作区）、`test_cli.py`；跨文件 helper 在 `conftest.py`；**`test_architecture.py`**（2 条：依赖方向 = 包结构——下层 import 上层当场红，白名单里的例外必须仍然真实存在，不许长僵尸）。3 条平台相关（Windows 建不了符号链接时 skip） |
 
 ---
 
@@ -841,7 +841,7 @@ DSH / PI / opencode / Codex 的对照见 `agent.md` §11。
 | max-tokens 粘性续写 | finish_reason=length 时自动继续（当前只记 max-tokens 收尾） | ⬜ 待做 |
 | token 计数与成本显示 | usage 已落日志，重放日志即可统计——记忆机制的直接受益 | ✅ 会话累计消耗 token + Web 圆环显示（app/compaction.py 的 `session_token_totals`） |
 | compaction 触发 | 上下文超限时压缩历史（harness 的 surface replace 区间遮蔽是方向） | ✅ 全套已完成：自动阈值 + 溢出恢复 + 手动按钮 |
-| **上下文召回（三层）** | 压缩丢了细节时能不能回到原文：L0 会话目录（状态栏）/ L1 用户话清单 / L2 回合明细（issue #3 的 M1） | ✅ 已落地（pp/recall.py + 	ools/recall.py，17 条测试）；**端到端验收待做**（CONTEXT_BUDGET_DESIGN.md §5） |
+| **上下文召回（三层）** | 压缩丢了细节时能不能回到原文：L0 会话目录（状态栏）/ L1 用户话清单 / L2 回合明细（issue #3 的 M1） | ✅ 已落地（`app/recall.py` + `tools/recall.py`，23 条测试）；**端到端验收待做**（CONTEXT_BUDGET_DESIGN.md §5） |
 | request_error 钩子启用 | RATE_LIMIT 退避重试——钩子插座插上第一个电器 | ✅ 溢出恢复（上下文过长 → 压缩重试）已占用该钩子；RATE_LIMIT 退避未做 |
 
 ### 阶段四：工程化打磨
