@@ -5,3 +5,5 @@ __pycache__/
 .codegraph/
 *.egg-info/
 .pytest_tmp/
+.eval/
+eval/recall/RENDERING_SAMPLE.md

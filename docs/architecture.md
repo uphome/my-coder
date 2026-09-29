@@ -728,8 +728,9 @@ user 角色以保住 system 前缀缓存；opencode 的 SystemContext 强调"不
 （只拷贝新增段）；`Session.events` / `Session.workspace()` 的 docstring 里都标了
 "O(n)，别放进每请求路径"。
 
-设计细节（清单字段、导航题生成、端到端验收口径）见 `CONTEXT_BUDGET_DESIGN.md`；
-DSH / PI / opencode / Codex 的对照见 `agent.md` §11。
+设计细节（清单字段、导航题生成、端到端验收口径）见
+[召回验收方法学](notes/implemented/testing/2026-09-19-context-recall-evaluation.md)；
+DSH / PI / opencode / Codex 的对照见 [`prior-art.md`](prior-art.md) §11。
 
 ---
 
@@ -841,7 +842,7 @@ DSH / PI / opencode / Codex 的对照见 `agent.md` §11。
 | max-tokens 粘性续写 | finish_reason=length 时自动继续（当前只记 max-tokens 收尾） | ⬜ 待做 |
 | token 计数与成本显示 | usage 已落日志，重放日志即可统计——记忆机制的直接受益 | ✅ 会话累计消耗 token + Web 圆环显示（app/compaction.py 的 `session_token_totals`） |
 | compaction 触发 | 上下文超限时压缩历史（harness 的 surface replace 区间遮蔽是方向） | ✅ 全套已完成：自动阈值 + 溢出恢复 + 手动按钮 |
-| **上下文召回（三层）** | 压缩丢了细节时能不能回到原文：L0 会话目录（状态栏）/ L1 用户话清单 / L2 回合明细（issue #3 的 M1） | ✅ 已落地（`app/recall.py` + `tools/recall.py`，23 条测试）；**端到端验收待做**（CONTEXT_BUDGET_DESIGN.md §5） |
+| **上下文召回（三层）** | 压缩丢了细节时能不能回到原文：L0 会话目录（状态栏）/ L1 用户话清单 / L2 回合明细（issue #3 的 M1） | ✅ 已落地（`app/recall.py` + `tools/recall.py`，30 条测试）+ **端到端验收已跑**（`eval/recall/`：受控构造 + R1/R2/R3 三臂；口径与实测见[验收方法学](notes/implemented/testing/2026-09-19-context-recall-evaluation.md)） |
 | request_error 钩子启用 | RATE_LIMIT 退避重试——钩子插座插上第一个电器 | ✅ 溢出恢复（上下文过长 → 压缩重试）已占用该钩子；RATE_LIMIT 退避未做 |
 
 ### 阶段四：工程化打磨

@@ -13,6 +13,10 @@
 `render_manifest` 与 `render_turn` **逐字节一致**——所以已入库的数据集与题目仍然有效。
 （此后产品侧又改过 `render_turn`：v1 加了回合头 `[turn N · K 步 · M 条事件]`、截断时列出
 可用的 step，且回合头自己的长度**计入** `max_chars`——所以正文行的取舍边界会前移一点点。
+**2026-09 又一次**：单块静默截断被删掉（`render_message(limit=None)` 默认不截断）、
+`max_events` 参数被删、改成**按行分页** `offset`（1 起）——`render_turn` 的输出与旧版
+**不再逐字节一致**，用旧渲染构建的题库（`navigation.jsonl` / `questions.jsonl`）要复现旧数字
+必须回到旧提交，或按新渲染重建。
 "逐字节一致"只记录切换那一刻的比对，**不是长期事实**：产品再改渲染（或这里要复算旧题库），
 该重建就重建。）
 """
@@ -25,9 +29,14 @@ REPO = Path(__file__).resolve().parents[2]
 if str(REPO) not in sys.path:          # 让 eval 脚本能 import my_coder
     sys.path.insert(0, str(REPO))
 
-from my_coder.app.recall import (TurnInfo, build_turns,  # noqa: E402,F401
-                                 load_session_log, render_manifest,
-                                 render_turn, shadowed_seqs)
+from my_coder.app.recall import (  # noqa: E402,F401
+    TurnInfo,
+    build_turns,
+    load_session_log,
+    render_manifest,
+    render_turn,
+    shadowed_seqs,
+)
 
 # eval 专用：会话日志目录（产品里由宿主注入 `sessions_dir`，这里就是本仓库的 .sessions）
 SESSIONS = REPO / '.sessions'

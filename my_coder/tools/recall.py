@@ -6,7 +6,7 @@
 1. `session_manifest`：拿一个会话的用户话清单（真人发言 + 每回合足迹）——导航入口；
 2. `read_turn`：按回合号（可加 step）读那一段原文。
 
-设计取舍（实测依据见 `CONTEXT_BUDGET_DESIGN.md` §4）：
+设计取舍（实测依据见 `docs/notes/implemented/feature/2026-09-19-context-recall.md`）：
 
 - **不给相关性检索**：语料是自述的时间线，模型看清单自己挑回合比任何排序都准
   （Codex 的 history 工具也只给"清单 + 结构过滤 + 精确区间读"）。
@@ -15,7 +15,7 @@
   executor 体内全是同步读盘/JSON 解析（没有 await），所以 `offload=True`——
   与 `skill` 工具同一形状。**不碰 agent/session 的内存状态**（这正是能卸载的前提）。
 - **跨会话授权**：只允许读**同一工作区**的会话（每个对话有自己的工作区，
-  见 `agent.md` §10）；跨工作区的请求返回 `is_error`，不泄漏别的项目的内容。
+  见 `docs/prior-art.md` §10）；跨工作区的请求返回 `is_error`，不泄漏别的项目的内容。
 """
 from __future__ import annotations
 
@@ -38,8 +38,10 @@ READ_TURN_DESCRIPTION = (
     'Read the original messages of one turn (optionally one step of it). This is the source '
     'of truth for details that a compaction summary may have dropped — exact paths, numbers, '
     'commands, error strings, or what the user originally said. Read the manifest first to '
-    'pick the turn number. Output is bounded: if it says it was truncated, read again with a '
-    'step number.'
+    'pick the turn number. Long turns come back paged by line: the output always says how '
+    'many lines and characters the turn has, which lines you got, and which `offset` '
+    'continues — keep reading with that offset (or narrow it with `step`) until you have '
+    'what you need.'
 )
 
 
@@ -130,7 +132,8 @@ def register(registry, sessions_dir: Path, default_workspace: str = '') -> None:
         return ToolOutcome(content=text)
 
     async def read_turn(args, agent, signal):
-        error = _bad_int(args, 'turn', required=True) or _bad_int(args, 'step')
+        error = (_bad_int(args, 'turn', required=True) or _bad_int(args, 'step')
+                 or _bad_int(args, 'offset'))
         if error:
             return ToolOutcome(content=error, is_error=True)
         scope = args.get('scope')
@@ -147,7 +150,12 @@ def register(registry, sessions_dir: Path, default_workspace: str = '') -> None:
             return ToolOutcome(content=error, is_error=True)
         raw_turn = args['turn']
         step = args.get('step')
-        text = render_turn(session, raw_turn, step=step, scope=scope)
+        offset = args.get('offset') or 1
+        if offset < 1:
+            return ToolOutcome(
+                content=f'offset must be >= 1 (got {offset}); it is a 1-based line number',
+                is_error=True)
+        text = render_turn(session, raw_turn, step=step, scope=scope, offset=offset)
         if not text:
             known = ', '.join(str(t.turn) for t in build_turns(session))[:200] or '(none)'
             return ToolOutcome(
@@ -195,6 +203,11 @@ def register(registry, sessions_dir: Path, default_workspace: str = '') -> None:
                     'type': 'integer',
                     'description': 'Optional step within that turn, when the turn is too big '
                                    'and the previous read said it was truncated.',
+                },
+                'offset': {
+                    'type': 'integer',
+                    'description': 'Line number to start from (1-based, default 1). The read '
+                                   'says which lines it showed and which offset continues.',
                 },
                 'session_id': {
                     'type': 'string',

@@ -18,5 +18,5 @@ my_coder/
 
 规则：一个模块只能 import **同层或更低层**。两条已知例外（都带 issue 号）写在
 `tests/test_architecture.py` 的 `KNOWN_VIOLATIONS` 里，修好即删。四层与五条不变式的完整
-理由见 `README.md` / `ARCHITECTURE.md`。
+理由见 `README.md` / `docs/architecture.md`。
 """

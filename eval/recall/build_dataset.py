@@ -18,7 +18,7 @@
 
 v0.1 只出 `detail`（事实细节）与 `negative`（负样本）两类；
 `manifest`（用户话清单层）与 LLM 改写（多措辞）留给 v0.2，见
-`CONTEXT_BUDGET_DESIGN.md` §5.4。
+`docs/notes/implemented/testing/2026-09-19-context-recall-evaluation.md`。
 """
 from __future__ import annotations
 
@@ -39,9 +39,11 @@ META_KEYS = frozenset({
 })
 # 工作区索引要跳过的目录（.sessions 是语料本身；eval 是评测工件——不跳过会**自我污染**：
 # 上一轮写出的 questions.jsonl 里含答案，下一轮就被"工作区里有"这条过滤掉）
+# `.eval` 同理，而且更隐蔽：它是**本轮迭代的产物目录**（审计报告、runner 的 run 日志、
+# 导出的会话拷贝），跑第二遍时"上一遍的输出"就会把答案喂给"工作区可重算"这条标签。
 SKIP_DIRS = frozenset({
     '.git', '.sessions', '.codegraph', '__pycache__', '.pytest_cache',
-    '.mypy_cache', '.ruff_cache', '.venv', 'node_modules', '.idea', 'eval',
+    '.mypy_cache', '.ruff_cache', '.venv', 'node_modules', '.idea', 'eval', '.eval',
 })
 
 PATTERNS: dict[str, re.Pattern] = {
@@ -243,7 +245,7 @@ def make_query(kind: str, value: str, topic: str | None) -> tuple[str, str] | No
 
 
 def cjk_phrases(text: str, min_len: int = 4) -> list[str]:
-    return [p for p in re.findall(r'[\u4e00-\u9fff]{%d,16}' % min_len, text)]
+    return [p for p in re.findall(rf'[\u4e00-\u9fff]{{{min_len},16}}', text)]
 
 
 def manifest_items(session: str, events: list[dict], span: dict, turns: dict,

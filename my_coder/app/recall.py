@@ -13,7 +13,7 @@
   （结论摘录 / step 数 / 工具 / 涉及文件 / 结局 / 是否已被压缩）。这是导航入口。
 - **L2 回合明细**：某个回合的原文事件（按需、有界、渲染成文本而不是原始 JSONL）。
 
-## 三条设计约束（都有实测依据，见 `CONTEXT_BUDGET_DESIGN.md`）
+## 三条设计约束（都有实测依据，见 `docs/notes/implemented/feature/2026-09-19-context-recall.md`）
 
 1. **不做相关性排序**：语料是自述的时间线，导航靠"顺序 + 回合号 + 足迹"；
    关键词检索只作兜底（v1 不做）。
@@ -196,12 +196,18 @@ def scan_sessions(sessions_dir: Path, default_workspace: str = '',
 
 
 def render_session_index(rows: list[SessionRow], *, current_id: str = '',
-                         workspace: str = '', limit: int = 5) -> str | None:
+                         workspace: str = '', limit: int = 5,
+                         hint: bool = True) -> str | None:
     """L0 会话目录（运行时状态贡献者的原文）；没有可列的会话返回 None。
 
-    **只列同一工作区的会话**：每个对话有自己的工作区（`agent.md` §10），跨工作区列表
+    **只列同一工作区的会话**：每个对话有自己的工作区（`docs/prior-art.md` §10），跨工作区列表
     等于把别的项目的会话念给模型（对齐 DSH 的 exact-cwd 授权）。旧会话没记录工作区时
     跟随宿主默认，与工作区选择策略同一判据。
+
+    `hint=True` 且**当前会话被压缩过**时，追加一句"被折叠的内容仍可读回 + 怎么读"：
+    这三条提示词供给面里唯一"出现在需求发生处"的一条（状态栏每请求都在），
+    另外两条在 system（通用纪律 + `tool:recall` 段，见 `app/factory.py`）。
+    只在确有压缩时出现——别的会话压缩过不关当前这一轮的事，那属于噪声。
     """
     same = [row for row in rows
             if not workspace or not row.workspace or row.workspace == workspace]
@@ -220,6 +226,11 @@ def render_session_index(rows: list[SessionRow], *, current_id: str = '',
     hidden = len(same) - len(keep)
     if hidden > 0:
         lines.append(f'…（另有 {hidden} 个更早会话，用 session_manifest 查看）')
+    current = next((row for row in keep if row.session_id == current_id), None)
+    if hint and current is not None and current.compactions:
+        lines.append(f'…（本会话压缩过 {current.compactions} 次：被折叠的原文没有被删掉——'
+                     '缺细节时先 session_manifest 看清单，再 read_turn 读那一回合的原文；'
+                     '摘要只留要点，精确值/路径/命令/报错串通常只在原文里）')
     lines.append('</context_sessions>')
     return '\n'.join(lines)
 
@@ -347,7 +358,28 @@ def render_manifest(turns: tuple[TurnInfo, ...] | list[TurnInfo], *,
     `with_commands` 把 shell 命令原文接进食足——实测 14/44 个回合只有 bash、
     没有文件足迹，那时足迹行几乎无信息量；命令原文是"跑 pytest 那次""git 操作那次"
     唯一能靠的信号。默认关（清单更短），由工具参数打开。
+
+    三条渲染规则都是**实测**出来的（真会话 59 回合 / 4 道评测题，见
+    `docs/notes/implemented/bug-fix/2026-09-29-silent-render-truncation.md`）：
+
+    ① **截断必须明说，并给出读全文的坐标**。实测长用户话 1,269 字符 → 只留 120（**9%**），
+       而被截掉的后半段恰好是"不新增第三方依赖""测试统一用 pytest"这类**约束**——
+       设计里写着"用户话是约束来源，绝不能因为压缩就从目录里消失"，结果它没消失却只剩 9%，
+       而且**只补一个 `…`**：这与 L2 的规则（超限要明说被截断）自相矛盾。所以现在补
+       `（共 N 字，用 read_turn(turn=T) 看全文）`——**不做关键词筛选**（不搞相关性排序，
+       让模型自己导航），只把"这里被砍了、去哪看"讲清楚。
+    ② **重复的真人发言要标出来**（实测真会话 3 组/73 条）：导航时两条一模一样的行没法区分
+       是哪一次；**不删行**（用户话一条都不能消失），只在首次标"另有 N 次同句"、后续标出处。
+    ③ **没有文本结论的回合不能只留一个 `—`**（实测 2/59）：`—` 同时兼任"字段为空"和
+       "确实没有结论"两种含义，模型没法判断是哪种，改为显式说明。
     """
+    counts: dict[str, int] = {}
+    first_turn: dict[str, int] = {}
+    for info in turns:
+        for text in info.user_texts:
+            counts[text] = counts.get(text, 0) + 1
+            first_turn.setdefault(text, info.turn)
+
     lines: list[str] = []
     for info in turns:
         if not info.user_texts:
@@ -362,43 +394,70 @@ def render_manifest(turns: tuple[TurnInfo, ...] | list[TurnInfo], *,
             foot = info.footprint()
             if with_commands and info.commands:
                 foot += f' · cmd:{info.commands[0][:60]}'
-            lines.append(f'[{info.turn:>3}] {summary or "—"} · {foot}{flags}')
+            # 规则③：`—` 分不清"字段为空"与"确实没有结论"
+            lines.append(f'[{info.turn:>3}] {summary or "（无文本结论）"} · {foot}{flags}')
         for index, text in enumerate(info.user_texts):
-            body = text[:max_chars_per_line] + ('…' if len(text) > max_chars_per_line else '')
-            tag = '(插队) ' if index else ''
-            lines.append(f'      用户：{tag}{body}')
+            body = text
+            if len(text) > max_chars_per_line:
+                # 规则①：明说被截断 + 给出坐标（回合号就是 L2 的入参）
+                body = (f'{text[:max_chars_per_line]}…'
+                        f'（共 {len(text)} 字，用 read_turn(turn={info.turn}) 看全文）')
+            tags = '(插队) ' if index else ''
+            if counts[text] > 1:
+                # 规则②：首次标"还有几次"，后续标出处；两个方向都能对上
+                tags += (f'（另有 {counts[text] - 1} 次同句）' if first_turn[text] == info.turn
+                         else f'（与回合 {first_turn[text]} 同句）')
+            lines.append(f'      用户：{tags}{body}')
     return '\n'.join(lines)
 
 
 # ---------- L2 回合明细 ----------
 
-def render_message(message: Message, *, limit: int = 1500) -> list[str]:
-    """一条消息 → 可读行（工具调用/结果单独成行，**不带 call_id 噪音**）。"""
+def render_message(message: Message, *, limit: int | None = None) -> list[str]:
+    """一条消息 → 可读行（工具调用/结果单独成行，**不带 call_id 噪音**）。
+
+    `limit=None`（默认）**不截断**：截断只允许发生在**一个地方**——`render_turn` 的分页。
+    为什么改（实测，见 `docs/notes/implemented/bug-fix/2026-09-29-silent-render-truncation.md`）：这里原本对文本/工具结果
+    单块截 1500 字符、工具调用参数截 300 字符，而且**只补一个 `…`**——两条后果：
+    ① 与"超限要明说被截断"的规则冲突；② 审计里 6 条"读不回来"的事实中 **5 条正是被这个
+    单块上限挡住的**（内容明明在回合预算之内，却在块级别被静默砍掉，而模型**没有任何办法**
+    把它读回来：`step` 过滤和 `offset` 分页都作用在回合层，块内的后半截根本不存在于输出里）。
+    """
     out: list[str] = []
     for block in message.content:
         if isinstance(block, TextBlock):
             text = ' '.join(block.text.split())
             if text:
-                out.append(text[:limit] + ('…' if len(text) > limit else ''))
+                out.append(text if limit is None else text[:limit])
         elif isinstance(block, ToolCallBlock):
             args = ' '.join(block.arguments.split())
-            out.append(f'tool_call {block.name}({args[:300]})')
+            out.append(f'tool_call {block.name}({args if limit is None else args[:300]})')
         elif isinstance(block, ToolResultBlock):
             body = ' '.join(block.content.split())
             tag = ' [error]' if block.is_error else ''
-            out.append(f'tool_result{tag} {body[:limit]}' + ('…' if len(body) > limit else ''))
+            out.append(f'tool_result{tag} '
+                       + (body if limit is None else body[:limit]))
     return out or ['(empty)']
 
 
 def render_turn(session: Session, turn: int, *, step: int | None = None,
-                max_events: int = 80, max_chars: int = 12000,
+                offset: int = 1, max_chars: int = 12000,
                 scope: str = 'surface') -> str:
-    """L2：某回合的原文（有界；超限明确告知被截断）。
+    """L2：某回合的原文（**按行分页**；总量与位置都明说）。
 
-    实测回合尺寸：中位 1,340 字符 / p95 102,801 / 最大 219,323——所以**不能**无条件
-    把整回合倒给模型（一次就是几万 token）。第一行是回合头 `[turn N · K 步 · M 条事件]`
-    （`K` = 本回合出现过的 step 数），超限时**明说被截断并把可用的 step 列出来**，
-    好让模型按 `step` 精读——不给目录的"用 step 精读"是空头支票。
+    实测回合尺寸：中位 1,340 字符 / p95 102,801 / 最大 219,323——所以不能无条件把整回合
+    倒给模型（一次就是几万 token）。现在的做法与 `read_file` 同一套心智：
+
+    - 第一行是回合头 `[turn N · K 步 · M 条事件]`；
+    - `offset` = **从第几行开始**（1 起，默认 1）；`max_chars` = 本次最多回多少字符
+      （**在行边界处停**，不切半行）；
+    - 显示不全时**明说**：`…（本回合共 X 行 / Y 字符，本次显示第 A–B 行；继续用 offset=B+1，
+      或用 step=S 精读某一步）`——继续读的坐标和可用的 step **都给**。
+
+    为什么从"事件数 + 字符双上限"改成"行分页 + 字符预算"（2026-09 实测）：
+    ① 旧的 `max_events=80` 让**第 81 条事件之后的内容无法读回**（审计里 1 条事实就是被它挡的）；
+    ② 旧的单块 1500 字符上限**静默**砍掉块内后半段，而分页/step 都救不回来（5 条事实）；
+    ③ 现在"截断"只有一处、且必须自报家门——与 L1 的规则①统一。
 
     `scope='trace'` 额外带上该回合的**推理痕迹**（`assistant/reasoning`）——它能解释
     "当时为什么这么决定"，是读回时的上下文；默认关（痕迹不是模型曾经见过的内容，
@@ -442,8 +501,6 @@ def render_turn(session: Session, turn: int, *, step: int | None = None,
     header = (f'[turn {turn} · {len(steps)} 步 · {matched} 条事件'
               + (f' · 只看 step {step}' if step is not None else '') + ']')
     lines: list[str] = [header]
-    total = len(header)
-    truncated = False
     current_turn = 0
     current_step = 0
     for event in events:
@@ -452,33 +509,40 @@ def render_turn(session: Session, turn: int, *, step: int | None = None,
             current_turn = data.get('turn', 0)
         elif event.type == 'step/start':
             current_step = data.get('step', 0)
-        # 顺序要紧：**step 过滤与容量上限必须在 trace 分支之前**。放后面时 `step=N`
-        # 会把该回合所有步的推理都吐出来（一步最多 600 字符 × 几十步），而且 trace 行
-        # 一条都不计入 max_events/max_chars——"L2 必须有界"这条规则就被 reasoning 旁路了
-        # （实测旧日志里单步推理可上万字符）。
+        # 顺序要紧：**step 过滤必须在 trace 分支之前**。放后面时 `step=N` 会把该回合
+        # 所有步的推理都吐出来（一步最多上万字符）。这里**不再**做字符/事件截断——
+        # 有界性由末尾的分页负责（一处截断、且必须自报家门）。
         if not keep(event, current_turn, current_step):
             continue
-        if len(lines) - 1 >= max_events or total >= max_chars:
-            truncated = True
-            break
         if event.type == 'assistant/reasoning':
             body = ' '.join(str(data.get('reasoning', '')).split())
             if body:
-                line = f'[turn {turn} · step {current_step} · reasoning] {body[:600]}'
-                lines.append(line)
-                total += len(line)
+                lines.append(f'[turn {turn} · step {current_step} · reasoning] {body}')
             continue
         kind = {'user/message': 'user', 'assistant/message': 'assistant',
                 'tool/result': 'tool_result'}[event.type]
         for body in render_message(message_of(event)):
-            line = f'[turn {turn} · step {current_step} · {kind}] {body}'
-            lines.append(line)
-            total += len(line)
-    if truncated:
-        lines.append('…（本回合内容超过上限被截断；本回合的 step：'
-                     + ', '.join(str(s) for s in steps)
-                     + '——用 step 参数精读其中一步）')
-    return '\n'.join(lines)
+            lines.append(f'[turn {turn} · step {current_step} · {kind}] {body}')
+
+    total_chars = sum(len(line) + 1 for line in lines)
+    start = max(1, offset) - 1                     # 入参是 1 起的行号
+    if start >= len(lines):
+        # 起点越界：**明说**总行数（模型据此修正参数），不要假装成功
+        return (f'{header}\n…（offset={offset} 超出范围：本回合共 {len(lines)} 行 / '
+                f'{total_chars} 字符；offset 从 1 起，用 offset=1 从头读）')
+    shown: list[str] = []
+    used = 0
+    for line in lines[start:]:
+        if shown and used + len(line) + 1 > max_chars:
+            break
+        shown.append(line)
+        used += len(line) + 1
+    end = start + len(shown)
+    if end < len(lines):
+        shown.append(f'…（本回合共 {len(lines)} 行 / {total_chars} 字符，本次显示第 '
+                     f'{start + 1}–{end} 行；继续用 offset={end + 1}，或用 step 精读其中一步：'
+                     + ', '.join(str(s) for s in steps) + '）')
+    return '\n'.join(shown)
 
 
 def load_session_log(path: Path, session_id: str = '') -> Session:
@@ -550,7 +614,7 @@ def row_from_session(session: Session, default_workspace: str = '',
 
 
 def session_index_text(session: Session, sessions_dir: Path, default_workspace: str = '',
-                       limit: int = 5) -> str | None:
+                       limit: int = 5, hint: bool = True) -> str | None:
     """L0 的完整构造：扫**别的**会话 + 当前会话走内存 → 渲染。
 
     给 `app/factory.py` 的 runtime status 贡献者用（每请求求值一次）：所以
@@ -558,6 +622,8 @@ def session_index_text(session: Session, sessions_dir: Path, default_workspace: 
     ② **当前会话排除在磁盘扫描之外**、由**增量游标**投影（它每请求都在长）。
     实测（54 MB / 20 万事件会话）：求值 ≈ 0.3 ms；曾在这里踩到三处 O(n)
     ——整表记忆化、`session.events` 的整表拷贝、以及 `session.workspace()` 的反向全扫。
+
+    `hint=False` 去掉"压缩过 → 可读回"那句（提示词供给面 A/B 实验的一个因子）。
     """
     current_row = row_from_session(session, default_workspace)
     rows = list(scan_sessions(sessions_dir, default_workspace, exclude=session.id))
@@ -566,4 +632,5 @@ def session_index_text(session: Session, sessions_dir: Path, default_workspace: 
     # 后者是**反向全扫**，在没有那条事件的旧会话上等于每请求扫完整个日志（实测 ~10 ms）
     return render_session_index(
         rows, current_id=session.id, workspace=current_row.workspace, limit=limit,
+        hint=hint,
     )

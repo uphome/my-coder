@@ -334,6 +334,53 @@ async def test_bash_runs_and_reports_exit_code(tmp_path):
     assert blank.is_error and 'must not be empty' in blank.content
 
 
+def test_shell_backend_prefers_a_real_bash(monkeypatch):
+    """后端必须优先真正的 bash —— 别再用 `create_subprocess_shell` 落到 cmd.exe。
+
+    实测依据（`eval/recall` 的 15 个真 run、105 条工具结果）：22 条失败是
+    `'ls' is not recognized` / `cat` / `tail` / `head` / `rm` / `pwd` 这类
+    "命令不存在"；同一批命令换 bash 12/13 通过、换 cmd 5/13。
+    """
+    from my_coder.tools import shell as shell_module
+
+    monkeypatch.setattr(shell_module.sys, 'platform', 'win32')
+    monkeypatch.setattr(shell_module.shutil, 'which',
+                        lambda name: r'C:\fake\bash.exe' if name == 'bash' else None)
+    argv, name, hint = shell_module.pick_shell()
+    assert argv == [r'C:\fake\bash.exe', '-c'] and name == 'bash' and hint == ''
+
+    # 没有 bash 时回退 cmd.exe，**并在描述里警告**（不警告 = 模型继续撞墙）
+    monkeypatch.setattr(shell_module.shutil, 'which', lambda name: None)
+    argv, name, hint = shell_module.pick_shell()
+    assert argv == ['cmd.exe', '/c'] and name == 'cmd.exe'
+    assert 'NOT bash' in hint and 'findstr' in hint
+
+    # POSIX 不变
+    monkeypatch.setattr(shell_module.sys, 'platform', 'linux')
+    assert shell_module.pick_shell() == (['/bin/sh', '-c'], '/bin/sh', '')
+
+
+@pytest.mark.asyncio
+async def test_bash_tool_runs_unix_commands(tmp_path):
+    """Windows 上也要能跑 `ls` / `cat`（有真 bash 时是回归钉子；没有就 skip）。
+
+    这条同时钉住"工具描述里写了真实 shell 名"——描述与后端漂移时模型会被误导。
+    """
+    import shutil as _shutil
+    import sys as _sys
+
+    if _sys.platform == 'win32' and _shutil.which('bash') is None:
+        pytest.skip('这台机器没有 bash：回退到 cmd.exe（描述里会警告模型改用 dir/type）')
+    (tmp_path / 'a.txt').write_text('hi', encoding='utf-8')
+    registry = build_tools(workspace=tmp_path)
+    ok = await registry.execute('bash', {'command': 'ls && cat a.txt'}, None)
+    assert ok.is_error is False, ok.content
+    assert 'a.txt' in ok.content and 'hi' in ok.content
+    spec = registry.get('bash')
+    from my_coder.tools.shell import SHELL_NAME
+    assert SHELL_NAME in spec.description
+
+
 @pytest.mark.asyncio
 async def test_bash_cwd_and_truncation(tmp_path):
     registry = build_tools(workspace=tmp_path)

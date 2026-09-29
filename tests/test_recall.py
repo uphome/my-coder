@@ -1,9 +1,9 @@
 """上下文召回（issue #3 的 M1）测试：L0 会话目录 / L1 用户话清单 / L2 回合明细。
 
-判据都对着 `CONTEXT_BUDGET_DESIGN.md` §4.10 那张表——尤其是三条容易写错的：
+判据都对着 `docs/notes/implemented/feature/2026-09-19-context-recall.md` 那张表——尤其是三条容易写错的：
 1. **检索面含被遮蔽的事件**（压缩只改"看得见什么"，不改"存在什么"）；
 2. **清单只收真人发言**（checkpoint 本身也是一条 `user/message`）；
-3. **跨工作区不放行**（每个对话有自己的工作区，见 `agent.md` §10）。
+3. **跨工作区不放行**（每个对话有自己的工作区，见 `docs/prior-art.md` §10）。
 """
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 from my_coder.app.recall import (
+    TurnInfo,
     build_turns,
     render_manifest,
     render_session_index,
@@ -124,6 +125,55 @@ def test_manifest_footprint_comes_from_log():
     assert 'cmd:pytest -q' in with_cmd
 
 
+def test_manifest_discloses_truncation_with_a_coordinate():
+    """规则①：用户话被截断**必须明说**，并给出读全文的坐标（实测踩过，见 §5.7.3）。
+
+    真会话实测：1,269 字的用户话只留 120（9%），而被砍掉的后半段恰好是
+    "不新增第三方依赖""测试统一用 pytest"这类**约束**——只补一个 `…` 的话，
+    模型既不知道被砍了多少、也不知道去哪儿看，等于把约束静默丢了。
+    """
+    long_text = 'A' * 400
+    turn = TurnInfo(turn=7, seqs=(1,), user_texts=(long_text,), steps=1, tools=(),
+                    files=(), commands=(), outcome='completed', conclusion='结论',
+                    shadowed=True)
+    line = [ln for ln in render_manifest([turn]).splitlines() if '用户：' in ln][0]
+    assert '…（共 400 字，用 read_turn(turn=7) 看全文）' in line
+    # 短话不加噪音
+    short = TurnInfo(turn=8, seqs=(2,), user_texts=('短话',), steps=1, tools=(),
+                     files=(), commands=(), outcome='completed', conclusion='结论',
+                     shadowed=False)
+    assert '看全文' not in render_manifest([short])
+
+
+def test_manifest_marks_repeated_user_lines_without_dropping_them():
+    """规则②：重复的真人发言**不删行**，但要标出来（实测真会话 3 组/73 条）。
+
+    导航时两条一模一样的行没法区分是哪一次；而"用户话一条都不能消失"是硬约束，
+    所以只能标注、不能去重。
+    """
+    def make(turn: int, text: str) -> TurnInfo:
+        return TurnInfo(turn=turn, seqs=(turn,), user_texts=(text,), steps=1, tools=(),
+                        files=(), commands=(), outcome='completed', conclusion='结论',
+                        shadowed=False)
+
+    manifest = render_manifest([make(1, '继续'), make(2, '别的'), make(3, '继续')])
+    lines = manifest.splitlines()
+    assert sum(1 for ln in lines if '用户：' in ln) == 3      # 一条都没删
+    assert '用户：（另有 1 次同句）继续' in manifest            # 首次指出还有几次
+    assert '用户：（与回合 1 同句）继续' in manifest            # 后续指出出处
+
+
+def test_manifest_says_so_when_a_turn_has_no_text_conclusion():
+    """规则③：`—` 同时兼任"字段为空"和"确实没有结论"，模型没法判断是哪种。
+
+    实测真会话 2/59 个回合没有文本结论（只有工具调用），那几行当时只剩 `— · 足迹`。
+    """
+    turn = TurnInfo(turn=30, seqs=(1,), user_texts=('跑一下测试',), steps=3, tools=('bash',),
+                    files=(), commands=(), outcome='completed', conclusion='', shadowed=False)
+    line = [ln for ln in render_manifest([turn]).splitlines() if ln.startswith('[ 30]')][0]
+    assert '（无文本结论） · 3 step · bash' in line
+
+
 def test_read_turn_renders_text_not_raw_jsonl():
     """L2 渲染成可读文本：没有 tagged 包装、没有 call_id 噪音。"""
     session = _compacted_session()
@@ -136,10 +186,10 @@ def test_read_turn_renders_text_not_raw_jsonl():
 
 
 def test_read_turn_bounds_output_and_reports_truncation():
-    """超限要明说被截断（回合 p95 十万字符，绝不能无条件整段倒给模型）。"""
+    """超限要明说被截断 + 给继续读的坐标（回合 p95 十万字符，绝不能无条件整段倒给模型）。"""
     session = _compacted_session()
-    text = render_turn(session, 1, max_events=1)
-    assert '被截断' in text
+    text = render_turn(session, 1, max_chars=40)
+    assert '本次显示第' in text and '继续用 offset=' in text
 
 
 @pytest.mark.asyncio
@@ -370,9 +420,56 @@ def test_trace_scope_respects_the_step_filter():
     assert '第1步的话' not in text
 
 
-def test_trace_lines_count_toward_the_output_budget():
-    """缺陷：trace 行既不进 `max_events` 也不进 `max_chars`——"L2 必须有界"被 reasoning
-    旁路了（旧日志单步推理可上万字符）。"""
+def test_long_content_is_paged_by_line_not_silently_cut():
+    """**块级静默截断**是被删掉的缺陷（2026-09 审计：6 条读不回来的事实里 5 条是它挡的）。
+
+    旧实现里 `render_message` 对单块截 1500 字符、只补一个 `…`：内容明明在回合预算之内，
+    却在块级别被砍掉，而模型**任何参数都救不回来**（`step`/`offset` 都作用在回合层）。
+    现在的规则：**只有一处截断**（回合分页），且必须说清总量与继续读的坐标。
+    """
+    session = Session(id='paging')
+    session.append('turn/start', {'turn': 1})
+    session.append('step/start', {'turn': 1, 'step': 1})
+    big = 'A' * 2000 + 'NEEDLE' + 'B' * 2000          # 单块 4005 字符 > 旧的 1500 上限
+    session.append('tool/result', create_tool_result_message('c1', big, False),
+                   surface_op='append')
+    session.append('user/message', create_user_message([TextBlock(text='短话')]),
+                   surface_op='append')
+
+    text = render_turn(session, 1)                     # 默认预算（12k 字符）下这一块必须完整出现
+    assert big in text, '块内后半段不该再被静默砍掉'
+    assert len(text) > 4000, '不再有单块 1500 的暗砍（有界性交给回合预算 + 分页）'
+
+    # 预算不够时分页：说清总行数/总字符/本次显示范围/继续用的 offset
+    tail = render_turn(session, 1, max_chars=120)
+    assert '本回合共' in tail and '行 /' in tail and '字符，本次显示第' in tail
+    assert '继续用 offset=' in tail and '或用 step 精读' in tail
+
+
+def test_offset_pages_through_a_whole_turn():
+    """`offset` = 1 起的**行号**：与 `read_file` 同一套心智，且越界要明说而不是假装成功。"""
+    session = Session(id='offset')
+    session.append('turn/start', {'turn': 1})
+    session.append('step/start', {'turn': 1, 'step': 1})
+    for number in range(1, 41):
+        session.append('user/message',
+                       create_user_message([TextBlock(text=f'第 {number} 句')]),
+                       surface_op='append')
+
+    first = render_turn(session, 1, max_chars=200)
+    assert '第 1 句' in first and '第 40 句' not in first
+    offset = int(first.split('继续用 offset=')[1].split('，')[0])
+    assert offset > 1
+    later = render_turn(session, 1, max_chars=200, offset=offset)
+    assert '第 1 句' not in later, 'offset 之后不该再从头来'
+    assert f'本次显示第 {offset}–' in later
+
+    over = render_turn(session, 1, offset=10_000)
+    assert '超出范围' in over and 'offset=1 从头读' in over, over
+
+
+def test_trace_and_oversized_content_stay_bounded():
+    """痕迹行同样进预算（曾经的缺陷是 reasoning 两条上限都不进，把"L2 必须有界"旁路掉）。"""
     session = Session(id='trace-budget')
     session.append('turn/start', {'turn': 1})
     for number in range(1, 6):
@@ -381,8 +478,8 @@ def test_trace_lines_count_toward_the_output_budget():
                        {'turn': 1, 'step': number, 'reasoning': 'x' * 400})
 
     text = render_turn(session, 1, scope='trace', max_chars=1000)
-    assert '被截断' in text, '痕迹超预算时同样要说被截断'
-    assert len(text) < 3000, f'痕迹必须受字符上限约束，实际 {len(text)}'
+    assert '本次显示第' in text, '痕迹超预算时同样要说清被截断'
+    assert len(text) < 3000, f'痕迹必须受字符预算约束，实际 {len(text)}'
 
 
 def test_turn_header_lists_steps_and_truncation_names_them():
@@ -400,8 +497,8 @@ def test_turn_header_lists_steps_and_truncation_names_them():
     full = render_turn(session, 1)
     assert full.splitlines()[0].startswith('[turn 1 · 3 步 · 3 条事件]'), full.splitlines()[0]
 
-    cut = render_turn(session, 1, max_events=1)
-    assert '被截断' in cut and '1, 2, 3' in cut, f'截断提示要给可用 step，实际：{cut}'
+    cut = render_turn(session, 1, max_chars=60)
+    assert '本次显示第' in cut and '1, 2, 3' in cut, f'截断提示要给可用 step，实际：{cut}'
 
     assert render_turn(session, 99) == '', '不存在的回合不许有害羞的回合头'
     assert render_turn(session, 1, step=9) == ''
@@ -445,3 +542,86 @@ def test_live_counter_is_discarded_when_the_object_id_is_reused():
         session_id='someone-else', indexed=0, user_messages=99, turns=7)
     row = row_from_session(session, default_workspace='')
     assert (row.user_messages, row.turns) == (3, 2), '身份对不上的游标必须重建'
+
+
+@pytest.mark.asyncio
+async def test_build_agent_can_leave_recall_unassembled(tmp_path):
+    """验收基线臂（R2）要的是**忠实的"改造前"**：`recall=False` 时 L0 与两个工具
+    **一起**缺席。
+
+    为什么必须一起：只关工具、留着 L0，模型仍然被告知"你有历史，去查"——那就不是
+    "改造前"的对照，量出来的差值会低估召回的价值（也高估基线的能力）。
+    """
+    from my_coder.app.factory import build_agent
+
+    sessions_dir = tmp_path / 'sess'
+    sessions_dir.mkdir()
+    args = Namespace(fake=True, model='fake-model', workspace=tmp_path, hide_reasoning=False,
+                     session='baseline', sessions=str(sessions_dir), prompt='x',
+                     resume=False, verbose=False)
+
+    def build(session_id: str, recall: bool):
+        session = Session(id=session_id)
+        session.append('session/workspace', {'workspace': str(tmp_path), 'source': 'test'})
+        return session, build_agent(session, args,
+                                    {'reasoning_started': False, 'request_no': 0, 'tool_no': 0},
+                                    recall=recall)
+
+    # 默认（生产路径）：两个工具在、L0 在
+    session, agent = build('with-recall', True)
+    assert agent.tools.get('session_manifest') and agent.tools.get('read_turn')
+    assert 'sessions' in agent.runtime_status.names
+
+    # 基线臂：两个工具不在、L0 也不在
+    session, agent = build('without-recall', False)
+    with pytest.raises(KeyError):
+        agent.tools.get('session_manifest')
+    with pytest.raises(KeyError):
+        agent.tools.get('read_turn')
+    assert 'sessions' not in agent.runtime_status.names
+    assert 'todo' in agent.runtime_status.names, '只该少召回那一份状态'
+
+
+@pytest.mark.asyncio
+async def test_recall_prompt_affordances_are_switched_separately(tmp_path):
+    """**提示词供给面**（工具存在 ≠ 会被用）：三段各自可独立开关。
+
+    为什么必须有这个开关：先量到"无提示情境里模型 10 个 run 一次都没查"（设计文档 §5.7.2），
+    但那只说明"没查到"，分不清"没教它回查"与"它不需要查"——所以把**有没有工具**与
+    **有没有告诉它要回查**当成两个因子做了 2×2。结果（同一节）：**是情境决定查不查，
+    不是提示词**（F 必要的那题在零供给面下也 4/4 主动查了），供给面只抬高查询频率。
+    开关因此保留：它让"教不教"可以单独当因子，而不是和"装不装"绞在一起。
+    """
+    from my_coder.app.factory import build_agent
+
+    sessions_dir = tmp_path / 'sess'
+    sessions_dir.mkdir()
+    args = Namespace(fake=True, model='fake-model', workspace=tmp_path, hide_reasoning=False,
+                     session='affordance', sessions=str(sessions_dir), prompt='x',
+                     resume=False, verbose=False)
+
+    def make(session_id: str, **flags):
+        session = Session(id=session_id)
+        session.append('session/workspace', {'workspace': str(tmp_path), 'source': 'test'})
+        agent = build_agent(session, args,
+                            {'reasoning_started': False, 'request_no': 0, 'tool_no': 0}, **flags)
+        assembly = agent.prompt.assemble({'agent': agent})
+        return agent, agent.prompt.render(assembly, {'agent': agent})
+
+    # 默认（生产）：三段都在——通用纪律的 Continuity 条 + tool:recall 段
+    _, system = make('all-on')
+    assert 'Continuity:' in system
+    assert 'session_manifest' in system and 'read_turn' in system
+
+    # 关掉提示面、留着工具：纪律与工具段都没了，但**工具仍然可用**（这才是"没教但装了"）
+    agent, system = make('tools-only', recall_guidance=False)
+    assert 'Continuity:' not in system
+    assert 'session_manifest' not in system
+    assert agent.tools.get('read_turn'), '提示面关掉不等于把工具也拿掉'
+
+    # 关掉装配、留着提示面：纪律在（它不带工具名，任何"东西不在眼前"的场景都适用），
+    # 但**不许**讲怎么用一个不存在的工具
+    _, system = make('guidance-only', recall=False)
+    assert 'Continuity:' in system
+    assert 'tool:recall' not in system
+    assert 'session_manifest' not in system
