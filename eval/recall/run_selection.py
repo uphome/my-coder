@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from llm_util import ask, tokens                                          # noqa: E402
+from llm_util import ask, tokens  # noqa: E402
 from manifest import SESSIONS, build_turns, load_session, render_manifest  # noqa: E402
 
 HERE = Path(__file__).resolve().parent

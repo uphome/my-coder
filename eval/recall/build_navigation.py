@@ -26,9 +26,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from llm_util import ask_json, tokens                                    # noqa: E402
-from manifest import (SESSIONS, TurnInfo, build_turns, load_session,     # noqa: E402
-                      render_manifest, render_turn)
+from llm_util import ask_json, tokens  # noqa: E402
+from manifest import SESSIONS, build_turns, load_session, render_manifest, render_turn  # noqa: E402
 
 OUT = Path(__file__).resolve().parent / 'navigation.jsonl'
 MIN_OTHER_TURNS = 3
@@ -106,7 +105,7 @@ def build_for_session(path: Path, per_session: int) -> list[dict]:
         if not anchors:
             print(f'  turn {info.turn}: 没有独有短语（回合内容太杂/太短）→ 跳过')
             continue
-        body = render_turn(session, info.turn, max_events=40, max_chars=3000)
+        body = render_turn(session, info.turn, max_chars=3000)
         if len(body) < 200:
             continue
         prompt = (f'【目标回合原文】\n{body}\n\n'

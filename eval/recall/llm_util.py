@@ -16,7 +16,7 @@ REPO = Path(__file__).resolve().parents[2]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-from my_coder.app.factory import load_env                            # noqa: E402
+from my_coder.app.factory import load_env  # noqa: E402
 from my_coder.capability.llm import LlmRequest, OpenAiCompatibleLlm  # noqa: E402
 from my_coder.values.messages import TextBlock, create_user_message  # noqa: E402
 
@@ -58,6 +58,14 @@ async def _stream(system: str, user: str, max_tokens: int, thinking: bool | None
         if chunk.finish_reason:
             break
     return ''.join(collected).strip()
+
+
+def engine() -> tuple[OpenAiCompatibleLlm, str]:
+    """产品 LLM 客户端 + 模型名（需要**自己发请求**的场景，比如真跑一次压缩）。
+
+    复用同一个单例：`.env` 只读一次、客户端只建一个，与 ask/ask_json 同一条路。
+    """
+    return _get_engine()
 
 
 def ask(system: str, user: str, *, max_tokens: int = 600,

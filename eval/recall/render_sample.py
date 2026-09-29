@@ -1,7 +1,13 @@
-"""重新生成 `RENDERING_SAMPLE.md`：三层投影的真实渲染样本。
+"""重新生成渲染样张：三层投影的真实渲染长什么样。
 
 用**产品实现**（`my_coder/app/recall.py`）渲染，而不是临时探针——样本必须等于产品输出，
-否则它描述的就不是模型真正会看到的东西。改完渲染逻辑（清单字段、截断规则）就跑一次这个。
+否则它描述的就不是模型真正会看到的东西。改完渲染逻辑（清单字段、分页规则）就跑一次这个。
+
+**输出到 `.eval/recall/RENDERING_SAMPLE.md`（不入库）**：它是**证据**，零成本可重跑，
+所以不占版本控制；结论与复现命令写在
+`docs/notes/implemented/bug-fix/2026-09-29-silent-render-truncation.md` 里。
+判据是"重建成本"：要花 API 才建得出来的数据集（`navigation.jsonl` / `questions.jsonl`）
+留在仓库，零成本能重跑的证据表不进（见 `docs/AGENTS.md` 第七节）。
 """
 from __future__ import annotations
 
@@ -12,11 +18,15 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
 sys.path.insert(0, str(REPO))
 
-from my_coder.app.recall import (build_turns, load_session_log,  # noqa: E402
-                                 render_manifest, render_turn,
-                                 session_index_text)
+from my_coder.app.recall import (  # noqa: E402
+    build_turns,
+    load_session_log,
+    render_manifest,
+    render_turn,
+    session_index_text,
+)
 
-OUT = HERE / 'RENDERING_SAMPLE.md'
+OUT = REPO / '.eval' / 'recall' / 'RENDERING_SAMPLE.md'
 SESSIONS = REPO / '.sessions'
 WORKSPACE = str(REPO)
 
@@ -76,12 +86,14 @@ def main() -> None:
     add('')
     add('```')
     lines.extend(full.splitlines()[:8])
-    add('…（截断展示；本回合完整渲染 {:,} 字符）'.format(len(full)))
+    add(f'…（截断展示；本回合完整渲染 {len(full):,} 字符）')
     add('```')
     add('')
-    add('截断规则：`max_events=80` / `max_chars=12000` 双上限（**痕迹行同样计入**），'
-        '超限追加一句"…（本回合内容超过上限被截断；本回合的 step：…）"——'
-        '截断提示必须给出可用的 step，否则"用 step 精读"是空头支票。')
+    add('分页规则（2026-09 起）：`render_turn` **按行分页**——`offset` 是 1 起的行号、'
+        '`max_chars` 是本次的字符预算（在行边界停）。显示不全时追加一句'
+        '"…（本回合共 X 行 / Y 字符，本次显示第 A–B 行；继续用 offset=B+1，或用 step 精读…）"'
+        '——**总量、位置、下一步坐标、可用 step 全给**（旧版是"事件数 + 字符双上限 + '
+        '单块静默截断"，那三条已在 2026-09 审计后被删掉：单块静默截断让 5 条事实**无法读回**）。')
     add('')
     add('第一行是**回合头** `[turn N · K 步 · M 条事件]`：先告诉模型这个回合有多大'
         '（`K` = 出现过的 step 数），被截断时再给出可选的 step 列表。')
@@ -96,7 +108,7 @@ def main() -> None:
         with_user = [t for t in session_turns if t.user_texts]
         if not with_user:
             continue
-        sizes = sorted(len(render_turn(session, t.turn, max_events=999, max_chars=10 ** 9))
+        sizes = sorted(len(render_turn(session, t.turn, max_chars=10 ** 9))
                        for t in with_user)
         text = render_manifest(session_turns)
         add(f'| `{path.name}` | {len(session_turns)}（{len(with_user)}） | '
@@ -116,6 +128,7 @@ def main() -> None:
         '实际存在的 step（模型不必猜）；未决：要不要改用"工具调用次数"当足迹'
         '（更稳、与 step 语义无关），以及"1 步"这种可疑行要不要显式标"step 不可用"。')
 
+    OUT.parent.mkdir(parents=True, exist_ok=True)
     OUT.write_text('\n'.join(lines) + '\n', encoding='utf-8')
     print(f'已写入 {OUT}（{len(lines)} 行）')
 
