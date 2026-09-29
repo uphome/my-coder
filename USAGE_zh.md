@@ -1,7 +1,7 @@
 # MyCoder 使用指南
 
 > 面向**想立刻把 agent 跑起来**的你。这份文档只讲「怎么用」，不讲内部架构
-> （那个看 `README.md` / `ARCHITECTURE.md`）。
+> （那个看 `README.md` / `docs/architecture.md`）。
 
 MyCoder 有两种跑法，其余操作完全一样：
 
@@ -260,4 +260,4 @@ Web 手动压缩按钮）兜底，不必担心上下文无限膨胀。
 ---
 
 想更深入？`README.md`（五个设计、日志样例、模块清单、与 harness 保真度对照）、
-`ARCHITECTURE.md`（四层依赖与数据流）。
+`docs/architecture.md`（四层依赖与数据流）。

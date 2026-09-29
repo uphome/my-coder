@@ -1,7 +1,7 @@
 # 阶段一实施进度与后续工作计划
 
-> 记录 `ARCHITECTURE.md` 进化路线图"阶段一：真实工具集"的实施进度、
-> 已定设计决策与后续工作清单。配合 ARCHITECTURE.md 第 6 节阅读。
+> 记录 `docs/architecture.md` 进化路线图"阶段一：真实工具集"的实施进度、
+> 已定设计决策与后续工作清单。配合 `docs/architecture.md` 第 6 节阅读。
 
 ## 当前进度
 
@@ -178,7 +178,7 @@ UI 是日志的投影：on_event 只负责"怎么显示"，状态全在事件里
 
 - [x] read_file 升级 / grep / glob / 路径沙箱 / edit / bash / approval（各带测试）
 - [x] 用真实模型端到端验收（读→搜→分页→执行→批准→验证→报告 全链路）
-- [x] 更新 ARCHITECTURE.md 阶段一表格（全部 ✅）与 README 模块清单/安全警告
+- [x] 更新 `docs/architecture.md` 阶段一表格（全部 ✅）与 README 模块清单/安全警告
 
 ## Web UI（最小方案 → 增强，已完成）
 
@@ -277,7 +277,7 @@ Windows 下会被吃掉引号/换行）**没有进 system**，agent 每轮都要
 - 收敛"验证 = 执行"的措辞：`persona` 改成"验证**改动**才跑；**读代码不必执行**"，
   `tool:bash` 从"verify work"改成"run things（验证改动 / 观察运行态）"
 - `tool:web_search` 段补它的成本性质（真实联网 + 一个完整模型轮次），首次出现即提示
-- 归属规则写进 `AGENTS.md` 约定与 `ARCHITECTURE.md` §3.13：**反复被踩的坑提成 system
+- 归属规则写进 `AGENTS.md` 约定与 `docs/architecture.md` §3.13：**反复被踩的坑提成 system
   的通用规则，文档只留事故与理由**；通用段与工具段不互串
 - **后续增补（同一条判据：与工具无关、反复被踩）**：**Instructions**（工作区
   `AGENTS.md`/`CLAUDE.md` 是长期约定：先读并遵循、稳定知识提议写进去、不静默改、不写
@@ -470,7 +470,7 @@ guard（重复工具提醒 / 单次调用超时）有了天然的每请求卡点
 
 > 目标：前端只保留**一份从日志重建的投影状态**，实时 SSE 与 /history 全量
 > 加载收敛到同一投影 → 同一渲染入口；**DOM 不再当状态**。设计注记与 schema
-> 见 `web/PROJECTION_DESIGN.md`。
+> 见 `docs/subsystems/web-projection.md`。
 
 **为什么做**：此前前端把 DOM 当状态——实时路径用 `cur` 指针（当前助手
 DOM + 挂在其上的 `_raw/_toolById/_thinking`）逐块生长，刷新/切会话则走
@@ -614,7 +614,7 @@ my_coder/
 
 **动机**：`--workspace` 曾经是进程级唯一边界，一个 Web 宿主只能服务一个项目；想同时开两个项目的
 对话就没辙。DSH 的做法是**工作区属于会话**（`SessionHeader.cwd`），我们照这个形状做——
-细节对照见 `agent.md` §10。
+细节对照见 `docs/prior-art.md` §10。
 
 **做法**（三处，都不改框架层）：
 
@@ -686,7 +686,7 @@ M2 预算水位）就得改循环，`request/header` 的审计字段也只能一
 | **L2 回合明细** | 某回合原文（渲染成文本、有界、超限明说） | `read_turn` 工具 |
 
 **已落地**（`my_coder/app/recall.py` + `my_coder/tools/recall.py` + `app/factory.py` 一行
-注册；设计说明与实测见 `CONTEXT_BUDGET_DESIGN.md`，规则见 `AGENTS.md`）：
+注册；设计说明与实测见 `docs/notes/implemented/feature/2026-09-19-context-recall.md`，规则见 `AGENTS.md`）：
 
 - 检索面 = **曾经进过模型上下文的事件全集**（含被遮蔽的）；痕迹事件不进。
 - 清单只收真人发言（checkpoint 也是 `user/message`，必须排除）；插队标注；
@@ -746,7 +746,92 @@ M2 预算水位）就得改循环，`request/header` 的审计字段也只能一
 
 **下一步（M1 的验收）**：受控构造器（注入 fact + 真跑压缩 + 三道标签校验）+
 端到端 runner（R2 不注册召回工具 / R3 注册，比任务成功率）——主指标口径见
-`CONTEXT_BUDGET_DESIGN.md` §5。**M2（预算水位）与 M3（`new_context`）排在其后**。
+`docs/notes/implemented/testing/2026-09-19-context-recall-evaluation.md`。**M2（预算水位）与 M3（`new_context`）排在其后**。
+
+### 端到端验收（2026-09 落地：构造器 + 三臂 runner + 可恢复性审计）
+
+**口径（2026-09 修正，见设计文档 §5）**：**定性为主**。三臂的
+`Loss/Recovered/Residual` 需要**查询分布 Q** 才成立，而人造情境是作者挑的 →
+不声称估出 `E_Q`。主判据是 `DOSSIER.md` 的**情境档案**（预注册判据 + 逐臂行为轨迹 +
+失败模式归类），硬数字只保留三处：可恢复性结构、成本、机制计数。
+
+命令与产物（全在 `.eval/`，已 gitignore）：
+
+```sh
+python eval/recall/make_controlled_session.py               # 造题：真跑压缩 + 三道标签
+python eval/recall/make_controlled_session.py --relabel     # 只重算标签（不花 token）
+python eval/recall/run_endtoend.py --arms R2,R3 --reps 2    # 主对照
+python eval/recall/run_endtoend.py --arms R1 --reps 1       # 上限臂
+python eval/recall/run_endtoend.py --report-only            # 重算 RESULTS.md + DOSSIER.md
+python eval/recall/audit_recoverability.py                  # 真实语料的可恢复性审计（零 LLM）
+python eval/recall/export_sessions.py                       # 证据导出成可用 Web UI 浏览的会话
+```
+
+- **受控会话**：4 题（约束 / 纠正 / 精确值 / 避免重复），每题 10 个回合、真实事件形状，
+  F（要召回的事实）埋在**长工具输出**里；工作区与日志自洽（`read_file` 的结果由工作区
+  里那份文件生成）。
+- **三臂**：R1 完整原文（无召回工具）/ R2 只剩摘要（无召回工具）/ R3 摘要 + L0 + 召回工具。
+  产品侧为 R2 加了 `build_agent(..., recall=False)`：L0 与两个工具**一起**不装配
+  （只关工具不关 L0 就不是"改造前"的忠实基线），有测试钉住。
+- **可恢复性审计（零 token）的硬结论**：整个 `.sessions`（4 会话、60 MB、20 万+事件）
+  **成功压缩只有 1 次**（那次尝试 4 次，前 3 次 `empty summary`）；抽到"针"（df≤2）16 条，
+  其中 10 条其实没丢、3 条是夹具噪音，**剩下 6 条全部落在 `read_turn` 的渲染上限之外**
+  （**5 条被单块 1500 字符上限挡住、1 条被回合级 12000 字符/80 事件上限挡住**）——
+  即"丢的内容"与"读得到的内容"不在同一区域。**顺带确认一条规则冲突**：单块截断是
+  **静默**的（`render_message` 只补一个 `…`），与设计里"超限要明说被截断"不符。
+- **验收暴露的方法论问题（都已写进设计文档 §5.6 新增陷阱 11–15）**：① 探针把"需求"替模型
+  表述了（"就用我们之前定下来的那个"）→ 测的只是 ③④⑤，不是 ①；② 三道标签不校验
+  **F 是否必需品**——实测三题 R2 不查也能做对（摘要保住 / 读工作区即可 / **有绕道**：
+  模型用 `%TEMP%` 打了个桩）；③ 天花板臂 R1 被"伪造输出与主机平台不符"毁掉 → Loss 不可辨识；
+  ④ 坏 shell 是共同模噪音；⑤ 伪造日志会被模型拿真机对账（测到一部分是"信不信日志"）。
+- **构造坑（同类根因三次）**：marker 必须"只在工具输出里"；压缩日志必须**整份**写盘
+  （`bind_store` 只写挂上之后的事件）；**伪造历史必须在可验证的行为上也自洽**——
+  `constraint-review` 的脚手架里 `healthz()` 没接进路由（实测 404），于是各臂都在审计
+  "上次的活儿是假的"（已在该题 `known_issue` 里标注）。
+- **顺手修掉的产品缺陷（已修，`tools/shell.py`）**：`bash` 工具在 Windows 上落到
+  **`cmd.exe /c`**，而工具名与模型心智都是 Unix → 15 个真 run、105 条工具结果里 **22 条**
+  是 `'ls' is not recognized` / `cat` / `tail` / `head` / `rm` / `pwd`（占全部失败的三分之一）。
+  同一批命令实测：**bash 12/13 通过、cmd 5/13**。改成显式挑后端（真 bash → 回退 `cmd.exe`
+  并在**工具描述**里明说；不用 PowerShell，5.1 没有 `&&`），两条测试钉住。
+
+**下一轮（按优先级）**：
+
+0. ~~补提示词供给面~~ **已落地（2026-09）**：三段一起上，并可用
+   `build_agent(..., recall_guidance=False)` 整包关掉——
+   ① 通用纪律 **Continuity**（什么时候该回查，不带工具名）；
+   ② **`tool:recall` 段**（order 107，怎么用两个工具；只在装了工具时出现）；
+   ③ **L0 状态栏的压缩提示**（只在**当前会话**被压缩过时出现："被折叠的原文还在，
+   先 `session_manifest` 看清单 → `read_turn` 读原文"）。测试钉住三段各自的开关
+   （`tests/test_recall.py::test_recall_prompt_affordances_are_switched_separately`），
+   runner 加了 `--guidance on/off` 与 `--tag`（同题多配置并存）。
+   **2×2 已跑完（2026-09）——假设被推翻，结论反过来**：题面换成"真有缺口"之后
+   （`value-port` 重做：F 必要、且不提示去哪找），**没有任何供给面**时模型也 **4/4 主动查历史**
+   并全做对；供给面只把查询频率抬上去（`value-port` 4→6 次、`constraint` 1→4 次），
+   **正确率一格没变**。所以那张 0/10 的主因是"**情境里不需要查**"，不是"没教它"。
+   三条供给面留着当**行为倾向的放大器**（该查时更稳定地查），不能当"召回可用的前提"。
+   附带两条：R2 两次都**拒绝写**而不是编造（**幻觉率不能脱离题面读**）；
+   这一格原有一次"失败"是**残留的 `python app.py` 占着端口**造成的环境谎报
+   （已加隔离：跑前清同一解释器的 `app.py` 残留 + 断言该题声明的端口空闲）。
+   完整表与预注册读法见设计文档 §5.7.2。
+   - 为跑它准备的件：`value-port` 重做（端口=平台监控的期望，只记录在一次工具输出里，
+     命令与输出同平台、与工作区行为自洽）；`Item.necessity`（必填，**不填构造器直接抛**）
+     + `Item.necessity_holds`（不成立的题只能当对照题）；`run_endtoend.py --necessity`
+     （R2 上下文预检，通过 = F 非必要 = 题无效）；`Item.ports` + 跑前端口断言。
+     现在**只有 1 道真损失题**（`value-port`），另三题如实标为对照题。
+1. ~~**L2 的块级可达性**~~ **已修（2026-09）**：删掉单块静默截断与事件数上限，
+   改成**按行分页**（`offset` 1 起）+ 明说总量/范围/继续的坐标；L1 同步补三条渲染规则
+   （截断明说 + 给 `read_turn` 坐标；重复话标注；无结论显式说明）。
+   **验证（同一份审计，零 LLM）**：改前 6 条事实读不回来（5 条单块、1 条回合）
+   → 改后 **0 条读不回来**（5 条变成"要翻页"，渲染器会明说 offset）。
+   细节见设计文档 §5.7.3；`ruff check eval/` 的既有 lint 债也顺手清了。
+2. ~~必要性预检进构造器~~ **已落地**（`Item.necessity` 必填 + `run_endtoend.py --necessity`）。
+3. **重做剩下三题的题面**（让必要性真的成立）：避免重复型堵掉绕道（"必须真的装上，打桩不算"）；
+   纠正型把"正确的第二处改动"移进历史；约束型让 F 不可从工作区推出、也别被摘要保住。
+4. 修完 3 再重跑，产出**修正后的**情境档案（现有档案保留为"机制冒烟 + 观测"）。
+5. **真实探针（路线 A，已探明产量）**：真实语料里"用户自己说过、含指代、且答案只可能在
+   被遮蔽区"的探针 **3 条/54 MB 会话**（`刚才你是不是加载了一个skill？` /
+   `先为刚才的问题写一个 todo-write吧` / `我们之前谈过什么的呢？`）——判据可从日志取真值。
+   要做就写 `eval/recall/real_probes.py`（抽出 + 判据 + R2/R3 配对）。
 
 ## 实施约定（延续项目哲学）
 

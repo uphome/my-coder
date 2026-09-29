@@ -176,11 +176,11 @@ Web 端：流式输出 + 可折叠思维链 + 工具卡片 · 多会话管理（
 | 文档 | 回答什么问题 |
 |---|---|
 | **`USAGE_zh.md`** | 只想把 agent 跑起来 —— 参数、会话恢复、审批、FAQ |
-| **`ARCHITECTURE.md`** | 为什么这样设计 —— 21 个核心机制、数据流、日志样例、模块职责、路线图 |
-| **`agent.md`** | 别人怎么做的 —— DSH / PI / opencode 三家机制对照（参考手册，非规范） |
+| **[`docs/architecture.md`](docs/architecture.md)** | 为什么这样设计 —— 核心机制、数据流、日志样例、模块职责、路线图 |
+| **[`docs/prior-art.md`](docs/prior-art.md)** | 别人怎么做的 —— DSH / PI / opencode 三家机制对照（参考手册，非规范） |
 | **`NEXT_STEPS.md`** | 做到哪一步了 —— 实施进度、已定设计决策、待办 |
 | **`AGENTS.md`** | 给（AI）协作者看的规则 —— 命令、不变式、约定 |
-| **`web/PROJECTION_DESIGN.md`** | 前端为什么这么写 —— nodes 投影模型与 SSE 帧协议 |
+| **[`docs/subsystems/web-projection.md`](docs/subsystems/web-projection.md)** | 前端为什么这么写 —— nodes 投影模型与 SSE 帧协议 |
 | `show_memory.py` | 亲手验证"记忆 = 日志投影" —— 重放日志，打印每次请求时的消息序列 |
 
 ---

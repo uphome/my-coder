@@ -894,7 +894,8 @@ issue #3 提的是「Token Budget（Token 额度感知）」，三层：
 > 源码发现 **Codex 三件全都实现了**——`new_context` 工具（无参数、不摘要）、模型可见预算
 > （`get_context_remaining` + 一次性 reminder）、服务端 notes + history 检索（九个工具）。
 > 但它的**检索实现是闭源的**（仓库里只有客户端、工具 schema、注入槽位与 MCP bridge）。
-> 完整对照与"抄什么/不抄什么"见 `CONTEXT_BUDGET_DESIGN.md` §3。下面这段只针对 DSH。
+> 完整对照与"抄什么/不抄什么"见
+> [召回机制那篇](notes/implemented/feature/2026-09-19-context-recall.md)的「被否决的方案」。下面这段只针对 DSH。
 
 > 先在 `packages/` 全量搜过：`new_context|newContext` → **0 命中**；
 > `tokenBudget|remainingTokens|contextBudget|auto-compact` → **0 命中**。
@@ -939,7 +940,7 @@ DSH 的实际做法（逐条证据）：
 2. **选段单位是"回合数"（`keep_turns=3`），压力单位是 token**：一个回合 15 次请求
    时，"保留最近 3 个回合"可能保留一整座山——单位不一致，阈值就调不准。
 
-### 11.4 定稿方案（**M1 召回 → M2 预算 → M3 切换**；细节见 `CONTEXT_BUDGET_DESIGN.md`）
+### 11.4 定稿方案（**M1 召回 → M2 预算 → M3 切换**；细节见[召回机制那篇](notes/implemented/feature/2026-09-19-context-recall.md)）
 
 顺序翻转的理由：issue #3 三件里**只有"回溯原始会话"直接消除信息损失**；预算感知是
 "知道自己要丢了"，`new_context` 是"丢得更彻底"。**没有召回兜底时，切窗口＝真丢信息**
