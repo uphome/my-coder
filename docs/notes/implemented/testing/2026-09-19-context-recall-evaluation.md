@@ -126,17 +126,24 @@ R1 的意义取决于问哪个问题：Q1 里它是保险，Q2 里它是命门�
 
 ## Testing
 
-端到端与情境档案：
+端到端与情境档案。**凡是要发模型请求的步骤都需要 `DEEPSEEK_API_KEY`**
+（`eval/recall/llm_util.py:32` 读环境变量，缺了直接 `SystemExit: missing DEEPSEEK_API_KEY`；
+先在本仓库根放 `.env` 或 `export`）——标 `[key]` 的要，标 `[无]` 的零成本可重跑：
 
 ```sh
-python eval/recall/make_controlled_session.py                 # 造题（真跑压缩，花少量 API）
-python eval/recall/make_controlled_session.py --relabel       # 只重算标签（不花 token）
-python eval/recall/run_endtoend.py --necessity                # 必要性预检（每题 1 个 run）
-python eval/recall/run_endtoend.py --arms R3 --guidance off --tag g0 --reps 2
-python eval/recall/run_endtoend.py --arms R3 --guidance on  --tag g1 --reps 2
-python eval/recall/run_endtoend.py --report-only              # 重算 .eval/recall/{RESULTS,DOSSIER}.md
-python eval/recall/audit_recoverability.py                    # 真实语料审计（零 LLM）
-python eval/recall/export_sessions.py                         # 把证据导出成可用 Web UI 浏览的会话
+python eval/recall/make_controlled_session.py                 # [key] 造题（真跑压缩）
+python eval/recall/make_controlled_session.py --relabel       # [无] 只重算标签（不花 token）
+python eval/recall/run_endtoend.py --necessity                # [key] 必要性预检（每题 1 个 run）
+python eval/recall/run_endtoend.py --arms R3 --guidance off --tag g0 --reps 2   # [key]
+python eval/recall/run_endtoend.py --arms R3 --guidance on  --tag g1 --reps 2   # [key]
+python eval/recall/run_endtoend.py --report-only              # [无] 重算 .eval/recall/{RESULTS,DOSSIER}.md
+python eval/recall/audit_recoverability.py                    # [无] 真实语料审计（零 LLM）
+python eval/recall/export_sessions.py                         # [无] 把证据导出成可用 Web UI 浏览的会话
 ```
 
-产物全在 `.eval/recall/`（**不入库**：重建零成本的证据表不进版本控制，note 里只写结论 + 命令）。
+命令里的裸 `python` 按本仓库环境换成完整形式
+（`conda run --no-capture-output -n agent-demo python …`，见 `AGENTS.md`）。
+
+**预算**（实测）：一轮 2×2 约 14 个 run、约 1.1M 输入 token；单条 `--report-only` 与
+`--relabel` 秒级完成。产物全在 `.eval/recall/`（**不入库**：重建零成本的证据表不进版本
+控制，本文只写结论 + 命令）。
