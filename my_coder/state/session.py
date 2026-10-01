@@ -14,7 +14,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import cast
 
-from ..values.messages import Message, SessionEvent, new_event
+from ..values.messages import Message, SessionEvent, new_event, new_session_header
 
 # 唯一能"浮上水面变成模型消息"的三类事件。
 # surface_op 校验：这三类必须带 surface_op（'append' 或 'replace'），
@@ -76,10 +76,16 @@ class Session:
         return lambda: self._listeners.remove(listener)
 
     def bind_store(self, path):
-        """把后续事件实时追加落盘（listener 在 append 提交后触发）。返回解绑函数。"""
-        from ..values.persistence import save_event
+        """把后续事件实时追加落盘（listener 在 append 提交后触发）。返回解绑函数。
+
+        **顺带写会话头**（`SessionHeader`，JSONL 第一行）：新建/空文件时写一条，
+        已有内容则不动（头只在文件出生时写一次）。头带了 `format_version`，
+        所以"日志格式"从这一刻起有锚点——老文件没有头，读取端按 v0 处理。
+        """
+        from ..values.persistence import save_event, save_header
 
         path.parent.mkdir(parents=True, exist_ok=True)
+        save_header(path, new_session_header(self.id))
         return self.on_event(lambda event: save_event(path, event))
 
     def append(self, type_: str, data=None, surface_op: str | None = None,

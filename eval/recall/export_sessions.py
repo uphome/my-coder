@@ -31,7 +31,10 @@ DEFAULT_OUT = REPO / '.eval' / 'recall'
 
 
 def _load(path: Path) -> list[dict]:
-    return [json.loads(line) for line in path.read_text(encoding='utf-8').splitlines() if line.strip()]
+    """读日志全部**事件**（跳过首行会话头——它不是事件，会让事件数多 1）。"""
+    return [data for data in
+            (json.loads(line) for line in path.read_text(encoding='utf-8').splitlines() if line.strip())
+            if data.get('session') is not True]
 
 
 def _export(source: Path, target: Path, title: str, workspace: str | None) -> int:

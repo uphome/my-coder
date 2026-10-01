@@ -135,8 +135,8 @@ Windows 控制台是 GBK：用 `--no-capture-output`；`conda run -c` 不支持�
 
 - 注释/文档全部中文，教学式讲解动机；每个文件顶部 `from __future__ import annotations`
 - 值对象必须 frozen dataclass + tuple，禁止把可变容器放进消息/事件
-- **严格校验哲学**：未注册 prompt 变量、重复工具名、非法执行模式、缺 `surface_op` 都在写入时刻抛错，宁炸勿静默
-- 提交前三绿；`docs/` 的格式与 `AGENTS.md` 的预算由 `tests/test_docs.py` 守着
+- **严格校验哲学**：未注册 prompt 变量、重复工具名、非法执行模式、缺 `surface_op` 都在写入时刻抛错；读日志同理，格式更新或未知事件一律拒绝重建
+- 提交前三绿；`docs/` 格式、注入预算与文档数字由 `tests/test_docs.py` / `test_doc_numbers.py` 守
 
 ## 入口与工具
 

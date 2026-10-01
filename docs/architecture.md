@@ -287,6 +287,32 @@ _run_one → _run_group（补记账）→ _execute_tool_calls（补记账）
 管 I/O、values 管类型转换。三者分开的理由：纯函数 vs 副作用分离、
 存储后端可替换（harness 里是抽象）、单向依赖。
 
+**第一行是会话头**（`SessionHeader`，`{"session": true, "format_version": …}`）：
+它不是事件——不占 `seq`、不进任何投影、不参与 `derive_messages`。为什么不复用
+事件信封：`_log[seq]` 依赖"seq == 下标"（`derive_messages` 直接按下标取），
+让它占掉 seq 0 会把整库序号平移，并坏掉所有"按 seq 取事件"的读取方（召回审计脚本
+就是这么取的）。它是**文件级元数据**，与事件流正交——DSH 同样把 `SessionHeader`
+与事件信封分开。
+
+**格式锚点与两道读取守卫**（`values/messages.py` 的 `SESSION_FORMAT_VERSION`、
+`persistence.py` 的 `load_events`）：
+
+1. **方向感知拒绝**：日志版本 > 读取者 → `SessionFormatUnsupportedError`
+   （**独立异常类型**，与"损坏"分开——文件什么都没坏，只是写它的运行时更新）；
+   相等 → 正常；更旧 → 返回旧版本号（v0 与 v1 事件形状相同，无需迁移）。
+   没有头的老文件按 v0 读。
+2. **未知事件默认"必读"**：类型不在 `KNOWN_SESSION_EVENT_TYPES` 且没标
+   `ignorable: true` → `UnknownSessionEventError`；标了的跳过、其余照常重建。
+   理由：**忘标记 → 过度拒绝（麻烦）远好于默认忽略 → 静默恢复出一份被掏空的会话**。
+
+**只有结构性变化才 bump 版本；词汇增长靠 `ignorable` 标记，不 bump**——因为
+"能否自动升级"是那一步 upgrader 的属性，不该由版本号形态预先承诺。版本由**写入者**
+决定：判据不是"旧运行时能否解析"，而是"还能否**语义正确**地处理"；拿不准就 bump。
+
+代价与边界（实测记录）：`ignorable` 字段在本机制落地前是**死字段**（定义在
+`messages.py`、序列化/反序列化都在，但**读取端零检查**）；现在读取端用它，
+但**写入端仍无人设置它**——新功能的词汇增长要显式标 `ignorable=True` 才能被旧读取者跳过。
+
 JSON 没有类型信息，用 `$xxx` 前缀 key 做类型标记：`$text`/`$tool-call`/
 `$tool-result`/`$message`/`$dict`/`$list`，`data_to_json` 递归遍历任意
 嵌套，to/from 严格对称——任何值经过 JSON 往返必能还原（测试断言）。
@@ -796,7 +822,7 @@ DSH / PI / opencode / Codex 的对照见 [`prior-art.md`](prior-art.md) §11。
 | `web/` | Web 宿主（入口层）：`app.py` FastAPI 路由 + `init_web` + `main`；`state.py` `Seat`/`WebState`/`state`；`sessions.py` seat 生命周期 + 会话文件 + 审批钩子 + **每会话工作区**（解析、落 `session/workspace` 事件、从日志读回）；`titles.py` 自动会话标题；`payload.py` 纯函数投影（不依赖 FastAPI）。seat 化并发隔离（每 seat 一份 `args`，**只有 workspace 不同**）；事件透传 turn/step + turn_start/user_message（带 message_id/rpc_id）/queue_update 帧供前端投影；队列项操作 `POST /queue/update`；`POST /sessions/new` 可带 `{"workspace": "…"}` |
 | `app/compaction.py` | 上下文压缩引擎（四步事务 + checkpoint + 会话 token 累计账） |
 | `show_memory.py` | 教学脚本：重放日志展示"记忆 = 投影" |
-| `tests/` | 206 个测试，**按关注点分文件**（2026-09 从单文件 `test_demo.py` 拆出）：`test_values_session.py` 值/日志投影、`test_inbox.py` 队列、`test_prompt.py` 提示词、`test_llm.py` LLM 客户端/wire 格式、`test_loop.py` 框架循环（含运行时状态贡献者）、`test_tools.py` 工具、`test_todo.py`、`test_recovery.py` 自愈、`test_compaction.py` 压缩、`test_recall.py` 上下文召回（三层投影 + 两个工具 + 两轮审核回归）、`test_instructions.py` / `test_skills.py` 宿主直读、`test_web_search.py`、`test_web.py` Web 宿主（含每对话工作区）、`test_cli.py`；跨文件 helper 在 `conftest.py`；**`test_architecture.py`**（2 条：依赖方向 = 包结构——下层 import 上层当场红，白名单里的例外必须仍然真实存在，不许长僵尸）。3 条平台相关（Windows 建不了符号链接时 skip） |
+| `tests/` | 213 个测试，**按关注点分文件**（2026-09 从单文件 `test_demo.py` 拆出）：`test_values_session.py` 值/日志投影、`test_inbox.py` 队列、`test_prompt.py` 提示词、`test_llm.py` LLM 客户端/wire 格式、`test_loop.py` 框架循环（含运行时状态贡献者）、`test_tools.py` 工具、`test_todo.py`、`test_recovery.py` 自愈、`test_compaction.py` 压缩、`test_recall.py` 上下文召回（三层投影 + 两个工具 + 两轮审核回归）、`test_instructions.py` / `test_skills.py` 宿主直读、`test_web_search.py`、`test_web.py` Web 宿主（含每对话工作区）、`test_cli.py`；跨文件 helper 在 `conftest.py`；**`test_architecture.py`**（2 条：依赖方向 = 包结构——下层 import 上层当场红，白名单里的例外必须仍然真实存在，不许长僵尸）。3 条平台相关（Windows 建不了符号链接时 skip） |
 
 ---
 

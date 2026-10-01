@@ -25,7 +25,7 @@
 | **web_search（联网搜索）** | ✅ 已完成（DeepSeek 官方原生搜索，见下节） |
 | 阶段一收尾（更新 README / ARCHITECTURE 定稿） | ✅ 已完成（含 2026-09 架构重构与本文档同步） |
 
-> 当前全量测试：206 passed / 3 skipped——数字由 `tests/test_doc_numbers.py` **机械保证**
+> 当前全量测试：213 passed / 3 skipped——数字由 `tests/test_doc_numbers.py` **机械保证**
 > （文档里任何测试数/行数与代码不符，那个门禁就会红；不再靠"记得同步"）。
 
 ## read_file 升级（已完成）
