@@ -232,6 +232,12 @@ async def _run_step(agent, turn: int, step: int, assembly: dict,
             # 状态栏本身不落事件，靠这里回答"这轮模型被告知了哪些运行时状态"；
             # 多个来源时是一个映射 {贡献者名: 原文}，加来源不必加平铺字段。
             **({'runtime_status': dict(statuses)} if statuses else {}),
+            # 审计字段：收尾步（只读预算用尽）的指令原文。它与状态栏同一性质——
+            # 合成的 per-request 注入、不进日志，所以必须在这里留痕，否则
+            # "这一步为什么没有工具面"在唯一事实源里答不出来。
+            # （软提示不用记：它写在 tool/result 正文里，本身就在日志里。）
+            **({'convergence': {'closing': True, 'instruction': agent.progress.closing_text}}
+               if closing and agent.progress.closing_text else {}),
         })
         assembler = _BlockAssembler()
         try:

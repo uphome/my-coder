@@ -224,6 +224,13 @@ async def test_closing_step_has_no_tools_and_records_read_budget():
                       for block in getattr(message, 'content', ()))]
     assert closing, '收尾步必须告诉模型"这一步没有工具、直接给结论"'
     assert _reasons(session) == ['read-budget'], f'实际 {_reasons(session)}'
+    # 审计：收尾步的指令原文要进 request/header（它与状态栏同性质：per-request 注入、不进日志，
+    # 不记就答不出"这一步为什么没有工具面"）
+    headers = [event.data for event in session.events if event.type == 'request/header']
+    assert headers[3]['tools'] == [], headers[3]
+    assert headers[3]['convergence'] == {'closing': True, 'instruction': CLOSING_TEXT}, \
+        headers[3].get('convergence')
+    assert 'convergence' not in headers[0], '不是收尾步就不该有这个字段'
     # 收尾步里模型仍然发了工具调用（脚本这么写的）→ **不执行**，补一条 is_error 结果。
     # 为什么不丢掉：wire 上 tool_calls 后面必须跟结果，否则整个会话之后都发不出去。
     assert executed == ['peek'] * 3, f'收尾步的调用不该被执行，实际执行 {executed}'
