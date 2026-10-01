@@ -833,6 +833,27 @@ python eval/recall/export_sessions.py                       # 证据导出成可
    `先为刚才的问题写一个 todo-write吧` / `我们之前谈过什么的呢？`）——判据可从日志取真值。
    要做就写 `eval/recall/real_probes.py`（抽出 + 判据 + R2/R3 配对）。
 
+## 工具收敛（issue #2，2026-09-30 落地）
+
+**问题**：开放任务里 agent 会"再查一下"到停不下来（issue #2 实录：单回合 15 次模型请求 /
+24 次工具调用才给结论）。
+
+**判据（实测定出来的）**：真实语料 4 会话 / 57 个有工具调用的回合，**最长连续只读段**
+（期间没有任何 `edit`/`write_file`/`bash`）p50 = 1 · p90 = 8 · **max = 39**，涉及的调用占全部
+435 次的 34%；而一个 61 步的**实现型**回合最长只读段只有 **4**。→ 判据是"**自上次变更以来
+连续多少次只读调用**"，**不是回合步数**——按步数砍会砍掉合法的大任务（opencode 按总步数：
+`agent.steps` + `MAX_STEPS_PROMPT`；DSH / PI 不设上限）。
+
+**落地**：`ToolSpec.cacheable` 声明（六条纯读工具为真；默认 `False` = 会变更 → 计数清零）
++ `state/progress.py` 的 `ProgressPolicy`（软 8 / 硬 16）→ 软提示写进**那次工具结果的正文**；
+到硬上限时下一步**不带工具面**（收尾步；模型若仍发调用则**不执行**、补 `is_error`），
+`turn/end` 记 `read-budget`。开关 `--readonly-nudge/--readonly-close/--no-convergence`。
+
+**实测 A/B**（同一只读调查任务 × 开关各 2 次）：请求数 9/10 → **7/6**、工具调用 12/19 → **11/9**，
+结论质量不降（四轮都命中关键事实）；**软提示就够了，硬边界一次没触发**。
+设计与证据：[`docs/notes/implemented/feature/2026-09-30-tool-convergence.md`](docs/notes/implemented/feature/2026-09-30-tool-convergence.md)。
+**证据边界**：n=2/组、单一任务与模型；硬边界的真实行为只有单元测试证据。
+
 ## 实施约定（延续项目哲学）
 
 1. 新增状态一律落日志——"没有状态不进日志"不变式不能破

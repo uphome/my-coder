@@ -384,8 +384,20 @@ turn/step 序号、step/start、todo 痕迹都是**模型不可见的痕迹事�
 
 **候选方向**（未决）：回合内请求次数上限（如单 step 最多 N 轮工具循环后强制
 要求给结论）；或提示词/技能正文加收敛纪律（"验证核心事实后即汇报，把后续
-验证留给用户决定"）。DSH/opencode/PI 是否有对应的收敛机制待查（可作下一轮
-讨论的 codegraph 调研目标）。
+验证留给用户决定"）。
+
+**三家对照（2026-09-30 查证：codegraph + 源码定位）**：
+
+| 项目 | 有没有收敛机制 |
+|---|---|
+| DSH | **没有**。step 循环是 `while (true)`（`packages/core/agent-loop/src/agent.ts`）；暴露的 agent-loop 设置只有 `maxParallelToolCalls`（`AgentLoopSettings`）；`maxTokens` 只是**单次输出**上限，`turn/end` 的 `max-tokens` 只被 UI 渲染成提示（`turnMaxTokensDefinition`），不强制收尾 |
+| PI | **没有**（`maxStep*` / `stepLimit` / `iterationLimit` 等关键词在源码里零命中） |
+| opencode | **有**。per-agent 配置 `steps`（`packages/core/src/v1/config/agent.ts`，注释原文 "Maximum number of agentic iterations **before forcing text-only response**"，默认 `Infinity`，旧名 `maxSteps` 已弃用）；到点注入一条 **assistant** 消息 `MAX_STEPS_PROMPT`（`packages/opencode/src/session/prompt.ts`）："已达最大步数、工具在下次用户输入前禁用、只许文字"，并要求回复说清**已做了什么 / 还剩什么** |
+
+**我们的取舍**：不照抄 opencode 的**总步数**判据——实测实现型长回合 61 步、其最长只读段只有 4，
+按步数砍会砍掉合法的大任务；改用"自上次变更以来的**连续只读调用数**"。设计与证据见
+[`notes/proposed/feature/2026-09-30-tool-convergence.md`](notes/proposed/feature/2026-09-30-tool-convergence.md)。
+
 
 ## 5. 待处理消息怎么显示：分区渲染 + 提交回显——2026-09 已定稿并落地
 

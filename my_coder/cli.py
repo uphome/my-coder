@@ -14,6 +14,7 @@ import asyncio
 import logging
 from pathlib import Path
 
+from .app.constants import READONLY_CLOSE_AT, READONLY_NUDGE_AT
 from .app.factory import build_agent, load_env
 from .app.ui import render_event
 from .state.recovery import repair_dangling_tool_calls
@@ -110,6 +111,15 @@ def main() -> None:
     parser.add_argument('--compact-at', type=int, default=None, metavar='TOKENS',
                         help='auto-compact threshold (default 524288 = half of the 1M '
                              'deepseek-v4 window); pass 0 to disable')
+    # 工具收敛（issue #2）：判据是"自上次变更以来连续只读调用数"（见 state/progress.py）
+    parser.add_argument('--readonly-nudge', type=int, default=READONLY_NUDGE_AT, metavar='N',
+                        help=f'nudge after N consecutive read-only calls (default '
+                             f'{READONLY_NUDGE_AT}); 0 disables this layer')
+    parser.add_argument('--readonly-close', type=int, default=READONLY_CLOSE_AT, metavar='N',
+                        help=f'force a text-only closing step after N consecutive read-only '
+                             f'calls (default {READONLY_CLOSE_AT}); 0 disables this layer')
+    parser.add_argument('--no-convergence', action='store_true',
+                        help='disable the read-only convergence pressure entirely')
     args = parser.parse_args()
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO)
     if args.prompt:

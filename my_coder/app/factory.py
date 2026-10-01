@@ -12,12 +12,20 @@ from pathlib import Path
 
 from ..capability.llm import FakeLlm, OpenAiCompatibleLlm
 from ..runtime.agent import Agent
+from ..state.progress import ProgressPolicy
 from ..state.prompt import PromptRegistry
 from ..state.runtime_status import RuntimeStatusRegistry
 from ..state.session import Session
 from ..tools import build_tools
 from ..tools.todo import build_todo_status
-from .constants import DEFAULT_COMPACT_TOKENS, DEMO_SCRIPT
+from .constants import (
+    CONVERGENCE_CLOSING,
+    CONVERGENCE_NUDGE,
+    DEFAULT_COMPACT_TOKENS,
+    DEMO_SCRIPT,
+    READONLY_CLOSE_AT,
+    READONLY_NUDGE_AT,
+)
 from .instructions import InstructionLoader
 from .recall import session_index_text
 from .skills import SkillTable, format_catalog
@@ -66,6 +74,26 @@ def load_env(path: Path) -> None:
         key = key.strip()
         if key and key not in os.environ:
             os.environ[key] = value.strip()
+
+
+def _progress_policy(args) -> ProgressPolicy:
+    """工具收敛的进度策略：阈值与文案都在这里注入（逻辑在 `state/progress.py`）。
+
+    宿主开关（都用 `getattr` 取，所以旧宿主不传也不会炸）：
+    - `--readonly-nudge N`：连续只读到 N 次给软提示（默认 8，p90；0 = 关这一层）
+    - `--readonly-close N`：到 N 次请求一次不带工具面的收尾步（默认 16；0 = 关这一层）
+    - `--no-convergence`：整个机制关掉（等价于回到没有它的行为）
+    """
+    if getattr(args, 'no_convergence', False):
+        return ProgressPolicy(enabled=False)
+    nudge = getattr(args, 'readonly_nudge', READONLY_NUDGE_AT)
+    close = getattr(args, 'readonly_close', READONLY_CLOSE_AT)
+    return ProgressPolicy(
+        nudge_at=nudge if nudge else None,
+        close_at=close if close else None,
+        nudge_text=CONVERGENCE_NUDGE,
+        closing_text=CONVERGENCE_CLOSING,
+    )
 
 
 def _runtime_status(sessions_dir: Path, default_workspace: str,
@@ -225,6 +253,9 @@ def build_agent(session: Session, args, ui_state: dict, hooks=None,
         # 目前是 todo 状态栏 + L0 会话目录（issue #3 的 M1）；将来的预算水位（M2）同理。
         runtime_status=_runtime_status(_sessions_dir, _default_workspace, recall=recall,
                                        recall_guidance=recall_guidance),
+        # 工具收敛（issue #2）：判据是"自上次变更以来连续只读调用数"（阈值见 constants.py）。
+        # **文案在这里注入**、逻辑在 state/progress.py；宿主可调阈值或整个关掉。
+        progress=_progress_policy(args),
     )
 
     def on_event(event) -> None:

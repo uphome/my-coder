@@ -166,6 +166,7 @@ def register(registry, workspace: Path) -> None:
         # 只读：可与其他调用并发；体内是同步读盘（path.read_text），故卸载到线程
         execution_mode='parallel',
         offload=True,
+        cacheable=True,          # 纯读、无产出：进度策略据此计"无进展只读"
     ))
     registry.register(ToolSpec(
         name='list_files',
@@ -177,6 +178,7 @@ def register(registry, workspace: Path) -> None:
         execute=list_files,
         execution_mode='parallel',
         offload=True,
+        cacheable=True,          # 纯读、无产出：进度策略据此计"无进展只读"
     ))
     registry.register(ToolSpec(
         name='edit',

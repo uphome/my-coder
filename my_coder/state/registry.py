@@ -45,6 +45,11 @@ class ToolSpec:
     - offload：executor 体内是同步阻塞 I/O（不含 await），丢工作线程执行。
       判据是"它阻不阻塞事件循环"，与 execution_mode 正交：只读工具既并发安全
       又阻塞（两样都声明），写工具不并发也不阻塞（两样都不声明）
+    - cacheable：这次调用算不算"**只读、无产出**"——只有纯读工具才声明 `True`。
+      进度策略（`state/progress.py`）靠它数"自上次变更以来连续读了多少次"，
+      到阈值就给收敛压力（软提示 / 一步强制收尾）。默认 `False`：**没声明就当会变更**
+      （fail-closed，与 execution_mode 同一条哲学）——声明错了最多是收敛压力来得晚一点，
+      反过来（把写工具当只读）会让计数永远不清零、把长任务逼停。
 
     两处永不漂移：模型看到的 schema 和实际执行的函数来自同一条注册。
     """
@@ -56,6 +61,7 @@ class ToolSpec:
     timeout_s: float = 60.0
     requires_approval: bool = False
     offload: bool = False
+    cacheable: bool = False
 
 
 class ToolRegistry:
@@ -82,6 +88,17 @@ class ToolRegistry:
             raise ValueError(
                 f'tool {spec.name!r} has invalid execution_mode {spec.execution_mode!r}; '
                 f'expected one of {sorted(EXECUTION_MODES)}')
+        if not isinstance(spec.cacheable, bool):
+            # 声明字段自己较真类型：`cacheable='false'` 是真值（字符串非空），
+            # 静默接受它等于把一个"会变更"的工具算成只读
+            raise ValueError(
+                f'tool {spec.name!r} has non-boolean cacheable {spec.cacheable!r}')
+        if spec.cacheable and spec.requires_approval:
+            # 自相矛盾：需要人工确认的工具必然有副作用，却声称"只读、无产出"。
+            # 放行它的后果是进度计数永不清零 → 长任务被收敛压力逼停（宁炸勿静默）
+            raise ValueError(
+                f'tool {spec.name!r} cannot be both cacheable and requires_approval '
+                '(a tool needing approval is not read-only)')
         self._tools[spec.name] = spec
         return lambda: self._tools.pop(spec.name, None)
 
