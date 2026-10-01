@@ -59,24 +59,23 @@ Windows 控制台是 GBK：用 `--no-capture-output`；`conda run -c` 不支持�
 
 - **提示词纪律的归属**：`system` 是唯一"每轮都生效"的通道，**文档挡不住**，
   所以反复被踩的坑要提成 system 里的通用规则。分层：通用规则进 `identity`/`persona`/`discipline`，
-  工具专属规则进各自的 `tool:*` 段，两者不互串。当前六条纪律：**Scope**（"看看/评估/解释"=只读调查）、
-  **Economy**（先查工作区、不重复调用、昂贵操作先自问必要）、**Evidence**（命令必须自证输出；
-  多行脚本写临时文件——内联多行跨 shell 会被吃掉）、**Cleanup**（scratch 写系统 temp；
-  必须落工作区就放一个自明目录、整目录删；**绝不删**不是自己造的 / git 跟踪的 / 会话日志；
-  收尾用 `git status` 自证）、**Instructions**（`AGENTS.md`/`CLAUDE.md` 是长期约定：先读并遵循、
-  稳定知识提议写进去、不静默改、不写密钥与临时状态）、**Continuity**（任务依赖你**看不到**的
-  既有决定/约束时**先回查会话历史**；**绝不许**用看起来合理的具体值补空缺）。
+  工具专属规则进各自的 `tool:*` 段，两者不互串。当前六条纪律（**原文在 `app/factory.py` 的
+  `discipline` 段**）：**Scope**（"看看/评估/解释"=只读调查）、**Economy**（先查工作区、
+  不重复调用、昂贵操作先自问必要）、**Evidence**（命令必须自证输出）、**Cleanup**（scratch
+  出工作区；绝不删不是自己造的/git 跟踪的/会话日志；`git status` 自证）、**Instructions**
+  （`AGENTS.md` 是长期约定：先读并遵循、稳定知识提议写进去、不静默改）、**Continuity**
+  （任务依赖你看不到的既有决定/约束时**先回查会话历史**，绝不用看起来合理的值补空缺）。
   **新工具落地 = 实现 + 供给面**：什么时候用（通用规则）· 怎么用（`tool:*` 段）·
-  在需求发生处提醒（运行时状态贡献者）。原文见 `app/factory.py`，理由见
+  在需求发生处提醒（运行时状态贡献者）。理由见
   [召回那篇](docs/notes/implemented/feature/2026-09-19-context-recall.md)。
 - **循环的 step 粒度 = 一次模型请求**（对齐 harness）：工具循环由 `run_turn` 外层驱动，
   **每轮开头都 claim inbox**；别合并回 `_run_step` 的内层 while（插队消息的落地时机、
   停止及时性、每请求卡点全依赖它）。见 `docs/architecture.md` §3.6。
 - **工具并发调度**：并发许可是**声明**出来的，`ToolSpec.execution_mode` 默认 `'sequential'`，
   只有不写共享状态才声明 `'parallel'`（判据是副作用不是快慢）；非法值注册时抛错；
-  **未注册的工具名按 fail-closed 当独占**。"能不能并发"与"阻不阻塞事件循环"是两根正交的轴
-  （后者用 `offload=True`，只给纯 I/O）；分组按**连续段**；结果按模型顺序落盘；
-  取消要补 is_error 记账。见 `docs/architecture.md` 与 `docs/prior-art.md`。
+  **未注册的工具名按 fail-closed 当独占**。"能不能并发"与"阻不阻塞事件循环"正交
+  （后者用 `offload=True`，只给纯 I/O）；分组按**连续段**；结果按模型顺序落盘；取消补记账。
+  见 `docs/architecture.md` 与 `docs/prior-art.md`。
 - **`bash` 工具必须真的跑 bash**：Windows 上显式挑后端（真 bash → 回退 `cmd.exe`），
   回退时**工具描述里必须明说是 cmd**（`dir`/`type`/`findstr`）；不用 PowerShell 当默认
   （5.1 没有 `&&`）；描述与后端由同一个 `pick_shell()` 产出，不许漂移。见
@@ -90,9 +89,8 @@ Windows 控制台是 GBK：用 `--no-capture-output`；`conda run -c` 不支持�
   （每请求的状态贡献者）→ **L1 用户话清单**（`session_manifest`）→ **L2 回合明细**（`read_turn`）。
   判据：检索面 = 曾经进过模型上下文的事件**全集**（含被遮蔽的），痕迹事件不进；
   **不做相关性排序**，靠顺序 + 回合号 + 足迹导航；坐标是回合号（可加 `step`），seq 只在内部；
-  **L1 截断必须明说并给 `read_turn` 坐标**（重复用户话不删行只标注；无文本结论显式说明）；
-  **L2 按行分页**（`offset` 1 起，12,000 字符一页，在行边界停，明说总量与继续的坐标），
-  **块级不许静默截断**；跨工作区 fail-closed 且不泄漏对方目录；两个工具 `parallel` + `offload=True`；
+  **L1 截断必须明说并给 `read_turn` 坐标**；**L2 按行分页**（明说总量与继续的坐标），
+  **块级不许静默截断**；跨工作区 fail-closed；两个工具 `parallel` + `offload=True`；
   入参自己较真类型（坏值降级 `is_error`）。见
   [机制](docs/notes/implemented/feature/2026-09-19-context-recall.md)、
   [渲染修复](docs/notes/implemented/bug-fix/2026-09-29-silent-render-truncation.md)、
@@ -112,13 +110,20 @@ Windows 控制台是 GBK：用 `--no-capture-output`；`conda run -c` 不支持�
 - **按需技能（skill）**：`*.md` + frontmatter；bundled（随包）与 workspace 两个来源按名字合并，
   **workspace 覆盖 bundled**，合并后按名字排序；目录只注入 name + description（**不列路径**——
   列了会诱导 `read_file`，而 bundled 在包外会被沙箱拒）；目录与 `skill` 工具**共用同一个
-  `SkillTable`** 且工具**执行时**取表；刷新要加锁 + 双检（两个线程都会碰）；工作区来源做越界检查；
+  `SkillTable`** 且工具**执行时**取表；刷新要加锁 + 双检；工作区来源做越界检查；
   正文按**名字**取、作为 tool/result 注入。见 `docs/prior-art.md` §3。
 - **待处理消息（inbox）**：按 placement 分区渲染、恒定贴尾（`queued` → 输入框上方；
   `steering` → 消息流尾部）；队列是状态层投影（`Inbox.queued_items()`，折叠只有一份）；
   提交身份 `rpc_id`（落在 `UserSource` 与队列项，用于原子交接本地回显）；动作
   `edit`/`remove`/`steer` 与 DSH 同名错误码；SSE `queue_update`、`/steer` 响应、
   `/history` 与 `sessions/*/switch|new` 三条通道幂等。见 `docs/prior-art.md` §5。
+- **工具收敛（issue #2）**：判据是"**自上次变更以来连续多少次只读调用**"，不是回合步数
+  （实测：实现型长回合 61 步、最长只读段只有 4，按步数砍会砍掉合法的大任务）。纯读工具**必须声明**
+  `ToolSpec.cacheable=True`（六条：`read_file`/`list_files`/`grep`/`glob`/`session_manifest`/`read_turn`；
+  默认 `False` = 会变更，出现一次变更类调用就清零计数）；到阈值把提示写进**那次工具结果的正文**；
+  到硬上限时下一步**不带工具面**（收尾步；模型若仍发调用则**不执行**、补 `is_error`），
+  `turn/end` 记 **`read-budget`**。开关：`--readonly-nudge/--readonly-close/--no-convergence`。
+  见[工具收敛那篇](docs/notes/implemented/feature/2026-09-30-tool-convergence.md)。
 - **发现缺口时怎么办**：① 本 PR 引入的 → **本 PR 修掉**；② 几十行且不改语义 → **顺手修**，
   PR 正文点明；③ 只有"真的大"才开 issue，且写清**什么时候修、卡在什么前提**。
   取舍与候选方案进 `NEXT_STEPS.md`，不进 issue 列表。

@@ -190,6 +190,7 @@ def register(registry, sessions_dir: Path, default_workspace: str = '') -> None:
         execute=session_manifest,
         execution_mode='parallel',   # 纯读，不写任何共享状态
         offload=True,                # 体内全是同步读盘 + JSON 解析，没有 await
+        cacheable=True,          # 纯读、无产出：进度策略据此计"无进展只读"
     ))
 
     registry.register(ToolSpec(
@@ -226,4 +227,5 @@ def register(registry, sessions_dir: Path, default_workspace: str = '') -> None:
         execute=read_turn,
         execution_mode='parallel',
         offload=True,
+        cacheable=True,          # 纯读、无产出：进度策略据此计"无进展只读"
     ))

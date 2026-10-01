@@ -14,11 +14,13 @@ import logging
 
 from ..capability.hooks import PreStepContext, RequestContext, RequestErrorContext
 from ..capability.llm import LlmError, LlmRequest, StreamChunk
+from ..state.progress import NUDGE
 from ..values.messages import (
     Message,
     TextBlock,
     ToolCallBlock,
     ToolOutcome,
+    ToolResultBlock,
     create_assistant_message,
     create_tool_result_message,
     create_user_message,
@@ -108,6 +110,8 @@ async def run_turn(agent) -> bool:
     try:
         step = 0
         target = 'next-turn'
+        agent.progress.reset()      # 回合是收敛的自然边界：计数与收尾标志都从头来
+        closing_step = False
         while True:
             step += 1
             claimed = agent.inbox.claim(target, turn)
@@ -120,14 +124,20 @@ async def run_turn(agent) -> bool:
             if step == 1 and not messages:
                 end_reason = 'completed'   # 首步没货：不花模型调用
                 break
+            # 上一步的只读调查触到上限 → 这一步是**收尾步**：不带工具面 + 一条收尾指令。
+            # 它仍是一次正常的模型请求（模型有完整的文字表达能力），所以不会产生
+            # "带了 tool_calls 却没有结果"的非法 wire。
+            closing_step = agent.progress.closing
             session.append('step/start', {'turn': turn, 'step': step})
             for message in messages:
                 # 认领到的消息在此刻浮上水面：从队列载荷变成模型记忆
                 session.append('user/message', message, surface_op='append')
-            outcome = await _run_step(agent, turn, step, assembly)
+            outcome = await _run_step(agent, turn, step, assembly, closing=closing_step)
             session.append('step/end', {'turn': turn, 'step': step})
             if end_reason != 'max-tokens':     # max-tokens 粘性：不降级
                 end_reason = outcome
+            if closing_step and end_reason != 'max-tokens':
+                end_reason = 'read-budget'     # 收尾步走完 → 记下"因只读预算而收尾"
             if end_reason is not None and not agent.inbox.next_step:
                 break                      # 收尾了、也没有插队 → 不再空转一步
             target = 'next-step'
@@ -156,7 +166,8 @@ async def _resolve_pre_step(agent, turn: int, step: int, claimed: list[Message])
     return await agent.hooks.pre_step(ctx, default)
 
 
-async def _run_step(agent, turn: int, step: int, assembly: dict) -> str | None:
+async def _run_step(agent, turn: int, step: int, assembly: dict,
+                    closing: bool = False) -> str | None:
     """一个 step：**只发一次**模型请求（+ 它发起的工具调用）。返回结束原因。
 
     返回 None = 本步发起了工具调用、回合还没收尾：工具结果已落日志，
@@ -195,6 +206,10 @@ async def _run_step(agent, turn: int, step: int, assembly: dict) -> str | None:
         messages = list(session.derive_messages())
         for _, text in statuses:
             messages.append(create_user_message([TextBlock(text=text)]))
+        if closing and agent.progress.closing_text:
+            # 收尾指令与运行时状态同一通道（合成 user 消息、不进日志、可审计）：
+            # 它是"这一步为什么没有工具面"的原因说明——原因必须和事实一起给模型
+            messages.append(create_user_message([TextBlock(text=agent.progress.closing_text)]))
         request = LlmRequest(
             provider=provider,
             model=model,
@@ -203,7 +218,8 @@ async def _run_step(agent, turn: int, step: int, assembly: dict) -> str | None:
             # 运行时状态在 messages 末尾（每步都变的东西不该进稳定前缀）。
             system=agent.prompt.render(assembly, ctx={'agent': agent}),
             messages=tuple(messages),
-            tools=tuple(agent.tools.schemas()),
+            # 收尾步（只读预算用尽）：这一次请求**不带工具面**，模型只能出文字。
+            tools=() if closing else tuple(agent.tools.schemas()),
             max_tokens=config.get('max_tokens') or agent.options.get('max_tokens'),
         )
         session.append('request/header', {
@@ -216,6 +232,12 @@ async def _run_step(agent, turn: int, step: int, assembly: dict) -> str | None:
             # 状态栏本身不落事件，靠这里回答"这轮模型被告知了哪些运行时状态"；
             # 多个来源时是一个映射 {贡献者名: 原文}，加来源不必加平铺字段。
             **({'runtime_status': dict(statuses)} if statuses else {}),
+            # 审计字段：收尾步（只读预算用尽）的指令原文。它与状态栏同一性质——
+            # 合成的 per-request 注入、不进日志，所以必须在这里留痕，否则
+            # "这一步为什么没有工具面"在唯一事实源里答不出来。
+            # （软提示不用记：它写在 tool/result 正文里，本身就在日志里。）
+            **({'convergence': {'closing': True, 'instruction': agent.progress.closing_text}}
+               if closing and agent.progress.closing_text else {}),
         })
         assembler = _BlockAssembler()
         try:
@@ -264,7 +286,11 @@ async def _run_step(agent, turn: int, step: int, assembly: dict) -> str | None:
         tool_calls = [block for block in message.content if isinstance(block, ToolCallBlock)]
         if not tool_calls:
             return 'completed'
-        await _execute_tool_calls(agent, turn, step, tool_calls)
+        if closing:
+            # 收尾步里模型仍然调工具：不执行，补 is_error 结果（wire 必须成对）
+            _reject_calls_on_closing_step(agent, turn, step, tool_calls)
+        else:
+            await _execute_tool_calls(agent, turn, step, tool_calls)
         # 工具结果已落 tool/result 日志。本 step 到此为止：回到 run_turn 的外层
         # 循环 → 下一个 step 的 claim 有机会吸收插队消息 → 再发下一次请求
         # （那时 derive_messages 自动带上工具结果，不需要"把结果发给模型"的代码）。
@@ -303,6 +329,9 @@ async def _confirm_approval(agent, name: str, arguments: dict) -> bool:
 # 两种情况分开写：还没起跑的调用"什么都没发生"，起跑后被取消的调用"可能已经
 # 产生了副作用"——模型据此判断要不要重试，合并成一句话会丢掉这个区别。
 ABORTED_BEFORE_DISPATCH = 'Error: tool call aborted before dispatch'
+# 收尾步（只读预算用尽）里模型仍发工具调用时给它的合成结果：不执行，只说明为什么
+CLOSED_STEP_TOOL_REFUSAL = ('Error: tool calls are disabled on this closing step. Answer in text: '
+                          'what you confirmed, what is still open, and the next step you suggest.')
 ABORTED_WHILE_RUNNING = 'Error: tool call aborted while running'
 
 # 并发池上限（对齐 harness agentLoop.config 的 maxParallelToolCalls）：
@@ -387,6 +416,10 @@ async def _run_group(agent, turn: int, step: int, group: list[ToolCallBlock], mo
             message = slots[committed]
             if message is None:
                 break
+            # 工具收敛（state/progress.py）：按**声明**统计"无进展只读"（`ToolSpec.cacheable`），
+            # 到阈值就把提示追加到**这条结果的正文**——它进日志（可重建、可审计），
+            # 而且就在模型刚拿到的那份输出里，比另起一条状态栏更贴近决策点。
+            message = _apply_progress_nudge(agent, group[committed], message)
             session.append('tool/result', message, surface_op='append')
             committed += 1
 
@@ -460,6 +493,31 @@ async def _run_one(agent, call: ToolCallBlock) -> Message:
     return create_tool_result_message(call.id, outcome.content, outcome.is_error)
 
 
+def _is_cacheable(agent, name: str) -> bool:
+    """这条工具算不算"只读、无产出"——按声明取，取不到就当**会变更**（fail-closed）。"""
+    try:
+        return agent.tools.get(name).cacheable
+    except KeyError:
+        return False
+
+
+def _apply_progress_nudge(agent, call: ToolCallBlock, message: Message) -> Message:
+    """记一次调用并（必要时）把收敛提示追加到这条结果正文的末尾。
+
+    追加而不是另起消息：`tool_result` 块的 `content` 就是模型读到的工具输出，
+    往里加一行既保持 wire 合法（仍是一个 tool_result），又让它随结果一起进日志。
+    """
+    verdict = agent.progress.note(_is_cacheable(agent, call.name))
+    if verdict != NUDGE or not agent.progress.nudge_text:
+        return message
+    block = message.content[0]
+    if not isinstance(block, ToolResultBlock):
+        return message   # 只对工具结果加成（其它形状不该出现在这里，但不炸）
+    return create_tool_result_message(
+        call.id, f'{block.content}\n\n{agent.progress.nudge_text.format(run=agent.progress.readonly_run)}',
+        block.is_error)
+
+
 def _aborted_message(call: ToolCallBlock, text: str) -> Message:
     """取消时给没有结果的调用补的合成结果（对齐 harness appendSkippedToolCall）。"""
     return create_tool_result_message(call.id, text, True)
@@ -492,6 +550,23 @@ def _record_aborted_calls(session, turn: int, step: int, calls: list[ToolCallBlo
             })
         session.append(
             'tool/result', _aborted_message(call, ABORTED_BEFORE_DISPATCH), surface_op='append')
+
+
+def _reject_calls_on_closing_step(agent, turn: int, step: int, calls: list[ToolCallBlock]) -> None:
+    """收尾步里模型仍然发工具调用 → **不执行**，补 is_error 结果。
+
+    为什么是"补结果"而不是"丢掉"：这次请求我们已经声明"不带工具面"，模型还是调了；
+    但 wire 上"带 tool_calls 的 assistant 消息"后面**必须**跟结果（不变式 5 的邻居），
+    否则整个会话之后都发不出去。所以按既有规则降级成结果：告诉它"这一步工具被禁用"，
+    结果本身进日志，下一回合模型能看到。
+    """
+    for call in calls:
+        agent.session.append('tool/call', {
+            'turn': turn, 'step': step,
+            'call_id': call.id, 'name': call.name, 'arguments': call.arguments,
+        })
+        agent.session.append('tool/result', create_tool_result_message(
+            call.id, CLOSED_STEP_TOOL_REFUSAL, True), surface_op='append')
 
 
 def _chunk_to_data(chunk: StreamChunk) -> dict:

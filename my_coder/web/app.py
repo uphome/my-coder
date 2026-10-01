@@ -27,6 +27,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from ..app.compaction import run_compaction, select_compact_range
+from ..app.constants import READONLY_CLOSE_AT, READONLY_NUDGE_AT
 from ..app.factory import load_env
 from ..tools.todo import fold_todos
 from .payload import context_payload, event_to_payload, first_text_of, history_payloads, queue_rows
@@ -448,6 +449,12 @@ def main() -> None:
     parser.add_argument('--model', default='deepseek-v4-flash', help='model id for the OpenAI-compatible API')
     parser.add_argument('--host', default='127.0.0.1', help='bind host (default 127.0.0.1)')
     parser.add_argument('--port', default=8000, type=int, help='bind port (default 8000)')
+    parser.add_argument('--readonly-nudge', type=int, default=READONLY_NUDGE_AT, metavar='N',
+                        help='nudge after N consecutive read-only calls (0 = off)')
+    parser.add_argument('--readonly-close', type=int, default=READONLY_CLOSE_AT, metavar='N',
+                        help='force a text-only closing step after N read-only calls (0 = off)')
+    parser.add_argument('--no-convergence', action='store_true',
+                        help='disable the read-only convergence pressure entirely')
     parser.add_argument('--compact-at', type=int, default=None, metavar='TOKENS',
                         help='auto-compact when the routed context exceeds TOKENS '
                              '(deepseek-v4 window is 1M; default off)')

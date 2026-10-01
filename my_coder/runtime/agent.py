@@ -13,6 +13,7 @@ from typing import cast
 
 from ..capability.hooks import Hooks
 from ..state.inbox import Inbox, InboxNotifications
+from ..state.progress import ProgressPolicy
 from ..state.prompt import PromptRegistry
 from ..state.registry import ToolRegistry
 from ..state.runtime_status import RuntimeStatusRegistry
@@ -64,6 +65,7 @@ class Agent:
         options: dict | None = None,
         hooks: Hooks | None = None,
         runtime_status: RuntimeStatusRegistry | None = None,
+        progress: ProgressPolicy | None = None,
     ) -> None:
         self.id = session.id
         self.session = session
@@ -74,6 +76,10 @@ class Agent:
         # 与 prompt / tools 并列的第四个"可插拔面"。默认空注册表——没有贡献者时
         # 循环一行都不会多叠，行为与加这条通道之前完全一致。
         self.runtime_status = runtime_status if runtime_status is not None else RuntimeStatusRegistry()
+        # 工具收敛的进度策略（见 state/progress.py）：数"自上次变更以来连续读了多少次"，
+        # 到阈值给收敛压力。默认值是开着的（软 8 / 硬 16）——它与"每轮叠状态"同样是
+        # 一个可插拔面，宿主可以换掉或关掉（`ProgressPolicy(enabled=False)`）。
+        self.progress = progress if progress is not None else ProgressPolicy()
         self.options = dict(options or {})
         self.hooks = hooks if hooks is not None else Hooks()
         self.phase = 'idle'
