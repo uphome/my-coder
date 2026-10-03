@@ -249,7 +249,28 @@ def read_event_at(index: EventIndex, seq: int) -> SessionEvent:
     return event_from_json(data)
 
 
-def iter_events(index: EventIndex):
-    """按索引**惰性**产出事件（要全部 payload、但可以流式处理时用它）。"""
-    for seq in index.seqs:
-        yield read_event_at(index, int(seq))
+def iter_events(index: EventIndex, skip_types: tuple[str, ...] = ()):
+    """按索引**惰性**产出事件（要全部 payload、但可以流式处理时用它）。
+
+    `skip_types` 里的类型**连 payload 都不解析**——用于"确定没人读"的整类事件：
+    流式帧（`assistant/chunk` / `assistant/reasoning/chunk`）是纯痕迹，内容已完整落在
+    `assistant/message`（正文 + 工具参数）与 `assistant/reasoning`（思维链全文）里，
+    而老日志里它们占 **98.9%** 的事件。索引的 `offsets` 是顺序的，所以这里
+    **只开一次文件、顺序向前 seek**——不重复 open（42.5 万条逐个 open 会慢一个量级）。
+    """
+    skipped = set(skip_types)
+    with index.path.open('rb') as handle:
+        for position, type_ in enumerate(index.types):
+            if type_ in skipped:
+                continue
+            offset = index.offsets[position]
+            length = index.lengths[position]
+            handle.seek(offset)
+            raw = handle.read(length)
+            if len(raw) != length:
+                raise ValueError(f'{index.path}: short read at offset {offset}')
+            data = json.loads(raw.decode('utf-8'))
+            if str(data.get('type')) != type_:
+                raise ValueError(f'{index.path}: index/file mismatch at offset {offset} '
+                                 f'(index says {type_!r}, file says {data.get("type")!r})')
+            yield event_from_json(data)

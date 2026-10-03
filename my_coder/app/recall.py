@@ -39,10 +39,15 @@ from pathlib import Path
 
 from ..state.session import Session
 from ..values.messages import Message, TextBlock, ToolCallBlock, ToolResultBlock
-from ..values.persistence import load_events
+from ..values.persistence import iter_events, scan_index
 from .workspace import normalize_recorded_workspace
 
 log = logging.getLogger('recall')
+
+# 流式帧：纯痕迹、不在检索面里（`SURFACE` 不含它们），内容是 `assistant/message`
+# （正文 + 工具调用参数）与 `assistant/reasoning`（思维链全文）的真子集。
+# 所以"读别的会话"时**整类跳过**——老日志里它们占 98.9% 的事件（#42 之后新日志不再写它们）。
+FRAME_TYPES = ('assistant/chunk', 'assistant/reasoning/chunk')
 
 SURFACE = ('user/message', 'assistant/message', 'tool/result')
 CHECKPOINT_MARK = '<compacted-summary>'
@@ -550,9 +555,17 @@ def render_turn(session: Session, turn: int, *, step: int | None = None,
 
 
 def load_session_log(path: Path, session_id: str = '') -> Session:
-    """把另一个会话的日志重放成 `Session`（召回其他会话时用）。"""
+    """把另一个会话的日志重放成 `Session`（召回其他会话时用）。
+
+    **跳过流式帧**（issue #42 + #46 ③ 的第一步）：帧是纯痕迹（不在 `SURFACE` 检索面里），
+    内容已完整落在 `assistant/message`（正文 + 工具调用参数）与 `assistant/reasoning`
+    （思维链全文）里，所以 `build_turns` / `render_turn` 的结果**逐字节不变**。老日志里帧占
+    **98.9%** 的事件——实测一个 42.5 万事件的会话，跳过帧后只重放约 **4.7k** 条；新会话（v2）
+    本就没有帧，这条路径对它是恒等的。实现走索引，连帧的 payload 都不解析。
+    """
+    index = scan_index(path)
     session = Session(session_id or path.stem)
-    for event in load_events(path):
+    for event in iter_events(index, skip_types=FRAME_TYPES):
         session.adopt(event)
     return session
 
