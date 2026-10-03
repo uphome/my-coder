@@ -127,7 +127,7 @@ Status: proposed
 - [x] 打开 42.5 万事件的会话：**常驻内存降一个数量级**——**由"按类型过滤重放"达成**（377.7 MB → **21.8 MB**，17×），不是本文原方案的索引冷区
 - [x] 同一会话的**打开耗时下降**：14.5 s → **3.0 s**（快路不解析被跳过类型的 JSON）
 - [x] 打开第二、三个大会话的单位成本下降（单位成本 17×，叠加 [#46 ①](../../implemented/feature/2026-10-03-seat-eviction.md) 的席位上限之上）
-- [x] **召回仍能读回被遮蔽区间的原文**：`tests/test_tiering_semantics.py` 三条语义基线覆盖（直播=整表重放=索引重放逐字节一致）；`eval/recall/audit_recoverability.py` 的原样回归**尚未跑**
+- [x] **召回仍能读回被遮蔽区间的原文**：`tests/test_tiering_semantics.py` 三条语义基线覆盖（直播=整表重放=索引重放逐字节一致）；**原样回归已跑**：改动前（`pre-tiering-baseline` = `418e4f5`）与改动后同一条命令、同一份日志（冻结快照，跑时已停服务消除写入竞争），**逐层票数完全一致**——L2 第一页 30% / L2 要翻页 31% / 工作区可重算 22% / 渲染器不产出 17% ⇒ 本次改动对可恢复性**零回归**；那 17% 是**渲染器自身的空洞**（与压缩无关，报告自己写明"修它只看 render_message / render_turn 的上限"），**另有待处理**
 - [x] **压缩仍能选段与生成摘要**：`tests/test_compaction.py` 全绿
 - [x] 定点读取有**机械测试**：`tests/test_event_index.py`（任意 seq 取到的原文 == 整表读的那条）
 - [x] 索引与日志不一致时 **fail-closed**：越界 seq → `KeyError`、类型不符 → `ValueError`（都有测试）
