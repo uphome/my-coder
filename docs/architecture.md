@@ -254,6 +254,15 @@ _run_one → _run_group（补记账）→ _execute_tool_calls（补记账）
 传，没人半路吞掉。"记账"在工具层有具体含义：取消时不能留下**没有结果的
 工具调用**（那会让后续请求的 wire 格式非法），见 §3.15。
 
+**失败/取消的模型尝试也留档**（`assistant/attempt`）：一次模型请求要么结算为
+`assistant/message`（成功），要么结算为 `assistant/attempt`（失败 / 重试 / 取消）。
+`assistant/message` 只记成功的那次——没有 attempt，"它试了几次、为什么失败"在唯一
+事实源里答不出来。attempt 是**痕迹事件**（不是 surface），不进 `derive_messages`：
+留档是给人看的可观测性，把失败的半截输出回灌给模型反而会污染它。字段：
+`outcome`（`retry` / `throw` / `cancelled`）+ `code` / `message`（LlmError 的两段式）
++ `partial`（已流出的半截文本，截到 `ATTEMPT_PARTIAL_MAX_CHARS`）。
+已知代价：**硬进程丢失在结算之前时没有尝试可恢复**（DSH 同样如此）——日志停在半截流上。
+
 ### 3.10 能力层：双向翻译 + StreamChunk 契约
 
 能力层（capability/llm.py）是内部词汇表和外部协议之间的**双向翻译器**：
@@ -822,7 +831,7 @@ DSH / PI / opencode / Codex 的对照见 [`prior-art.md`](prior-art.md) §11。
 | `web/` | Web 宿主（入口层）：`app.py` FastAPI 路由 + `init_web` + `main`；`state.py` `Seat`/`WebState`/`state`；`sessions.py` seat 生命周期 + 会话文件 + 审批钩子 + **每会话工作区**（解析、落 `session/workspace` 事件、从日志读回）；`titles.py` 自动会话标题；`payload.py` 纯函数投影（不依赖 FastAPI）。seat 化并发隔离（每 seat 一份 `args`，**只有 workspace 不同**）；事件透传 turn/step + turn_start/user_message（带 message_id/rpc_id）/queue_update 帧供前端投影；队列项操作 `POST /queue/update`；`POST /sessions/new` 可带 `{"workspace": "…"}` |
 | `app/compaction.py` | 上下文压缩引擎（四步事务 + checkpoint + 会话 token 累计账） |
 | `show_memory.py` | 教学脚本：重放日志展示"记忆 = 投影" |
-| `tests/` | 213 个测试，**按关注点分文件**（2026-09 从单文件 `test_demo.py` 拆出）：`test_values_session.py` 值/日志投影、`test_inbox.py` 队列、`test_prompt.py` 提示词、`test_llm.py` LLM 客户端/wire 格式、`test_loop.py` 框架循环（含运行时状态贡献者）、`test_tools.py` 工具、`test_todo.py`、`test_recovery.py` 自愈、`test_compaction.py` 压缩、`test_recall.py` 上下文召回（三层投影 + 两个工具 + 两轮审核回归）、`test_instructions.py` / `test_skills.py` 宿主直读、`test_web_search.py`、`test_web.py` Web 宿主（含每对话工作区）、`test_cli.py`；跨文件 helper 在 `conftest.py`；**`test_architecture.py`**（2 条：依赖方向 = 包结构——下层 import 上层当场红，白名单里的例外必须仍然真实存在，不许长僵尸）。3 条平台相关（Windows 建不了符号链接时 skip） |
+| `tests/` | 216 个测试，**按关注点分文件**（2026-09 从单文件 `test_demo.py` 拆出）：`test_values_session.py` 值/日志投影、`test_inbox.py` 队列、`test_prompt.py` 提示词、`test_llm.py` LLM 客户端/wire 格式、`test_loop.py` 框架循环（含运行时状态贡献者）、`test_tools.py` 工具、`test_todo.py`、`test_recovery.py` 自愈、`test_compaction.py` 压缩、`test_recall.py` 上下文召回（三层投影 + 两个工具 + 两轮审核回归）、`test_instructions.py` / `test_skills.py` 宿主直读、`test_web_search.py`、`test_web.py` Web 宿主（含每对话工作区）、`test_cli.py`；跨文件 helper 在 `conftest.py`；**`test_architecture.py`**（2 条：依赖方向 = 包结构——下层 import 上层当场红，白名单里的例外必须仍然真实存在，不许长僵尸）。3 条平台相关（Windows 建不了符号链接时 skip） |
 
 ---
 

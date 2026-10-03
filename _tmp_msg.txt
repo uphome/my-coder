@@ -1,44 +1,35 @@
-feat(session): 日志格式锚点——会话头 + 方向感知拒绝 + 未知事件守卫
+feat(loop): 失败/重试/取消的模型尝试留档——assistant/attempt
 
-P0-3。日志是唯一事实源，但格式本身没有版本：升级运行时、增删事件类型之后，
-旧读取者会静默按自己的理解重建一份**语义不同**的会话。`ignorable` 字段此前
-是死字段（定义、序列化、反序列化都在，读取端零检查）。
+P1-1。此前 `assistant/message` 只记**成功的那次**：失败、重试、取消在日志里
+什么都不留（全仓 grep assistant/attempt = 0 处），长任务事后答不出"它试了几次、
+为什么失败"——而可观测性正是长任务的刚需。
 
-**会话头**（values/messages.py 的 SessionHeader）——文件级元数据，不是事件：
+**落地**（runtime/loop.py）：
 
-    {"session": true, "format_version": 1, "id": "main", "time": …}
+- `_record_attempt()` 两处调用：`except LlmError`（outcome = 钩子给的 retry/throw，
+  带 code/message）与 `except asyncio.CancelledError`（outcome=cancelled，**记完再抛**，
+  取消单向传播不变）
+- 两者都带 `partial`：已流出的半截文本（`_BlockAssembler.partial_text()`），
+  截到 `values/limits.py` 的 `ATTEMPT_PARTIAL_MAX_CHARS = 500`——留档要能回答
+  "它到哪一步才挂的"；住值层是因为渲染方要按同一上限截，两处各写一个数必然漂
+- **不是 surface**（不进 derive_messages）：留档是给人看的可观测性，把失败的
+  半截输出回灌给模型只会污染上下文
 
-不复用事件信封：`_log[seq]` 依赖"seq == 下标"（derive_messages 直接按下标取），
-让它占 seq 0 会把整库序号平移，并坏掉所有按 seq 取事件的读取方（eval/recall 的
-审计脚本就是这么取的）。头只带 version/id/time——**工作区不进头**，它已经有
-`session/workspace` 痕迹事件这个家，再放一份就是第二个会漂的副本。
+`KNOWN_SESSION_EVENT_TYPES` 加 `assistant/attempt`（P0-3 的闭集）——闭集有双向
+断言，新事件类型漏登记会在测试里响亮地炸。
 
-写入：Session.bind_store 顺带 save_header，只在文件为空时写。
-读取（values/persistence.py）两道守卫：
+**已知代价**（写进注释与文档，不回避）：硬进程丢失（kill/断电）发生在结算之前时
+没有尝试可恢复，日志停在半截流上——DSH 同样如此。
 
-- 方向感知拒绝：日志版本 > 读取者 → SessionFormatUnsupportedError（独立异常
-  类型，与"损坏"分开：文件什么都没坏），消息含升级方向与文件路径；更旧 →
-  返回版本号；没有头的老文件按 v0 读，--resume 照常
-- 未知事件默认"必读"：KNOWN_SESSION_EVENT_TYPES 闭集（22 类），不在集合且
-  ignorable != True → UnknownSessionEventError；标了 ignorable 的跳过、其余照常重建
+测试 tests/test_loop.py 三条新用例：失败后重试留档（含 code/message/turn/step/
+provider/model，且不进模型历史）/ 取消留档且 partial 是半截文本（同时 turn/end
+仍记 aborted、状态机回 idle）/ partial 截断上限。
 
-只有结构性变化才 bump 版本；词汇增长靠 ignorable，不 bump（"能否自动升级"是
-那一步 upgrader 的属性，不该由版本号形态预先承诺）。
+文档：docs/architecture.md §3.9 补 attempt 语义与两条边界；NEXT_STEPS.md 加一节。
 
-读取方同步（头改变了"第一行是事件"的隐含契约）：web/sessions.py 会话列表、
-app/recall.py 的 L0 行内快扫、eval/recall/build_dataset.py 与 export_sessions.py
-的逐行读——顺带修掉三处"事件数比真实多 1"。
+顺带清理：上一个提交（2604eee）误把临时提交信息文件 `_tmp_msg.txt` 提交了进去，
+这里删掉——它本来就不该入库。
 
-测试 tests/test_session_format.py 七条契约（逐条对应计划 §P0-3 验收表）：
-新建会话有头 / 无头老文件按 v0 / 更新的日志被拒 / 未知且不可忽略 → 拒绝 /
-未知但 ignorable → 跳过其余重建 / **有头时 derive_messages 与加头之前逐字节一致** /
-闭集双向检查（不许漏登记，也不许留僵尸）。
-
-文档：docs/architecture.md §3.11 补格式锚点与两道守卫；AGENTS.md 的严格校验
-一条补"读日志同理"；设计记录 docs/notes/implemented/architecture/
-2026-10-01-session-format-version.md（含被否决的六种做法）。
-
-验证：ruff 通过、mypy 通过（45 files）、pytest 210 passed / 3 skipped；
-真实链路自检——CLI 跑一次后日志首行是 {"session": true, "format_version": 1, …}。
+验证：ruff 通过、mypy 通过（45 files）、pytest 216 passed / 3 skipped。
 
 由 MyCoder 编写

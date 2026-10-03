@@ -262,6 +262,7 @@ LEGACY_SESSION_FORMAT_VERSION = 0
 # 判据：事件类型是否出现在 `my_coder/` 的 `session.append(...)` 里。
 KNOWN_SESSION_EVENT_TYPES = frozenset({
     'agent/inbox/spliced',
+    'assistant/attempt',
     'assistant/chunk',
     'assistant/message',
     'assistant/reasoning',

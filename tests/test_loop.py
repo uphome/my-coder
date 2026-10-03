@@ -127,6 +127,85 @@ async def test_request_error_hook_retries():
 
 
 @pytest.mark.asyncio
+async def test_a_failed_and_retried_request_leaves_an_attempt():
+    """失败的那次请求留档：`assistant/attempt`（重试成功也留着）。
+
+    `assistant/message` 只记成功的那次——没有它，"它试了几次、为什么失败"
+    在唯一事实源里答不出来。
+    """
+    hooks = Hooks()
+
+    async def on_error(ctx: RequestErrorContext) -> str:  # noqa: ARG001
+        return 'retry'
+
+    hooks.request_error = on_error
+    agent, session = make_agent(
+        [
+            {'error': {'code': 'RATE_LIMIT', 'message': '429 too many'}},
+            {'text': 'ok', 'finish_reason': 'stop'},
+        ],
+        hooks=hooks,
+    )
+    agent.followup('go')
+    await agent.when_idle()
+
+    attempts = [e for e in session.events if e.type == 'assistant/attempt']
+    assert len(attempts) == 1
+    data = attempts[0].data
+    assert data['outcome'] == 'retry'
+    assert data['code'] == 'RATE_LIMIT' and '429' in data['message']
+    assert data['turn'] == 1 and data['step'] == 1
+    assert data['provider'] == 'fake' and data['model'] == 'fake-model'
+    # 尝试不进模型历史（不是 surface）：derive_messages 只认三类 surface 事件
+    assert all('429' not in (b.text if b.type == 'text' else '')
+               for m in session.derive_messages() for b in m.content)
+    assert not any(e.type == 'assistant/attempt' and e.surface_op for e in session.events)
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_request_leaves_an_attempt_with_the_partial_text():
+    """取消留档：半截流记进 `partial`（截到上限），且取消照常向上传播。"""
+    session = Session(id='s')
+
+    class SlowLlm(FakeLlm):
+        async def stream(self, request, signal=None):  # noqa: ARG002
+            yield StreamChunk(text='已经流出来的一半')
+            await asyncio.sleep(5)
+            yield StreamChunk(text='永远到不了', finish_reason='stop')
+
+    agent = Agent(
+        session=session, llm=SlowLlm([{}]), prompt=PromptRegistry(), tools=ToolRegistry(),
+        options={'provider': 'fake', 'model': 'fake-model'},
+    )
+    agent.followup('go')
+    await asyncio.sleep(0.05)
+    agent.cancel()
+    await agent.when_idle()
+
+    attempts = [e for e in session.events if e.type == 'assistant/attempt']
+    assert len(attempts) == 1
+    assert attempts[0].data['outcome'] == 'cancelled'
+    assert attempts[0].data['partial'] == '已经流出来的一半'
+    # 取消仍然单向传播：turn/end 记 aborted，状态机回 idle
+    assert session.events[-1].type == 'turn/end'
+    assert session.events[-1].data['reason'] == 'aborted'
+    assert agent.status == 'idle'
+
+
+def test_attempt_partial_is_capped():
+    """半截流留档有上限：记全文只会把日志撑大，判断"挂在哪一步"不需要全文。"""
+    from my_coder.runtime.loop import _BlockAssembler
+
+    assembler = _BlockAssembler()
+    assembler.push(StreamChunk(text='x' * 900))
+    partial = assembler.partial_text(limit=100)
+    assert partial.startswith('x' * 100)
+    assert '(+800 chars)' in partial
+    # 没超上限就是原样（不加噪音后缀）
+    assert assembler.partial_text(limit=1000) == 'x' * 900
+
+
+@pytest.mark.asyncio
 async def test_cancel_aborts_turn():
     session = Session(id='s')
 

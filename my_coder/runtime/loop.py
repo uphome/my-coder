@@ -15,6 +15,7 @@ import logging
 from ..capability.hooks import PreStepContext, RequestContext, RequestErrorContext
 from ..capability.llm import LlmError, LlmRequest, StreamChunk
 from ..state.progress import NUDGE
+from ..values.limits import ATTEMPT_PARTIAL_MAX_CHARS
 from ..values.messages import (
     Message,
     TextBlock,
@@ -74,6 +75,16 @@ class _BlockAssembler:
             call = self._tool_calls[index]
             blocks.append(ToolCallBlock(id=call['id'], name=call['name'], arguments=call['arguments']))
         return blocks
+
+    def partial_text(self, limit: int = ATTEMPT_PARTIAL_MAX_CHARS) -> str:
+        """已经流出来的半截文本（**给失败/取消的尝试留档用**）。
+
+        为什么留它：请求失败或被杀时，日志原先只剩半截 stream，事后答不出
+        "它到哪一步才挂的"。截到 `limit` 就够判断了，记全文只会把日志撑大。
+        """
+        if len(self.text) <= limit:
+            return self.text
+        return self.text[:limit] + f'…(+{len(self.text) - limit} chars)'
 
 
 async def run_turn(agent) -> bool:
@@ -252,12 +263,22 @@ async def _run_step(agent, turn: int, step: int, assembly: dict,
                         'turn': turn, 'step': step, 'reasoning': chunk.reasoning,
                     })
                 assembler.push(chunk)
+        except asyncio.CancelledError:
+            # 取消是一类**尝试的结局**（不是成功）：留档后原样放行（不变式⑤）。
+            # 不记的话日志里只剩半截 stream，事后答不出"这次请求怎么了"。
+            _record_attempt(session, turn, step, request, 'cancelled',
+                            partial=assembler.partial_text())
+            raise
         except LlmError as failure:
             action = 'throw'
             if agent.hooks.request_error is not None:
                 action = await agent.hooks.request_error(RequestErrorContext(
                     turn=turn, step=step, code=failure.code, message=failure.message,
                 ))
+            # 失败/重试都留档：`assistant/message` 只记成功的那次，失败的那次
+            # 此前在日志里**什么都不留**——长任务事后答不出"它试了几次、为什么失败"。
+            _record_attempt(session, turn, step, request, action, error=failure,
+                            partial=assembler.partial_text())
             if action == 'retry':
                 continue
             raise
@@ -295,6 +316,37 @@ async def _run_step(agent, turn: int, step: int, assembly: dict,
         # 循环 → 下一个 step 的 claim 有机会吸收插队消息 → 再发下一次请求
         # （那时 derive_messages 自动带上工具结果，不需要"把结果发给模型"的代码）。
         return None
+
+
+def _record_attempt(session, turn: int, step: int, request, outcome: str,
+                    error: LlmError | None = None, partial: str = '') -> None:
+    """给一次**没能成功结算**的模型请求留档（`assistant/attempt`）。
+
+    为什么需要：`assistant/message` 只记"成功的那次"。失败、重试、取消此前在
+    日志里**什么都不留**——长任务事后答不出"它试了几次、为什么失败"。
+    对齐 DSH 的 `assistant/attempt`：每次尝试要么结算为 `assistant/message`
+    （成功），要么结算为 `assistant/attempt`（失败/重试/取消/流错误）。
+
+    **它不进模型历史**（不是 surface 事件，`derive_messages` 只认三类 surface）：
+    留档是给人看的可观测性，不是给模型的上下文——失败的半截输出回灌给模型
+    反而会污染它。
+
+    已知代价：硬进程丢失（kill/断电）发生在结算之前时，**没有尝试可恢复**
+    （DSH 同样如此）——那种情况下日志停在半截 stream 上。
+    """
+    payload = {
+        'turn': turn,
+        'step': step,
+        'outcome': outcome,          # cancelled / retry / throw
+        'provider': getattr(request, 'provider', ''),
+        'model': getattr(request, 'model', ''),
+    }
+    if error is not None:
+        payload['code'] = error.code
+        payload['message'] = error.message
+    if partial:
+        payload['partial'] = partial
+    session.append('assistant/attempt', payload)
 
 
 async def _resolve_request(agent, turn: int, step: int) -> dict:

@@ -11,6 +11,13 @@
 
 `TOOL_RESULT_MAX_CHARS`：registry 层统一的结果上限——任何工具返回内容超过它就截断。
 这是最后的安全网；具体工具（read_file / bash 等）各自有更早、更精确的预算。
+
+`ATTEMPT_PARTIAL_MAX_CHARS`：失败/取消的模型尝试留档时，**半截流**最多记多少字符。
+它住在这里而不是散在 `runtime/loop.py` 里，是因为"留档给人看"的渲染方（如将来
+召回层展示失败尝试）要按同一个上限截——两处各写一个数字必然会漂。
 """
 
 TOOL_RESULT_MAX_CHARS = 20000
+# 失败尝试的 partial（已经流出来的半截文本）上限：留档是给人/模型判断"它到哪一步
+# 才挂的"，记全文没有价值，反而把日志撑大。
+ATTEMPT_PARTIAL_MAX_CHARS = 500
