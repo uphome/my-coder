@@ -50,16 +50,26 @@ class Session:
         self._surface: list[int] = []
         self._listeners: list[Callable[[SessionEvent], None]] = []
         self._stream_listeners: list[Callable[[StreamFrame], None]] = []
+        # `events` 的按变更缓存（issue #46 ②）：`None` = 脏，下次访问重建一次。
+        # 失效点只有两个（`append` / `adopt`）——`_log` 没有别的写入者。
+        self._events_cache: tuple[SessionEvent, ...] | None = None
 
     @property
     def events(self) -> tuple[SessionEvent, ...]:
-        """完整事件序列（不可变视图）。
+        """完整事件序列（不可变视图）。**按变更缓存**：O(n) 只在变更后付一次。
 
-        **注意它是 O(n) 的**（每次访问拷贝整个元组）：只要长度或增量，用
-        `event_count` / `events_since`——每个请求都要跑一遍的投影（如运行时会话目录）
-        在这里付过一次 20 万事件的拷贝（实测 ~20 ms/请求）。
+        为什么必须缓存（实测，2026-10-03，42.5 万事件的会话）：整表拷贝单次 **12.1 ms**
+        （对比 `events_since` 的 0.031 ms），而**每个请求**至少读它 5 次
+        （inbox 判待处理、todo 状态栏、召回 L0 目录、循环、web 历史）——每次请求几十毫秒
+        与反复重建 40 万元组（峰值内存的主因）。
+
+        缓存是安全的：返回的是**不可变元组**，`_log` 只在 `append` / `adopt` 里增长，
+        两处都会把缓存置脏。所以"同一份日志 → 同一个元组对象"，调用方可以放心长期持有。
+        只要长度或增量，仍优先用 `event_count` / `events_since`。
         """
-        return tuple(self._log)
+        if self._events_cache is None:
+            self._events_cache = tuple(self._log)
+        return self._events_cache
 
     @property
     def event_count(self) -> int:
@@ -137,6 +147,7 @@ class Session:
             raise ValueError(f'shadowed is only valid with surface_op="replace" (got {surface_op!r})')
         event = new_event(len(self._log), type_, data, surface_op, shadowed, ignorable)
         self._log.append(event)
+        self._events_cache = None      # 缓存置脏（下一个读的人重建一次）
         self._apply_surface(event)
         for listener in list(self._listeners):
             listener(event)
@@ -145,6 +156,7 @@ class Session:
     def adopt(self, event: SessionEvent) -> None:
         """从磁盘重放：只重建投影，不触发监听、不重跑任何逻辑。"""
         self._log.append(event)
+        self._events_cache = None      # 重放同样要让缓存失效
         self._apply_surface(event)
 
     def _apply_surface(self, event: SessionEvent) -> None:

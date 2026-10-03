@@ -11,6 +11,9 @@
 from __future__ import annotations
 
 import json
+from array import array
+from bisect import bisect_left
+from dataclasses import dataclass
 from pathlib import Path
 
 from .messages import (
@@ -145,3 +148,96 @@ def load_events(path: Path, known_types: frozenset[str] | None = KNOWN_SESSION_E
             raise UnknownSessionEventError(path, str(data.get('type')), int(data.get('seq', -1)))
         events.append(event_from_json(data))
     return events
+
+
+@dataclass(frozen=True)
+class EventIndex:
+    """事件索引（issue #46 ③ 阶段 1）：只记"每条事件在哪、是什么"，**不建 payload**。
+
+    为什么需要：整份重放要造 42.5 万个 `SessionEvent`（带 payload），实测常驻 ≈ 文本量的
+    **3.4×**（217 MB / 峰值 590 MB）。而多数消费者只要"类型 + 位置"：判回合边界、数消息、
+    按 seq 定点取一条原文。索引让"打开一个大会话"从"整份对象图"变成"几条紧凑数组"。
+
+    **刻意用 `array` 而不是 `tuple`**：这是**视图**不是值对象（不放进消息/事件），
+    42.5 万条下 tuple 光指针与整数对象就要 ~60 MB，array 只要 ~7 MB——紧凑正是它的全部意义。
+    不可变语义由"日志变了就重建，绝不原地改"保证。
+
+    `types` 用 tuple 存**驻留过的短字符串**（几十种类型共享同一批对象），所以它只花指针钱。
+    """
+
+    path: Path
+    seqs: array            # 每条事件在日志里记的 seq（`ignorable` 被跳过的那些不占位）
+    types: tuple[str, ...]
+    offsets: array         # 该行在文件里的**字节**起点（二进制逐行统计，不受编码影响）
+    lengths: array         # 该行的字节长度
+
+    def __len__(self) -> int:
+        return len(self.types)
+
+
+def scan_index(path: Path, known_types: frozenset[str] | None = KNOWN_SESSION_EVENT_TYPES,
+               supported: int = SESSION_FORMAT_VERSION) -> EventIndex:
+    """扫一遍日志，只建索引（不解析成 `SessionEvent`）。
+
+    与 `load_events` **同一套守卫**（方向感知拒绝 + 未知事件守卫），差别只有一处：
+    它把每条事件的 payload 丢掉，只留 `(seq, type, offset, length)`。
+    未知且不可忽略的事件仍然当场抛错——**不因为"反正不建对象"就放松守卫**。
+    """
+    seqs = array('q')
+    offsets = array('q')
+    lengths = array('i')
+    types: list[str] = []
+    if not path.exists():
+        return EventIndex(path=path, seqs=seqs, types=(), offsets=offsets, lengths=lengths)
+    check_compatible(path, supported=supported)
+    with path.open('rb') as handle:
+        offset = 0
+        for raw in handle:
+            length = len(raw)
+            line = raw.decode('utf-8').strip()
+            if line:
+                data = json.loads(line)
+                if is_session_header_line(data):
+                    offset += length
+                    continue
+                type_ = data.get('type')
+                if known_types is not None and type_ not in known_types:
+                    if data.get('ignorable') is True:
+                        offset += length
+                        continue
+                    raise UnknownSessionEventError(path, str(type_), int(data.get('seq', -1)))
+                seqs.append(int(data.get('seq', -1)))
+                types.append(str(type_))
+                offsets.append(offset)
+                lengths.append(length)
+            offset += length
+    return EventIndex(path=path, seqs=seqs, types=tuple(types), offsets=offsets, lengths=lengths)
+
+
+def read_event_at(index: EventIndex, seq: int) -> SessionEvent:
+    """按 seq 从索引**定点**读回一条事件（只解析那一行）。
+
+    越界 / 索引与文件不一致 → **抛错**（fail-closed）。绝不静默返回空：
+    那会把"读不到"伪装成"不存在"，而召回与压缩都靠"能读到任意 seq 的原文"成立。
+    """
+    position = bisect_left(index.seqs, seq)
+    if position >= len(index.seqs) or index.seqs[position] != seq:
+        raise KeyError(f'seq {seq} not in index of {index.path}')
+    offset = index.offsets[position]
+    length = index.lengths[position]
+    with index.path.open('rb') as handle:
+        handle.seek(offset)
+        raw = handle.read(length)
+    if len(raw) != length:
+        raise ValueError(f'{index.path}: short read at offset {offset} (want {length}, got {len(raw)})')
+    data = json.loads(raw.decode('utf-8'))
+    if str(data.get('type')) != index.types[position]:
+        raise ValueError(f'{index.path}: index/file mismatch at seq {seq} '
+                         f'(index says {index.types[position]!r}, file says {data.get("type")!r})')
+    return event_from_json(data)
+
+
+def iter_events(index: EventIndex):
+    """按索引**惰性**产出事件（要全部 payload、但可以流式处理时用它）。"""
+    for seq in index.seqs:
+        yield read_event_at(index, int(seq))

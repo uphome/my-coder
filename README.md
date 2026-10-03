@@ -20,7 +20,7 @@
 ## 这是什么
 
 把 [deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)（`dsh`）的核心架构，用
-**约 8000 行 Python + 约 2400 行零构建前端**重写一遍（另有约 6400 行测试）——不是又一个 agent 应用，
+**约 8000 行 Python + 约 2400 行零构建前端**重写一遍（另有约 7100 行测试）——不是又一个 agent 应用，
 而是**把 agent 框架本身讲清楚**：每一处设计都对着它的母本，每一条规则都有测试盯着。
 
 它不是玩具：模型真能在这个仓库里读文件、搜代码、改代码、跑 `pytest`、联网查资料，
@@ -199,7 +199,7 @@ Web 端默认只绑 `127.0.0.1` 且不校验来源——**不要**把它暴露�
 ```sh
 python -m ruff check my_coder tests   # 风格
 python -m mypy my_coder               # 类型
-python -m pytest                      # 228 个测试（3 条平台相关会 skip）
+python -m pytest                      # 237 个测试（3 条平台相关会 skip）
 ```
 
 三绿才提交。测试按关注点分 15 个文件 + `conftest.py` + `test_architecture.py`（依赖方向 = 包结构）。
