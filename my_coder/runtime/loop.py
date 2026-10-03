@@ -125,9 +125,19 @@ async def run_turn(agent) -> bool:
         closing_step = False
         while True:
             step += 1
-            claimed = agent.inbox.claim(target, turn)
-            messages = await _resolve_pre_step(agent, turn, step, claimed)
+            # **取消点全部提到动队列之前**：pre_step 钩子与 request 钩子都可能 await，
+            # 而"认领"会把消息从队列摘掉。旧顺序（claim → await pre_step）留下一个
+            # 致命窗口：取消打在那儿，消息三处都不在（队列没了、surface 没有、日志也
+            # 没有 canceled 标记）——用户原话静默消失。现在两个 await 都在 claim 前，
+            # 取消时队列**一个字没动**，clear() 能正常把它标成 canceled。
+            pending = agent.inbox.peek(target)
+            messages = await _resolve_pre_step(agent, turn, step, pending)
             if messages is None:
+                # 钩子拒绝：**也要把批次消费掉**。不消费的话消息还躺在队列里，
+                # run_turn 返回 has_pending=True → 被动状态机立刻拿同一条消息再开
+                # 一轮 → 无限空转（实测：测试 40s 不返回）。拒绝的语义是"这条不发给
+                # 模型"，不是"留着下次再问一次"；消费动作无 await，仍然原子。
+                agent.inbox.claim(target, turn)
                 end_reason = 'blocked'
                 break
             if end_reason is not None and not messages:
@@ -135,15 +145,22 @@ async def run_turn(agent) -> bool:
             if step == 1 and not messages:
                 end_reason = 'completed'   # 首步没货：不花模型调用
                 break
+            config = await _resolve_request(agent, turn, step)   # 取消点（仍在 claim 前）
             # 上一步的只读调查触到上限 → 这一步是**收尾步**：不带工具面 + 一条收尾指令。
             # 它仍是一次正常的模型请求（模型有完整的文字表达能力），所以不会产生
             # "带了 tool_calls 却没有结果"的非法 wire。
             closing_step = agent.progress.closing
+            # ---- 下面到 user/message 落盘之间**没有 await**：认领与落盘一次性提交 ----
+            # 注意 pre_step 允许"改写"：它可能返回一条全新 id 的消息（原来那条
+            # 随之被 claim 摘掉）。这是钩子契约的一部分，不是异常——所以这里只做
+            # 提交，不校验"返回的是不是刚认领的那几条"。
+            agent.inbox.claim(target, turn)
             session.append('step/start', {'turn': turn, 'step': step})
             for message in messages:
                 # 认领到的消息在此刻浮上水面：从队列载荷变成模型记忆
                 session.append('user/message', message, surface_op='append')
-            outcome = await _run_step(agent, turn, step, assembly, closing=closing_step)
+            outcome = await _run_step(agent, turn, step, assembly, config=config,
+                                      closing=closing_step)
             session.append('step/end', {'turn': turn, 'step': step})
             if end_reason != 'max-tokens':     # max-tokens 粘性：不降级
                 end_reason = outcome
@@ -178,7 +195,7 @@ async def _resolve_pre_step(agent, turn: int, step: int, claimed: list[Message])
 
 
 async def _run_step(agent, turn: int, step: int, assembly: dict,
-                    closing: bool = False) -> str | None:
+                    config: dict | None = None, closing: bool = False) -> str | None:
     """一个 step：**只发一次**模型请求（+ 它发起的工具调用）。返回结束原因。
 
     返回 None = 本步发起了工具调用、回合还没收尾：工具结果已落日志，
@@ -191,6 +208,10 @@ async def _run_step(agent, turn: int, step: int, assembly: dict,
 
     内层 while 只服务一件事：request_error 钩子返回 'retry' 时重发本次请求。
 
+    `config` 由 `run_turn` 在**认领之前**解析好传进来（这样才能把 request 与
+    pre_step 两个 await 都挪到动队列之前，见 run_turn 的注释）；`None`（或重试）
+    时本函数自己解析——重试要按当时的钩子重新取路由，不能用第一次的快照。
+
     循环体内的关键机制：
     - 组请求：system 用本回合的提示词快照，messages 是此刻日志折叠出的记忆，
       tools 是全部工具 schema——三者都从投影来，不存第二份状态
@@ -200,8 +221,11 @@ async def _run_step(agent, turn: int, step: int, assembly: dict,
     - 工具结果只落日志；下一个 step 组请求时 derive_messages 自动带上
     """
     session = agent.session
+    # 第一次用调用方（run_turn）解析好的 config；之后（重试）自己重新解析——
+    # 重试要按当时的钩子重新取路由，不能用失败前那份快照。
+    attempt = config if config is not None else await _resolve_request(agent, turn, step)
     while True:
-        config = await _resolve_request(agent, turn, step)
+        config = attempt
         header = session.request_header()
         # 三级 fallback：request 钩子 > agent.options > 上次 request/header（resume 恢复）
         provider = config.get('provider') or agent.options.get('provider') or (header or {}).get('provider', '')
@@ -280,6 +304,9 @@ async def _run_step(agent, turn: int, step: int, assembly: dict,
             _record_attempt(session, turn, step, request, action, error=failure,
                             partial=assembler.partial_text())
             if action == 'retry':
+                # 重发要重新解析路由（钩子可能已经改了 model/max_tokens），
+                # 不能拿失败前那份快照再发一次
+                attempt = await _resolve_request(agent, turn, step)
                 continue
             raise
 

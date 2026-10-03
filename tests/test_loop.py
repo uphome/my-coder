@@ -192,8 +192,77 @@ async def test_a_cancelled_request_leaves_an_attempt_with_the_partial_text():
     assert agent.status == 'idle'
 
 
+async def test_cancel_during_pre_step_leaves_the_message_in_the_queue():
+    """取消打在 pre_step 里：消息**留在队列**，不静默消失（P1-2 取消原子性）。
+
+    旧顺序（claim → await pre_step）：认领先把消息从队列摘掉，取消点就夹在
+    "摘除"与"落 user/message"之间——取消后那条消息**三处都不在**（队列没了、
+    surface 没有、日志里也没有 canceled 标记），用户原话静默消失。
+    现在两个 await 都在 claim 之前，所以取消时队列一个字没动，随后 clear()
+    按正常路径把它标成 canceled（有记录、可审计）。
+    """
+    session = Session(id='s')
+    entered = asyncio.Event()
+
+    hooks = Hooks()
+
+    async def slow_pre_step(ctx, default):  # noqa: ARG001
+        entered.set()
+        await asyncio.sleep(5)          # 取消就打在这个窗口里
+        return await default()
+
+    hooks.pre_step = slow_pre_step
+    agent = Agent(
+        session=session, llm=FakeLlm([{'text': 'never', 'finish_reason': 'stop'}]),
+        prompt=PromptRegistry(), tools=ToolRegistry(),
+        options={'provider': 'fake', 'model': 'fake-model'}, hooks=hooks,
+    )
+    agent.followup('这条消息不能丢')
+    driver = asyncio.create_task(agent.when_idle())
+    await entered.wait()
+    agent.cancel()                      # cancel() 默认 clear()：清队并落 canceled
+    await driver
+
+    # 消息没有静默消失：日志里有一条 outcome='canceled' 的 spliced 记录
+    canceled = [e for e in session.events
+                if e.type == 'agent/inbox/spliced' and e.data.get('outcome') == 'canceled']
+    assert canceled, '取消后必须留下"这条消息被取消"的记录'
+    assert canceled[-1].data['removed_count'] == 1
+    # 它没有进模型上下文（没被落成 user/message）
+    assert [m for m in session.derive_messages() if m.role == 'user'] == []
+    assert session.events[-1].data['reason'] == 'aborted'
+
+
+@pytest.mark.asyncio
+async def test_cancel_after_claim_still_lands_the_user_message():
+    """取消打在本步提交**之后**：那不是半提交——消息已进日志，是被中断的一步。"""
+    session = Session(id='s')
+    streamed = asyncio.Event()
+
+    class SlowLlm(FakeLlm):
+        async def stream(self, request, signal=None):  # noqa: ARG002
+            streamed.set()
+            yield StreamChunk(text='开始回答')
+            await asyncio.sleep(5)
+            yield StreamChunk(text='不会到', finish_reason='stop')
+
+    agent = Agent(
+        session=session, llm=SlowLlm([{}]), prompt=PromptRegistry(), tools=ToolRegistry(),
+        options={'provider': 'fake', 'model': 'fake-model'},
+    )
+    agent.followup('这条消息应当进日志')
+    driver = asyncio.create_task(agent.when_idle())
+    await streamed.wait()
+    agent.cancel()
+    await driver
+
+    users = [m for m in session.derive_messages() if m.role == 'user']
+    assert len(users) == 1, '认领与落盘是原子的：提交后取消不该丢消息'
+    assert users[0].content[0].text == '这条消息应当进日志'
+    assert session.events[-1].data['reason'] == 'aborted'
+
+
 def test_attempt_partial_is_capped():
-    """半截流留档有上限：记全文只会把日志撑大，判断"挂在哪一步"不需要全文。"""
     from my_coder.runtime.loop import _BlockAssembler
 
     assembler = _BlockAssembler()

@@ -25,7 +25,7 @@
 | **web_search（联网搜索）** | ✅ 已完成（DeepSeek 官方原生搜索，见下节） |
 | 阶段一收尾（更新 README / ARCHITECTURE 定稿） | ✅ 已完成（含 2026-09 架构重构与本文档同步） |
 
-> 当前全量测试：216 passed / 3 skipped——数字由 `tests/test_doc_numbers.py` **机械保证**
+> 当前全量测试：218 个（3 条平台相关 skip）——数字由 `tests/test_doc_numbers.py` **机械保证**
 > （文档里任何测试数/行数与代码不符，那个门禁就会红；不再靠"记得同步"）。
 
 ## read_file 升级（已完成）
@@ -862,7 +862,7 @@ python eval/recall/export_sessions.py                       # 证据导出成可
 
 **验收**：`tests/test_loop.py` 三条新用例——失败后重试留档（含 code/message/turn/step/
 provider/model）+ 不进模型历史 / 取消留档且 `partial` 是半截文本（同时 `turn/end` 仍记
-`aborted`）/ `partial` 截断上限。全量 216 passed / 3 skipped。
+`aborted`）/ `partial` 截断上限。全量 218 个测试（3 条 skip）。
 
 ## 工具收敛（issue #2，2026-09-30 落地）
 

@@ -161,6 +161,23 @@ class Inbox:
         self._splice('next-step', len(self._state['next-step']), 0, [message])
         return True
 
+    def peek(self, target: str) -> list[Message]:
+        """**只读**地看一眼这一步会认领到哪些消息（不改队列、不记账）。
+
+        存在的理由与取消原子性有关：`claim` 会立刻把消息从队列摘掉，而认领
+        之后到落 `user/message` 之间还有 `await`（pre_step 钩子）。取消点一旦
+        落在那段里，消息就**三处都不在**（队列没了、surface 没有、日志也没有
+        `canceled` 标记）——用户原话静默消失。所以循环层改成：先 `peek` 拿候选，
+        跑完钩子，再一次性 `claim` + 落盘（中间不再有 await）。
+
+        批次规则必须与 `claim` 逐字一致（先整个 next-step、再从 next-turn 取
+        一条），否则"钩子看到的"与"真正认领的"会漂。
+        """
+        pending = list(self._state['next-step'])
+        if target == 'next-turn' and self._state['next-turn']:
+            pending.append(self._state['next-turn'][0])
+        return pending
+
     def claim(self, target: str, turn: int) -> list[Message]:
         """认领一步的完整批次：先取空整个 next-step，再从 next-turn 取一条。
 
