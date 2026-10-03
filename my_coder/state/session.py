@@ -15,12 +15,14 @@ from collections.abc import Callable
 from typing import cast
 
 from ..values.messages import (
+    TRACE_FRAME_TYPES,
     Message,
     SessionEvent,
     StreamFrame,
     new_event,
     new_session_header,
 )
+from ..values.persistence import iter_events, scan_index
 
 # 唯一能"浮上水面变成模型消息"的三类事件。
 # surface_op 校验：这三类必须带 surface_op（'append' 或 'replace'），
@@ -53,6 +55,41 @@ class Session:
         # `events` 的按变更缓存（issue #46 ②）：`None` = 脏，下次访问重建一次。
         # 失效点只有两个（`append` / `adopt`）——`_log` 没有别的写入者。
         self._events_cache: tuple[SessionEvent, ...] | None = None
+        # seq → 事件（issue #46 ③）：**只在日志稀疏时才需要**。
+        # "跳帧重放"打开的会话里 seq 不连续（保留 3 与 10644、跳掉中间），`_log[seq]` 会越界。
+        # 但**稠密会话绝不能为此再存一份映射**（那等于每个事件两份内存，与省内存的初衷相反），
+        # 所以 `by_seq` 先走"下标即 seq"的快路，只有不成立时才查这张表；表也只在真稀疏时才填。
+        self._sparse: dict[int, SessionEvent] = {}
+
+    def by_seq(self, seq: int) -> SessionEvent:
+        """按 seq 取事件（**稀疏日志也成立**；稠密时零额外开销）。
+
+        为什么不是无条件 `self._log[seq]`：`_log` 的下标只在"重放一条不漏"时等于 seq；
+        `Session.from_path(skip_types=…)` 刻意跳帧之后这个前提就不成立了。
+        """
+        if seq < len(self._log) and self._log[seq].seq == seq:
+            return self._log[seq]
+        return self._sparse[seq]
+
+    @classmethod
+    def from_path(cls, path, session_id: str = '',
+                  skip_types: tuple[str, ...] = TRACE_FRAME_TYPES) -> Session:
+        """从日志**重放**出一个会话——所有"打开/读取一个会话"的入口都该走这里（issue #46 ③）。
+
+        与 `load_events` + `adopt` 的区别只有一个：**整类跳过 `skip_types`**（默认流式帧）。
+        它们连 payload 都不解析，所以老日志（帧占 98.9%）的重放代价降两个数量级；
+        新会话（v2）本就没有帧，这条路径对它是恒等的。
+
+        **为什么跳过是安全的**：帧是纯痕迹、不在检索面里（`SURFACE` 不含），内容也不是独有的
+        （`assistant/message` 有正文与工具参数全文、`assistant/reasoning` 有思维链全文，
+        #42 有逐字节等价的机械证明）。所以 `derive_messages` / 召回 / 历史渲染的结果**不变**。
+        需要看帧的场景（帧时代的实时回放）本来也只在**当时的进程内**发生，不靠重放。
+        """
+        index = scan_index(path, skip_types=skip_types)
+        session = cls(session_id or getattr(path, 'stem', ''))
+        for event in iter_events(index, skip_types=skip_types):
+            session.adopt(event)
+        return session
 
     @property
     def events(self) -> tuple[SessionEvent, ...]:
@@ -147,6 +184,8 @@ class Session:
             raise ValueError(f'shadowed is only valid with surface_op="replace" (got {surface_op!r})')
         event = new_event(len(self._log), type_, data, surface_op, shadowed, ignorable)
         self._log.append(event)
+        if event.seq != len(self._log) - 1:   # 只有稀疏（跳帧重放）才需要映射
+            self._sparse[event.seq] = event
         self._events_cache = None      # 缓存置脏（下一个读的人重建一次）
         self._apply_surface(event)
         for listener in list(self._listeners):
@@ -156,6 +195,8 @@ class Session:
     def adopt(self, event: SessionEvent) -> None:
         """从磁盘重放：只重建投影，不触发监听、不重跑任何逻辑。"""
         self._log.append(event)
+        if event.seq != len(self._log) - 1:   # 只有稀疏（跳帧重放）才需要映射
+            self._sparse[event.seq] = event
         self._events_cache = None      # 重放同样要让缓存失效
         self._apply_surface(event)
 
@@ -193,7 +234,7 @@ class Session:
         """
         out: list[Message] = []
         for seq in self._surface:
-            event = self._log[seq]
+            event = self.by_seq(seq)
             if event.type == 'user/message':
                 out.append(cast(Message, event.data))
             elif event.type == 'assistant/message':

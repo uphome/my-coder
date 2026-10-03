@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import re
 from array import array
 from bisect import bisect_left
 from dataclasses import dataclass
@@ -170,30 +171,66 @@ class EventIndex:
     types: tuple[str, ...]
     offsets: array         # 该行在文件里的**字节**起点（二进制逐行统计，不受编码影响）
     lengths: array         # 该行的字节长度
+    # `surface_op` / `shadowed` 是**顶层字段**（不在 payload 里），所以索引足以重建
+    # **surface**（= 模型可见顺序），不必为每条事件造 payload——这正是冷热分层能省内存的机制：
+    # 投影（surface）与"哪些区间被压缩遮蔽"都能只靠索引算出来，payload 只按需取。
+    surface_ops: tuple[str | None, ...] = ()
+    shadowed: tuple[tuple[int, int] | None, ...] = ()
 
     def __len__(self) -> int:
         return len(self.types)
 
 
+# 行首**信封**的类型字段：只为"这条要不要跳过"做一次**廉价**判断（不解析 JSON）。
+#
+# **必须锚定**：写入端 `event_to_json` 的字段次序固定为 `seq → time → type → data`，
+# 而 `data`（payload）就在同一行里——若只搜 `"type": "…"`，payload 里出现同样文本就会
+# 被误判（比如某条 `tool/result` 的正文里贴了会话日志片段），于是一条**真事件**被当成
+# "要跳过的帧"整行丢掉 ⇒ **静默少读**。锚定 `^{"seq":…,"time":…,"type":…` 之后，
+# 匹配只可能落在信封上，payload 怎么长都影响不到它。
+# 超长字段（>240 字节才出现 type）会让快路失效 → 退化为正常解析，**只慢不错**。
+_ENVELOPE_TYPE_RE = re.compile(
+    r'^\{"seq":\s*\d+,\s*"time":\s*[0-9.eE+-]+,\s*"type":\s*"([^"]+)"')
+
+
 def scan_index(path: Path, known_types: frozenset[str] | None = KNOWN_SESSION_EVENT_TYPES,
-               supported: int = SESSION_FORMAT_VERSION) -> EventIndex:
+               supported: int = SESSION_FORMAT_VERSION,
+               skip_types: tuple[str, ...] = ()) -> EventIndex:
     """扫一遍日志，只建索引（不解析成 `SessionEvent`）。
 
     与 `load_events` **同一套守卫**（方向感知拒绝 + 未知事件守卫），差别只有一处：
-    它把每条事件的 payload 丢掉，只留 `(seq, type, offset, length)`。
+    它把每条事件的 payload 丢掉，只留 `(seq, type, offset, length, surface_op, shadowed)`。
     未知且不可忽略的事件仍然当场抛错——**不因为"反正不建对象"就放松守卫**。
+
+    `skip_types` 里的事件**连 JSON 都不解析**：先用正则从行首取 `type`，命中就直接跳过。
+    实测意义：老日志里流式帧占 98.9% 的行，而逐行 `json.loads` 是打开会话的全部耗时来源
+    （42.5 万行约 9 s）——跳过它们之后，解析量降到 1.1%。守卫不受影响：**只有已知类型**
+    才走这条快路，未知类型仍然解析出来判 `ignorable`（该拒就拒）。
     """
     seqs = array('q')
     offsets = array('q')
     lengths = array('i')
     types: list[str] = []
+    surface_ops: list[str | None] = []
+    shadowed: list[tuple[int, int] | None] = []
     if not path.exists():
-        return EventIndex(path=path, seqs=seqs, types=(), offsets=offsets, lengths=lengths)
+        return EventIndex(path=path, seqs=seqs, types=(), offsets=offsets, lengths=lengths,
+                          surface_ops=(), shadowed=())
     check_compatible(path, supported=supported)
+    skipped = set(skip_types)
     with path.open('rb') as handle:
         offset = 0
         for raw in handle:
             length = len(raw)
+            # 只解前 240 **字节**；在字节边界切断可能切坏一个多字节字符，所以用
+            # `errors='ignore'` 解码——它只影响判断用的那截片段，不影响真正的解析
+            head = raw[:240].decode('utf-8', errors='ignore')
+            match = _ENVELOPE_TYPE_RE.match(head)
+            fast_type = match.group(1) if match else None
+            # 快路：已知类型 + 要跳过 ⇒ 只花一次正则，不解析 JSON
+            if fast_type is not None and fast_type in skipped:
+                offset += length
+                continue
             line = raw.decode('utf-8').strip()
             if line:
                 data = json.loads(line)
@@ -210,8 +247,12 @@ def scan_index(path: Path, known_types: frozenset[str] | None = KNOWN_SESSION_EV
                 types.append(str(type_))
                 offsets.append(offset)
                 lengths.append(length)
+                surface_ops.append(data.get('surface_op'))
+                shadowed_pair = data.get('shadowed')
+                shadowed.append(tuple(shadowed_pair) if shadowed_pair else None)
             offset += length
-    return EventIndex(path=path, seqs=seqs, types=tuple(types), offsets=offsets, lengths=lengths)
+    return EventIndex(path=path, seqs=seqs, types=tuple(types), offsets=offsets, lengths=lengths,
+                      surface_ops=tuple(surface_ops), shadowed=tuple(shadowed))
 
 
 def read_event_at(index: EventIndex, seq: int) -> SessionEvent:
@@ -237,7 +278,28 @@ def read_event_at(index: EventIndex, seq: int) -> SessionEvent:
     return event_from_json(data)
 
 
-def iter_events(index: EventIndex):
-    """按索引**惰性**产出事件（要全部 payload、但可以流式处理时用它）。"""
-    for seq in index.seqs:
-        yield read_event_at(index, int(seq))
+def iter_events(index: EventIndex, skip_types: tuple[str, ...] = ()):
+    """按索引**惰性**产出事件（要全部 payload、但可以流式处理时用它）。
+
+    `skip_types` 里的类型**连 payload 都不解析**——用于"确定没人读"的整类事件：
+    流式帧（`assistant/chunk` / `assistant/reasoning/chunk`）是纯痕迹，内容已完整落在
+    `assistant/message`（正文 + 工具参数）与 `assistant/reasoning`（思维链全文）里，
+    而老日志里它们占 **98.9%** 的事件。索引的 `offsets` 是顺序的，所以这里
+    **只开一次文件、顺序向前 seek**——不重复 open（42.5 万条逐个 open 会慢一个量级）。
+    """
+    skipped = set(skip_types)
+    with index.path.open('rb') as handle:
+        for position, type_ in enumerate(index.types):
+            if type_ in skipped:
+                continue
+            offset = index.offsets[position]
+            length = index.lengths[position]
+            handle.seek(offset)
+            raw = handle.read(length)
+            if len(raw) != length:
+                raise ValueError(f'{index.path}: short read at offset {offset}')
+            data = json.loads(raw.decode('utf-8'))
+            if str(data.get('type')) != type_:
+                raise ValueError(f'{index.path}: index/file mismatch at offset {offset} '
+                                 f'(index says {type_!r}, file says {data.get("type")!r})')
+            yield event_from_json(data)

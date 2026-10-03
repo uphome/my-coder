@@ -33,7 +33,6 @@ from ..capability.hooks import Hooks
 from ..state.recovery import repair_dangling_tool_calls
 from ..state.session import Session
 from ..tools.todo import fold_todos
-from ..values.persistence import load_events
 from .payload import context_payload, history_payloads, queue_rows
 from .state import Seat, state
 
@@ -136,8 +135,8 @@ def open_session_seat(sid: str, *, allow_missing: bool,
         raise HTTPException(400, WORKSPACE_FIXED_MESSAGE)
     session = Session(id=sid)
     if log_path.exists():
-        for event in load_events(log_path):
-            session.adopt(event)
+        # 跳过流式帧（issue #46 ③）：老日志里帧占 98.9%，而它们不是状态
+        session = Session.from_path(log_path, sid)
     session.bind_store(log_path)  # 追加式实时落盘（没有状态不进日志）
     # 崩溃/被 kill 留下的"悬空工具调用"在这里自愈：不修的话模型记忆里会留下
     # "请求了工具却没有结果"的 assistant 消息，之后每次发送都是 400（见 state/recovery.py）
@@ -353,8 +352,7 @@ def append_title(sid: str, title: str, source: str) -> None:
     path = (state.sessions_dir or Path('.sessions')) / f'{sid}.jsonl'
     if not path.exists():
         raise HTTPException(404, f'session {sid!r} not found')
-    temp = Session(id=sid)
-    for event in load_events(path):
-        temp.adopt(event)
+    # 只为了追加一条 title：更不该把整份日志（含帧）读进来
+    temp = Session.from_path(path, sid)
     temp.bind_store(path)
     temp.append('session/title', {'title': title, 'source': source})

@@ -275,6 +275,12 @@ SESSION_FORMAT_VERSION = 1
 # 没有会话头的日志按这个版本读（本机制落地前写的文件，与 v1 的事件形状相同）。
 LEGACY_SESSION_FORMAT_VERSION = 0
 
+# 流式帧：**纯痕迹**事件类型（issue #42 起新日志不再写它们；老日志里占 98.9% 的事件）。
+# 它们不在检索面里（`SURFACE` 不含），内容也不是独有的——`assistant/message` 有正文与
+# 工具调用参数全文、`assistant/reasoning` 有思维链全文（#42 有逐字节等价的机械证明）。
+# 所以"把会话重放给**读**的人"时整类跳过：既省内存也省解析（老日志两个数量级）。
+TRACE_FRAME_TYPES = ('assistant/chunk', 'assistant/reasoning/chunk')
+
 # 已知事件类型（闭集）。读取端拿它做未知事件守卫——**加新事件类型要同时加到这里**，
 # 忘了加不会静默：新类型的日志在旧读取者那里会明确报"未知且不可忽略"。
 # 判据：事件类型是否出现在 `my_coder/` 的 `session.append(...)` 里。
