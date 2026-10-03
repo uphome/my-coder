@@ -55,6 +55,19 @@ class Session:
         # `events` 的按变更缓存（issue #46 ②）：`None` = 脏，下次访问重建一次。
         # 失效点只有两个（`append` / `adopt`）——`_log` 没有别的写入者。
         self._events_cache: tuple[SessionEvent, ...] | None = None
+        # seq → 事件（issue #46 ③）：**`_log` 不一定稠密**——"跳过流式帧"打开的会话里
+        # seq 是稀疏的（保留了 3 与 10644，跳掉中间），所以任何"按下标取"的访问都必须
+        # 改成按 seq 查。这张表只在 append/adopt 时增长，成本与**保留的**事件数同阶
+        # （帧被跳过的日志因此只花 4.7k 条的钱，而不是 42.5 万条）。
+        self._by_seq: dict[int, SessionEvent] = {}
+
+    def by_seq(self, seq: int) -> SessionEvent:
+        """按 seq 取事件（**稀疏日志也成立**）。
+
+        为什么不是 `self._log[seq]`：`_log` 的下标只在"重放时一条不漏"的前提下等于 seq；
+        `Session.from_path(skip_types=…)` 刻意跳帧之后这个前提就不成立了，`_log[seq]` 会越界。
+        """
+        return self._by_seq[seq]
 
     @classmethod
     def from_path(cls, path, session_id: str = '',
@@ -169,6 +182,7 @@ class Session:
             raise ValueError(f'shadowed is only valid with surface_op="replace" (got {surface_op!r})')
         event = new_event(len(self._log), type_, data, surface_op, shadowed, ignorable)
         self._log.append(event)
+        self._by_seq[event.seq] = event
         self._events_cache = None      # 缓存置脏（下一个读的人重建一次）
         self._apply_surface(event)
         for listener in list(self._listeners):
@@ -178,6 +192,7 @@ class Session:
     def adopt(self, event: SessionEvent) -> None:
         """从磁盘重放：只重建投影，不触发监听、不重跑任何逻辑。"""
         self._log.append(event)
+        self._by_seq[event.seq] = event
         self._events_cache = None      # 重放同样要让缓存失效
         self._apply_surface(event)
 
@@ -215,7 +230,7 @@ class Session:
         """
         out: list[Message] = []
         for seq in self._surface:
-            event = self._log[seq]
+            event = self.by_seq(seq)
             if event.type == 'user/message':
                 out.append(cast(Message, event.data))
             elif event.type == 'assistant/message':
