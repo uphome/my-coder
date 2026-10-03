@@ -83,7 +83,7 @@ class Session:
         #42 有逐字节等价的机械证明）。所以 `derive_messages` / 召回 / 历史渲染的结果**不变**。
         需要看帧的场景（帧时代的实时回放）本来也只在**当时的进程内**发生，不靠重放。
         """
-        index = scan_index(path)
+        index = scan_index(path, skip_types=skip_types)
         session = cls(session_id or getattr(path, 'stem', ''))
         for event in iter_events(index, skip_types=skip_types):
             session.adopt(event)
