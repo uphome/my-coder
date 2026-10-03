@@ -230,7 +230,7 @@ class SessionEvent:
 
 @dataclass(frozen=True)
 class StreamFrame:
-    """瞬时流帧（issue #42）：**不进日志、不占 seq、不进投影**。
+    """瞬时流帧（issue #51）：**不进日志、不占 seq、不进投影**。
 
     它是"传输中的字节"，不是状态——模型可见性由 `assistant/message`（正文 + 工具调用参数）
     与 `assistant/reasoning`（思维链全文）保证，帧只喂给实时订阅者（终端打字机、Web SSE）。
@@ -275,9 +275,9 @@ SESSION_FORMAT_VERSION = 1
 # 没有会话头的日志按这个版本读（本机制落地前写的文件，与 v1 的事件形状相同）。
 LEGACY_SESSION_FORMAT_VERSION = 0
 
-# 流式帧：**纯痕迹**事件类型（issue #42 起新日志不再写它们；老日志里占 98.9% 的事件）。
+# 流式帧：**纯痕迹**事件类型（issue #51 起新日志不再写它们；老日志里占 98.9% 的事件）。
 # 它们不在检索面里（`SURFACE` 不含），内容也不是独有的——`assistant/message` 有正文与
-# 工具调用参数全文、`assistant/reasoning` 有思维链全文（#42 有逐字节等价的机械证明）。
+# 工具调用参数全文、`assistant/reasoning` 有思维链全文（#51 有逐字节等价的机械证明）。
 # 所以"把会话重放给**读**的人"时整类跳过：既省内存也省解析（老日志两个数量级）。
 TRACE_FRAME_TYPES = ('assistant/chunk', 'assistant/reasoning/chunk')
 
@@ -291,7 +291,7 @@ KNOWN_SESSION_EVENT_TYPES = frozenset({
     'assistant/message',
     'assistant/reasoning',
     'assistant/reasoning/chunk',
-    # 流式汇总（issue #42）：每 step 一条，替代"每个流帧一条事件"。
+    # 流式汇总（issue #51）：每 step 一条，替代"每个流帧一条事件"。
     # 它**不是** surface 事件、也不带内容——内容已经在 assistant/message 与
     # assistant/reasoning 里；这里只留"这次流式发生了多少帧、花了多久"。
     'assistant/stream',

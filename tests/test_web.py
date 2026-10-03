@@ -314,7 +314,7 @@ def test_web_checkpoint_role_and_context_payload(tmp_path):
 
     hist = client.get('/history').json()
     roles = [m['role'] for m in hist['history']]
-    # issue #44 起历史走**全量日志**：被遮蔽的 Q1 仍然显示（用户在界面上不该"失忆"），
+    # issue #52 起历史走**全量日志**：被遮蔽的 Q1 仍然显示（用户在界面上不该"失忆"），
     # 压缩点在**原位**变成一张 checkpoint 卡片。旧契约是 `['checkpoint', 'user']`——
     # 那等于"界面从 checkpoint 之后开始"，用户会以为历史丢了（实测 425,847 个事件被藏）。
     assert roles == ['user', 'checkpoint', 'user']

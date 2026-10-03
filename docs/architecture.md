@@ -277,7 +277,7 @@ _run_one → _run_group（补记账）→ _execute_tool_calls（补记账）
   不知道 httpx/SSE 的存在——换模型实现不动循环层一行
 - 流式输出的三层分工：能力层**产生**流（SSE 帧 → StreamChunk），循环层
   **消费**流（喂组装器 + 把帧发到瞬时通道 `Session.emit_stream`），UI
-  **展示**流（订阅**瞬时帧**渲染，打字机效果）。**帧不落日志**（issue #42）：
+  **展示**流（订阅**瞬时帧**渲染，打字机效果）。**帧不落日志**（issue #51）：
   写完一步只落一条 `assistant/stream` 汇总（帧数/字符数/耗时），内容完整性由
   `assistant/message`（正文 + 工具调用参数）与 `assistant/reasoning`（思维链全文）保证
   ——历史刷新时 UI 读的是日志（`history_payloads`），所以它显示的永远是"结论"，

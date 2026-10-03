@@ -237,7 +237,7 @@ async def chat(request: Request) -> StreamingResponse:
 
     queue: asyncio.Queue = asyncio.Queue()
     unsubscribe = session.on_event(lambda event: queue.put_nowait(event))
-    # 流式帧（issue #42）：不落日志、只推给这条 SSE 流。返回的退订函数要一起收藏，
+    # 流式帧（issue #51）：不落日志、只推给这条 SSE 流。返回的退订函数要一起收藏，
     # 否则客户端断开后帧订阅还挂在 Session 上（长命宿主会累积）。
     unsubscribe_stream = session.on_stream(lambda frame: queue.put_nowait(frame))
 

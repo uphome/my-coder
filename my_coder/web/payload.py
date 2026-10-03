@@ -122,7 +122,7 @@ def history_payloads(session) -> list[dict]:
     """会话历史消息载荷（页面加载/刷新用），user 消息附带其回合归属。
 
     数据源是**全量日志**（`log_messages_with_seq`），不是 surface——见那个函数的说明
-    （issue #44：压缩不该让用户在界面上"失忆"）。压缩点在原位插一行
+    （issue #52：压缩不该让用户在界面上"失忆"）。压缩点在原位插一行
     `{'role': 'checkpoint', ...}`：前端那颗"上下文已压缩"卡片就是靠它渲染的
     （`web/index.html` 的 `addCheckpointCard` 认 `role === 'checkpoint'`）。
 
@@ -162,7 +162,7 @@ def history_payloads(session) -> list[dict]:
 
 
 def log_messages_with_seq(session: Session) -> list[tuple[int, SessionEvent]]:
-    """按**日志序**的 (seq, 事件)——历史渲染用（issue #44）。
+    """按**日志序**的 (seq, 事件)——历史渲染用（issue #52）。
 
     与 `surface_with_seq` 的唯一区别：**走全量日志，不走 surface**。
 
@@ -278,7 +278,7 @@ def event_to_payload(event, session: Session | None = None, agent=None) -> dict 
         return ({'type': 'reasoning', 'turn': event.data['turn'], 'step': event.data['step'],
                  'text': reasoning} if reasoning else None)
     if event.type == 'assistant/stream':
-        # 流式汇总（issue #42）：**不进历史**。历史要展示的是"说了什么/想了什么"，
+        # 流式汇总（issue #51）：**不进历史**。历史要展示的是"说了什么/想了什么"，
         # 两者分别由 assistant/message 与 assistant/reasoning 提供（v1/v2 都有），
         # 这条只回答"这一步流了多久、多少帧"——想看就去日志里查（它是可审计的）。
         return None

@@ -25,7 +25,7 @@
 | **web_search（联网搜索）** | ✅ 已完成（DeepSeek 官方原生搜索，见下节） |
 | 阶段一收尾（更新 README / ARCHITECTURE 定稿） | ✅ 已完成（含 2026-09 架构重构与本文档同步） |
 
-> **2026-10-03 日志粒度（issue #42）**：流式帧不再落盘（Session.emit_stream 只喂实时 UI），每 step 落一条 ssistant/stream 汇总。实测同一份日志投影：**116.3 MB / 425,854 行 → 约 12.5 MB / 4,530 行**（帧占 89.3% 字节、98.9% 行）；内容完整性有机械证明（帧拼接 == 落盘的正文/参数/思维链）。见 [粒度那篇](docs/notes/implemented/feature/2026-10-03-stream-log-granularity.md)。
+> **2026-10-03 日志粒度（issue #51）**：流式帧不再落盘（Session.emit_stream 只喂实时 UI），每 step 落一条 ssistant/stream 汇总。实测同一份日志投影：**116.3 MB / 425,854 行 → 约 12.5 MB / 4,530 行**（帧占 89.3% 字节、98.9% 行）；内容完整性有机械证明（帧拼接 == 落盘的正文/参数/思维链）。见 [粒度那篇](docs/notes/implemented/feature/2026-10-03-stream-log-granularity.md)。
 >
 > 当前全量测试：246 个（3 条平台相关 skip）——数字由 `tests/test_doc_numbers.py` **机械保证**
 > （文档里任何测试数/行数与代码不符，那个门禁就会红；不再靠"记得同步"）。

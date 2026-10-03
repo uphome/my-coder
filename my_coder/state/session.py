@@ -39,7 +39,7 @@ class Session:
       'replace' 会把被遮蔽 seq 移除、新 seq 原位插入，所以它是
       "当前模型可见顺序"，顺序正确（摘要在前、新对话在后）
     - _listeners：订阅者（持久化/UI 都通过订阅消费日志）
-    - _stream_listeners：**瞬时帧**的订阅者（issue #42）——流式帧不落日志，见 `emit_stream`
+    - _stream_listeners：**瞬时帧**的订阅者（issue #51）——流式帧不落日志，见 `emit_stream`
 
     两个写入路径不对称，这是 resume 机制的全部秘密：
     - append：新事件 → 校验 + 落日志 + 更新投影 + 通知 listener
@@ -82,7 +82,7 @@ class Session:
 
         **为什么跳过是安全的**：帧是纯痕迹、不在检索面里（`SURFACE` 不含），内容也不是独有的
         （`assistant/message` 有正文与工具参数全文、`assistant/reasoning` 有思维链全文，
-        #42 有逐字节等价的机械证明）。所以 `derive_messages` / 召回 / 历史渲染的结果**不变**。
+        #51 有逐字节等价的机械证明）。所以 `derive_messages` / 召回 / 历史渲染的结果**不变**。
         需要看帧的场景（帧时代的实时回放）本来也只在**当时的进程内**发生，不靠重放。
         """
         index = scan_index(path, skip_types=skip_types)
@@ -131,7 +131,7 @@ class Session:
         return lambda: self._listeners.remove(listener)
 
     def on_stream(self, listener: Callable[[StreamFrame], None]):
-        """订阅**瞬时流帧**（issue #42）：只给"此刻正在看的人"，不落盘。
+        """订阅**瞬时流帧**（issue #51）：只给"此刻正在看的人"，不落盘。
 
         与 `on_event` 分开是必须的：`bind_store` 就是把 `save_event` 挂在 `on_event` 上——
         若流帧也走那条通道，它就会被写进日志（那正是写放大的来源）。

@@ -219,7 +219,7 @@ async def _run_step(agent, turn: int, step: int, assembly: dict,
       tools 是全部工具 schema——三者都从投影来，不存第二份状态
     - request/header 落日志：含 system 全文和工具名，resume 恢复路由靠它
     - 流式：帧**不落日志**（`emit_stream` 只喂实时订阅者），末尾落一条 `assistant/stream`
-      汇总；内容完整性由 `assistant/message` + `assistant/reasoning` 保证（issue #42）
+      汇总；内容完整性由 `assistant/message` + `assistant/reasoning` 保证（issue #51）
     - request_error 钩子：返回 'retry' 就 continue 重新组请求
     - 工具结果只落日志；下一个 step 组请求时 derive_messages 自动带上
     """
@@ -278,7 +278,7 @@ async def _run_step(agent, turn: int, step: int, assembly: dict,
                if closing and agent.progress.closing_text else {}),
         })
         assembler = _BlockAssembler()
-        # 流式帧的统计（issue #42）：帧本身**不落日志**，只发瞬时通道；
+        # 流式帧的统计（issue #51）：帧本身**不落日志**，只发瞬时通道；
         # 这一步结束后落一条 `assistant/stream` 汇总。为什么改：实测 423,617 行日志里
         # 98.9% 是帧，而其中 98–99% 的字节是**逐行 JSON 固定开销**（一个 step 2,793 行 = 736 KB，
         # 内容只有 8.9 KB）；内容并没有丢——`_BlockAssembler` 就是用同一批 chunk 拼出
@@ -342,7 +342,7 @@ async def _run_step(agent, turn: int, step: int, assembly: dict,
             **({'usage': assembler.usage} if assembler.usage else {}),
         }, surface_op='append')
 
-        # 流式汇总（issue #42）：每 step **一条**，替代原来每个流帧一条事件。
+        # 流式汇总（issue #51）：每 step **一条**，替代原来每个流帧一条事件。
         # 落 `ignorable=True`：这是**词汇增长**（新类型），旧读取者不认识它可以跳过，
         # 所以按仓库规则**不 bump 格式版本**（结构性变化才 bump）。
         if frames or reasoning_frames:

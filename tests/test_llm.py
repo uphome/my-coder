@@ -76,7 +76,7 @@ async def test_reasoning_is_trace_only_not_in_model_memory():
 
     types = [e.type for e in session.events]
     # 思维链**全文**仍以痕迹数据留档（`assistant/reasoning`）；但逐帧的
-    # `assistant/reasoning/chunk` 不再落日志（issue #42：98.9% 的行是帧，
+    # `assistant/reasoning/chunk` 不再落日志（issue #51：98.9% 的行是帧，
     # 而内容的完整性由全文事件与 `assistant/message` 保证），只留一条汇总。
     assert 'assistant/reasoning' in types
     assert 'assistant/reasoning/chunk' not in types
