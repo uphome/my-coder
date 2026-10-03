@@ -14,9 +14,15 @@ from __future__ import annotations
 
 from typing import cast
 
-from ..app.compaction import cache_hit_rate, estimate_context_tokens, session_token_totals
+from ..app.compaction import (
+    SUMMARY_OPEN_TAG,
+    cache_hit_rate,
+    estimate_context_tokens,
+    session_token_totals,
+)
 from ..app.constants import MODEL_CONTEXT_WINDOW
 from ..state.session import Session
+from ..values.messages import SessionEvent
 
 # 工具结果预览上限：展开卡片想看到全文（对齐 CLI 的 BASH_MAX_OUTPUT_CHARS 量级），
 # 只在真正超长时截断；chars/lines/truncated 让前端能显示统计与截断徽标。
@@ -115,6 +121,11 @@ def reasoning_by_assistant_seq(session) -> dict[int, str]:
 def history_payloads(session) -> list[dict]:
     """会话历史消息载荷（页面加载/刷新用），user 消息附带其回合归属。
 
+    数据源是**全量日志**（`log_messages_with_seq`），不是 surface——见那个函数的说明
+    （issue #44：压缩不该让用户在界面上"失忆"）。压缩点在原位插一行
+    `{'role': 'checkpoint', ...}`：前端那颗"上下文已压缩"卡片就是靠它渲染的
+    （`web/index.html` 的 `addCheckpointCard` 认 `role === 'checkpoint'`）。
+
     message_to_payload 是纯消息 → dict，不知道回合；这里在构造处补上
     'turn' 字段，前端据此区分"新回合首条"与"同回合插队（steer）"。
     user 消息再补 'rpc_id'（提交身份）：前端全量重建投影后，仍能认出
@@ -124,9 +135,22 @@ def history_payloads(session) -> list[dict]:
     turns = user_message_turns(session)
     reasoning = reasoning_by_assistant_seq(session)
     payloads = []
-    for seq, message in surface_with_seq(session):
+    for seq, event in log_messages_with_seq(session):
+        if event.type == 'assistant/message':
+            message = cast(dict, event.data)['message']
+            if not message.content:
+                continue    # 与 derive_messages 同样的折叠规则：空 assistant 消息不画
+        else:
+            message = event.data
         payload = message_to_payload(message)
-        if payload['role'] == 'user':
+        if event.surface_op == 'replace':
+            # 压缩 checkpoint（**结构性判据**：只有压缩会写带 replace 的 user/message）。
+            # 渲染仍由 message_to_payload 决定（它认摘要标记 ⇒ role='checkpoint'），
+            # 这里只补两件历史才需要的东西：它在日志里的位置，以及它遮蔽了哪一段
+            # ——后者就是"模型现在看不到什么"的边界，卡片要把它说出来。
+            payload['seq'] = seq
+            payload['hidden'] = event.shadowed
+        elif payload['role'] == 'user':
             if seq in turns:
                 payload['turn'] = turns[seq]
             source = getattr(message, 'source', None)
@@ -135,6 +159,26 @@ def history_payloads(session) -> list[dict]:
             payload['reasoning'] = reasoning[seq]
         payloads.append(payload)
     return payloads
+
+
+def log_messages_with_seq(session: Session) -> list[tuple[int, SessionEvent]]:
+    """按**日志序**的 (seq, 事件)——历史渲染用（issue #44）。
+
+    与 `surface_with_seq` 的唯一区别：**走全量日志，不走 surface**。
+
+    为什么必须这样：surface 的定义是"**模型此刻看得见的那一份**"，压缩一发生，
+    被遮蔽的回合就整体消失——于是界面上"对话从 checkpoint 之后开始"，用户以为自己的
+    历史丢了（实测：425,847 个事件不在 surface 上，界面只剩 132 行、从 turn 73 起，
+    而 `build_turns` 仍能列出全部 78 个回合）。
+
+    判据（写进设计记录）：**UI 是日志的投影**（发生过什么），而"模型看得见什么"是一个
+    **独立的边界**，由压缩卡片显式表达——不能靠"把前面的藏掉"来表达。
+    """
+    out: list[tuple[int, SessionEvent]] = []
+    for event in session.events:
+        if event.type in ('user/message', 'assistant/message', 'tool/result'):
+            out.append((event.seq, event))
+    return out
 
 
 def queue_rows(agent) -> list[dict]:
@@ -289,7 +333,7 @@ def message_to_payload(message) -> dict:
     text = '\n'.join(texts)
     if role == 'user' and not texts and tool_results:
         role = 'tool_result'  # 纯工具结果消息：并入当前工具活动块
-    elif role == 'user' and '<compacted-summary>' in text:
+    elif role == 'user' and SUMMARY_OPEN_TAG in text:
         # 压缩 checkpoint（replace 顶替旧回合的 user/message）：不是真人发言，
         # 前端渲染成可折叠的"上下文已压缩"卡片而非用户气泡
         role = 'checkpoint'

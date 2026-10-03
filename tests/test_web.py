@@ -314,7 +314,14 @@ def test_web_checkpoint_role_and_context_payload(tmp_path):
 
     hist = client.get('/history').json()
     roles = [m['role'] for m in hist['history']]
-    assert roles == ['checkpoint', 'user']          # checkpoint 被标记，后续 user 正常
+    # issue #44 起历史走**全量日志**：被遮蔽的 Q1 仍然显示（用户在界面上不该"失忆"），
+    # 压缩点在**原位**变成一张 checkpoint 卡片。旧契约是 `['checkpoint', 'user']`——
+    # 那等于"界面从 checkpoint 之后开始"，用户会以为历史丢了（实测 425,847 个事件被藏）。
+    assert roles == ['user', 'checkpoint', 'user']
+    checkpoint = hist['history'][1]
+    # 卡片要能说出"模型现在看不到哪一段"（这就是压缩的可见边界）
+    assert checkpoint['hidden'] == [q1.seq, q1.seq]
+    assert '<compacted-summary>' in checkpoint['text']
     assert hist['context'] is not None              # 上下文 payload 存在
     assert 'window' in hist['context'] and 'percent' in hist['context']
     # fake 模式无真实 usage → 不带 session 累计账（前端隐藏命中/消耗标签）
