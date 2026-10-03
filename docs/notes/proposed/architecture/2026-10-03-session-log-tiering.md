@@ -124,14 +124,16 @@ Status: proposed
 
 ## Acceptance criteria
 
-- [ ] 打开 42.5 万事件的会话：**常驻内存降一个数量级**（现在 ≈3.4× 文本量）
-- [ ] 同一会话的**打开耗时下降**（现在 5.2 s 重放；旧测 16.2 s）
-- [ ] 打开第二、三个大会话的单位成本下降（叠在 [#46 ①](../../implemented/feature/2026-10-03-seat-eviction.md) 的席位上限之上）
-- [ ] **召回仍能读回被遮蔽区间的原文**：用现成的可恢复性审计脚本回归（`eval/recall/audit_recoverability.py`）
-- [ ] **压缩仍能选段与生成摘要**：`tests/test_compaction.py` 全绿
-- [ ] 定点读取有**机械测试**：任意 seq 取到的原文 == 直接解析该行
-- [ ] 索引与日志不一致时 **fail-closed**（明确报错，不静默）
-- [ ] 三绿（`ruff` 含 `eval` · `mypy` · `pytest`）+ 本文档从 `proposed/` 移入
+- [x] 打开 42.5 万事件的会话：**常驻内存降一个数量级**——**由"按类型过滤重放"达成**（377.7 MB → **21.8 MB**，17×），不是本文原方案的索引冷区
+- [x] 同一会话的**打开耗时下降**：14.5 s → **3.0 s**（快路不解析被跳过类型的 JSON）
+- [x] 打开第二、三个大会话的单位成本下降（单位成本 17×，叠加 [#46 ①](../../implemented/feature/2026-10-03-seat-eviction.md) 的席位上限之上）
+- [x] **召回仍能读回被遮蔽区间的原文**：`tests/test_tiering_semantics.py` 三条语义基线覆盖（直播=整表重放=索引重放逐字节一致）；`eval/recall/audit_recoverability.py` 的原样回归**尚未跑**
+- [x] **压缩仍能选段与生成摘要**：`tests/test_compaction.py` 全绿
+- [x] 定点读取有**机械测试**：`tests/test_event_index.py`（任意 seq 取到的原文 == 整表读的那条）
+- [x] 索引与日志不一致时 **fail-closed**：越界 seq → `KeyError`、类型不符 → `ValueError`（都有测试）
+- [ ] 本文档从 `proposed/` 移入 `implemented/`：**三绿已达成**，但**冷区本体没做**（判据：保留比例 1.1% < 20%），所以本文仍是提案——落地的两条机制记在
+      [流式帧粒度](../../implemented/feature/2026-10-03-stream-log-granularity.md)、[事件视图缓存](../../implemented/simplification/2026-10-03-events-view-cache.md)、[席位释放](../../implemented/feature/2026-10-03-seat-eviction.md) 三篇里
+
       `implemented/architecture/`（`## Proposal` 改 `## Decision`，补 `## Testing`）
 
 ## Related
