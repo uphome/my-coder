@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import time
 import uuid
 from pathlib import Path
 
@@ -35,6 +36,12 @@ from ..tools.todo import fold_todos
 from ..values.persistence import load_events
 from .payload import context_payload, history_payloads, queue_rows
 from .state import Seat, state
+
+# 宿主最多常驻几个会话的 Seat（issue #46 ①）：超了先释放最久没用过的**空闲**席位。
+# 为什么要有上限：Seat 里是整份 Session（= 整份日志在内存里），而 Web 宿主会一直保留
+# 打开过的会话——实测 4 个小会话就到 337 MB 私有内存，一个大会话（117 MB 日志）单独就
+# 484 MB。**释放不等于丢数据**：重开时 adopt 重放日志即可恢复（不变式③：磁盘 ≥ 内存）。
+MAX_OPEN_SEATS = 3
 
 # Web approval：敏感工具（bash/write/edit）执行前推送请求给浏览器，等待人工批准/拒绝。
 # 用户不点则 fail-safe 拒绝（防模型永久卡住）。
@@ -109,6 +116,7 @@ def open_session_seat(sid: str, *, allow_missing: bool,
     if seat is not None:
         if workspace:
             raise HTTPException(400, WORKSPACE_FIXED_MESSAGE)
+        seat.last_used = time.monotonic()      # 复用也算"用过"（冷却是 LRU 式挑最久没用）
         return seat
     # 新会话 = 磁盘上还没有它的文件；**空文件就是"这个会话存在"的事实**，所以这里用
     # `exist_ok=False` **原子占坑**（不是先 exists() 再 touch()）：两个进程/两个请求同时
@@ -148,6 +156,7 @@ def open_session_seat(sid: str, *, allow_missing: bool,
             'source': 'user' if str(workspace or '').strip() else 'default',
         })
     seat = Seat(sid, session, _args_for_workspace(resolved), None)
+    seat.last_used = time.monotonic()
     state.seats[sid] = seat  # 先登记：审批钩子闭包引用 seat，创建 agent 前就位
     hooks = Hooks()
     hooks.approval = approval_for(seat)   # Web 版确认：弹本会话的批准/拒绝
@@ -156,7 +165,37 @@ def open_session_seat(sid: str, *, allow_missing: bool,
         {'reasoning_started': False, 'request_no': 0, 'tool_no': 0},
         hooks=hooks,
     )
+    # 新建席位之后再看要不要冷却释放（issue #46 ①）：**只在这里触发**，不搞后台任务——
+    # "打开新会话"正是常驻席位增长的那一刻，在这里收口最简单也最好测。
+    # `keep` 传 sid（刚建的这个）与焦点会话：前端正在看的那个绝不能放。
+    evict_idle_seats(keep=sid)
     return seat
+
+
+def evict_idle_seats(keep: str, *, max_open: int = MAX_OPEN_SEATS) -> list[str]:
+    """把常驻席位收敛到 `max_open` 以内，返回被释放的 sid 列表（issue #46 ①）。
+
+    判据（顺序很重要）：
+
+    1. **只释放空闲席位**（`Seat.is_idle()`：不在跑 / 无 SSE 流 / 无待审批）——
+       释放 = 丢掉整个 Seat 的内存状态，正在跑的回合绝不能被拔掉；
+    2. **永远保留** `keep` 与 `state.current_sid`（前端正在看的那个）；
+    3. 还超就按 `last_used` **最久没用过的先释放**（LRU 式，粗粒度）。
+
+    释放是安全的：日志是唯一事实源，磁盘 ≥ 内存（不变式③），重开时 `open_session_seat`
+    会重新 adopt 重放——"记忆"因此不丢，丢的只是内存里的那份缓存。
+    """
+    released: list[str] = []
+    protected = {keep, state.current_sid}
+    while len(state.seats) > max_open:
+        candidates = [seat for seat in state.seats.values()
+                      if seat.sid not in protected and seat.is_idle()]
+        if not candidates:
+            break                     # 全是活跃/受保护的：宁可超编，也不拔进行中的回合
+        victim = min(candidates, key=lambda seat: seat.last_used)
+        state.seats.pop(victim.sid, None)
+        released.append(victim.sid)
+    return released
 
 
 def _args_for_workspace(workspace: Path) -> argparse.Namespace:

@@ -37,6 +37,20 @@ class Seat:
     queue: asyncio.Queue | None = None
     # 该会话自己的审批等待表（aid → Future）；拒绝/批准经 /approval/respond 唤醒。
     approvals: dict[str, asyncio.Future] = field(default_factory=dict)
+    # 最近一次被"用到"的时刻（issue #46：冷却释放按它挑最久没用的席位）。
+    # 粗粒度就够——更新点是 `open_session_seat`（切会话 / 发消息都要经过它），
+    # 不必每个路由都戳一次；判据是"释放一个**空闲**席位"，不是精确 LRU。
+    last_used: float = 0.0
+
+    def is_idle(self) -> bool:
+        """能不能安全释放：**没有在跑的回合、没有活跃 SSE 流、没有待审批**。
+
+        三个条件缺一不可。释放 = 丢掉这个 Seat 的全部内存状态（Session / Agent），
+        重开时靠重放日志恢复（磁盘日志永远 ≥ 内存状态，见不变式③）。所以"正在跑"的
+        绝不能碰——那会把一次进行中的回合连根拔掉，日志里只剩一半。
+        """
+        running = self.agent is not None and self.agent.status == 'running'
+        return not running and self.queue is None and not self.approvals
 
 
 @dataclass
