@@ -170,6 +170,11 @@ class EventIndex:
     types: tuple[str, ...]
     offsets: array         # 该行在文件里的**字节**起点（二进制逐行统计，不受编码影响）
     lengths: array         # 该行的字节长度
+    # `surface_op` / `shadowed` 是**顶层字段**（不在 payload 里），所以索引足以重建
+    # **surface**（= 模型可见顺序），不必为每条事件造 payload——这正是冷热分层能省内存的机制：
+    # 投影（surface）与"哪些区间被压缩遮蔽"都能只靠索引算出来，payload 只按需取。
+    surface_ops: tuple[str | None, ...] = ()
+    shadowed: tuple[tuple[int, int] | None, ...] = ()
 
     def __len__(self) -> int:
         return len(self.types)
@@ -187,8 +192,11 @@ def scan_index(path: Path, known_types: frozenset[str] | None = KNOWN_SESSION_EV
     offsets = array('q')
     lengths = array('i')
     types: list[str] = []
+    surface_ops: list[str | None] = []
+    shadowed: list[tuple[int, int] | None] = []
     if not path.exists():
-        return EventIndex(path=path, seqs=seqs, types=(), offsets=offsets, lengths=lengths)
+        return EventIndex(path=path, seqs=seqs, types=(), offsets=offsets, lengths=lengths,
+                          surface_ops=(), shadowed=())
     check_compatible(path, supported=supported)
     with path.open('rb') as handle:
         offset = 0
@@ -210,8 +218,12 @@ def scan_index(path: Path, known_types: frozenset[str] | None = KNOWN_SESSION_EV
                 types.append(str(type_))
                 offsets.append(offset)
                 lengths.append(length)
+                surface_ops.append(data.get('surface_op'))
+                shadowed_pair = data.get('shadowed')
+                shadowed.append(tuple(shadowed_pair) if shadowed_pair else None)
             offset += length
-    return EventIndex(path=path, seqs=seqs, types=tuple(types), offsets=offsets, lengths=lengths)
+    return EventIndex(path=path, seqs=seqs, types=tuple(types), offsets=offsets, lengths=lengths,
+                      surface_ops=tuple(surface_ops), shadowed=tuple(shadowed))
 
 
 def read_event_at(index: EventIndex, seq: int) -> SessionEvent:
