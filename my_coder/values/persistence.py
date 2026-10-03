@@ -181,9 +181,16 @@ class EventIndex:
         return len(self.types)
 
 
-# 行首的 `"type"` 标识：只为"这条要不要跳过"做一次**廉价**判断（不解析 JSON）。
-# 顶层字段的位置由我们自己的写盘格式决定，所以前 240 字节足够。
-_TYPE_RE = re.compile(r'"type"\s*:\s*"([^"]+)"')
+# 行首**信封**的类型字段：只为"这条要不要跳过"做一次**廉价**判断（不解析 JSON）。
+#
+# **必须锚定**：写入端 `event_to_json` 的字段次序固定为 `seq → time → type → data`，
+# 而 `data`（payload）就在同一行里——若只搜 `"type": "…"`，payload 里出现同样文本就会
+# 被误判（比如某条 `tool/result` 的正文里贴了会话日志片段），于是一条**真事件**被当成
+# "要跳过的帧"整行丢掉 ⇒ **静默少读**。锚定 `^{"seq":…,"time":…,"type":…` 之后，
+# 匹配只可能落在信封上，payload 怎么长都影响不到它。
+# 超长字段（>240 字节才出现 type）会让快路失效 → 退化为正常解析，**只慢不错**。
+_ENVELOPE_TYPE_RE = re.compile(
+    r'^\{"seq":\s*\d+,\s*"time":\s*[0-9.eE+-]+,\s*"type":\s*"([^"]+)"')
 
 
 def scan_index(path: Path, known_types: frozenset[str] | None = KNOWN_SESSION_EVENT_TYPES,
@@ -218,7 +225,7 @@ def scan_index(path: Path, known_types: frozenset[str] | None = KNOWN_SESSION_EV
             # 只解前 240 **字节**；在字节边界切断可能切坏一个多字节字符，所以用
             # `errors='ignore'` 解码——它只影响判断用的那截片段，不影响真正的解析
             head = raw[:240].decode('utf-8', errors='ignore')
-            match = _TYPE_RE.search(head)
+            match = _ENVELOPE_TYPE_RE.match(head)
             fast_type = match.group(1) if match else None
             # 快路：已知类型 + 要跳过 ⇒ 只花一次正则，不解析 JSON
             if fast_type is not None and fast_type in skipped:
