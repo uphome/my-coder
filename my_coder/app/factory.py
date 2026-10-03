@@ -263,6 +263,9 @@ def build_agent(session: Session, args, ui_state: dict, hooks=None,
         render_event(event, args.hide_reasoning, ui_state)
 
     session.on_event(on_event)
+    # 流式帧走独立通道（issue #42）：帧不落日志，但仍要实时渲染（打字机）。
+    # 若这里漏挂，终端就只剩"每步一条结果"——信息不缺，体验全丢。
+    session.on_stream(on_event)
 
     # 真实模式下的上下文压缩双机制（fake 模式都不开——脚本 llm 不能真摘要）：
     # 1. 溢出恢复：模型报上下文过长错误 → 压缩后重试（恒开，错误兜底）

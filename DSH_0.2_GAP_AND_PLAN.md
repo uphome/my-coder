@@ -89,7 +89,7 @@ ls .agents/notes/implemented/architecture/2026-09-02-system-prompt-as-surface-no
 | 1 | 表面事件类型 | `state/session.py:22`：`{user/message, assistant/message, tool/result}` = **3 类** | `types.ts:439`：`system/message, developer/message, user/message, assistant/message, tool/result` = **5 类** | A | P3（见 §6.1） |
 | 2 | 系统提示存放 | 提示 = sections 拼接，走请求/header（同 DSH 0.1） | `system/message` 是**表面节点 0**，`deriveMessages()` 折出来即 wire 消息 0 | A | P3（见 §6.1） |
 | 3 | `request/header` | ✅ 有（12 处命中） | ✅ 有，但 **`EpochHeader` 不再含 `system` 字段** | — | 随 P3 联动 |
-| 4 | 流式持久化 | `assistant/chunk` 独立事件（8 处命中） | v2：`assistant/message` **内嵌紧凑 timed stream** | A | P3（见 §6.2） |
+| 4 | 流式持久化 ✅ **已完成**（2026-10-03，见 `docs/notes/implemented/feature/2026-10-03-stream-log-granularity.md`） | 帧不落盘 + 每步一条 `assistant/stream` 汇总 | 实测 116.3 MB → 约 12.5 MB | A | — |
 | 5 | 失败尝试留档 | ❌ **0 处**（失败/重试/取消在日志里不留痕） | `assistant/attempt`：log-only，保留尝试但**不进模型历史** | A | **P1-1** |
 | 6 | 路由准备与取消原子性 | ❌ 无 `prepare_call`（0 处） | `agent/request` → `prepareCall()`；取消时 **system 与 users 都不提交** | A | **P1-2** |
 | 7 | 进程内流帧 | ❌ 0 处 | `agent/assistant-stream` 的 start/chunk/end 帧（唯一远程消费者是 Web Session-follow） | B | 暂不做 |

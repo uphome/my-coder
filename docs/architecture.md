@@ -276,12 +276,15 @@ _run_one → _run_group（补记账）→ _execute_tool_calls（补记账）
   `stream(request) -> AsyncIterator[StreamChunk]`。循环层只认 StreamChunk，
   不知道 httpx/SSE 的存在——换模型实现不动循环层一行
 - 流式输出的三层分工：能力层**产生**流（SSE 帧 → StreamChunk），循环层
-  **消费**流（落日志 + 喂组装器），UI **展示**流（订阅 assistant/chunk
-  事件渲染）。UI 显示的字不是从模型回调来的，是从日志来的——UI 是日志
-  的投影
+  **消费**流（喂组装器 + 把帧发到瞬时通道 `Session.emit_stream`），UI
+  **展示**流（订阅**瞬时帧**渲染，打字机效果）。**帧不落日志**（issue #42）：
+  写完一步只落一条 `assistant/stream` 汇总（帧数/字符数/耗时），内容完整性由
+  `assistant/message`（正文 + 工具调用参数）与 `assistant/reasoning`（思维链全文）保证
+  ——历史刷新时 UI 读的是日志（`history_payloads`），所以它显示的永远是"结论"，
+  而不是"当时一帧帧打出来的样子"
 - 思维链（`reasoning_content` / `reasoning` / `thinking`）在能力层统一映射为
-  `StreamChunk.reasoning`；循环层把它作为**非 surface 痕迹**落
-  `assistant/reasoning/chunk` 和 `assistant/reasoning`，只用于展示与调试，
+  `StreamChunk.reasoning`；循环层把**全文**作为**非 surface 痕迹**落
+  `assistant/reasoning`（帧另走瞬时通道），只用于展示与调试，
   **不会**进入 `assistant/message` / `derive_messages()`，因此不会回灌给模型
 - wire 翻译的讲究：工具结果在内部是 user 角色消息，wire 层变成
   `role: 'tool'`；带工具调用的助手消息 content 必须是 null；tools 要
@@ -783,8 +786,9 @@ DSH / PI / opencode / Codex 的对照见 [`prior-art.md`](prior-art.md) §11。
  → _run_step 内层循环：
       组请求（system 快照 + derive_messages 折叠的记忆 + 全部工具 schema）
       → request/header 落日志
-      → 流式：有内容的 chunk 落 assistant/chunk，喂组装器；有思维链时另落
-        assistant/reasoning/chunk，结束时落完整 assistant/reasoning（痕迹数据）
+      → 流式：帧**不落日志**（`emit_stream` → 实时订阅者），喂组装器；
+        结束时落完整 assistant/reasoning（思维链全文，痕迹数据）+ 一条
+        assistant/stream（帧数/字符数/耗时汇总）
       → assistant/message 落日志（surface）
       → 有工具调用？按模式分组执行，结果落 tool/result（surface）
       → 回到 while 顶部：derive_messages 自动带上结果，再调模型
@@ -831,7 +835,7 @@ DSH / PI / opencode / Codex 的对照见 [`prior-art.md`](prior-art.md) §11。
 | `web/` | Web 宿主（入口层）：`app.py` FastAPI 路由 + `init_web` + `main`；`state.py` `Seat`/`WebState`/`state`；`sessions.py` seat 生命周期 + 会话文件 + 审批钩子 + **每会话工作区**（解析、落 `session/workspace` 事件、从日志读回）；`titles.py` 自动会话标题；`payload.py` 纯函数投影（不依赖 FastAPI）。seat 化并发隔离（每 seat 一份 `args`，**只有 workspace 不同**）；事件透传 turn/step + turn_start/user_message（带 message_id/rpc_id）/queue_update 帧供前端投影；队列项操作 `POST /queue/update`；`POST /sessions/new` 可带 `{"workspace": "…"}` |
 | `app/compaction.py` | 上下文压缩引擎（四步事务 + checkpoint + 会话 token 累计账） |
 | `show_memory.py` | 教学脚本：重放日志展示"记忆 = 投影" |
-| `tests/` | 218 个测试，**按关注点分文件**（2026-09 从单文件 `test_demo.py` 拆出）：`test_values_session.py` 值/日志投影、`test_inbox.py` 队列、`test_prompt.py` 提示词、`test_llm.py` LLM 客户端/wire 格式、`test_loop.py` 框架循环（含运行时状态贡献者）、`test_tools.py` 工具、`test_todo.py`、`test_recovery.py` 自愈、`test_compaction.py` 压缩、`test_recall.py` 上下文召回（三层投影 + 两个工具 + 两轮审核回归）、`test_instructions.py` / `test_skills.py` 宿主直读、`test_web_search.py`、`test_web.py` Web 宿主（含每对话工作区）、`test_cli.py`；跨文件 helper 在 `conftest.py`；**`test_architecture.py`**（2 条：依赖方向 = 包结构——下层 import 上层当场红，白名单里的例外必须仍然真实存在，不许长僵尸）。3 条平台相关（Windows 建不了符号链接时 skip） |
+| `tests/` | 224 个测试，**按关注点分文件**（2026-09 从单文件 `test_demo.py` 拆出）：`test_values_session.py` 值/日志投影、`test_inbox.py` 队列、`test_prompt.py` 提示词、`test_llm.py` LLM 客户端/wire 格式、`test_loop.py` 框架循环（含运行时状态贡献者）、`test_tools.py` 工具、`test_todo.py`、`test_recovery.py` 自愈、`test_compaction.py` 压缩、`test_recall.py` 上下文召回（三层投影 + 两个工具 + 两轮审核回归）、`test_instructions.py` / `test_skills.py` 宿主直读、`test_web_search.py`、`test_web.py` Web 宿主（含每对话工作区）、`test_cli.py`；跨文件 helper 在 `conftest.py`；**`test_architecture.py`**（2 条：依赖方向 = 包结构——下层 import 上层当场红，白名单里的例外必须仍然真实存在，不许长僵尸）。3 条平台相关（Windows 建不了符号链接时 skip） |
 
 ---
 

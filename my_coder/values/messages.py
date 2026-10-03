@@ -228,11 +228,29 @@ class SessionEvent:
     ignorable: bool = False
 
 
+@dataclass(frozen=True)
+class StreamFrame:
+    """瞬时流帧（issue #42）：**不进日志、不占 seq、不进投影**。
+
+    它是"传输中的字节"，不是状态——模型可见性由 `assistant/message`（正文 + 工具调用参数）
+    与 `assistant/reasoning`（思维链全文）保证，帧只喂给实时订阅者（终端打字机、Web SSE）。
+    与 `SessionEvent` 分开是因为两者的**消费者不同**：事件给日志/投影/重放，
+    帧只给"此刻正在看的人"。
+    """
+
+    type: str
+    data: object = None
+
+
 def new_event(seq: int, type_: str, data=None, surface_op: str | None = None,
-              shadowed: tuple | None = None) -> SessionEvent:
-    """事件工厂：打上当前时间戳，seq 由调用方（Session）保证单调。"""
+              shadowed: tuple | None = None, ignorable: bool = False) -> SessionEvent:
+    """事件工厂：打上当前时间戳，seq 由调用方（Session）保证单调。
+
+    `ignorable=True` 表示"**旧读取者可以不认识它**"：词汇增长（加新事件类型）走这条路，
+    不 bump 格式版本；结构性变化才 bump（判据见上面那段锚点说明）。
+    """
     return SessionEvent(seq=seq, time=time.time(), type=type_, data=data,
-                        surface_op=surface_op, shadowed=shadowed)
+                        surface_op=surface_op, shadowed=shadowed, ignorable=ignorable)
 
 
 # ---- 日志格式锚点（DSH `SessionHeader` + 方向感知拒绝的复刻）----
@@ -267,6 +285,10 @@ KNOWN_SESSION_EVENT_TYPES = frozenset({
     'assistant/message',
     'assistant/reasoning',
     'assistant/reasoning/chunk',
+    # 流式汇总（issue #42）：每 step 一条，替代"每个流帧一条事件"。
+    # 它**不是** surface 事件、也不带内容——内容已经在 assistant/message 与
+    # assistant/reasoning 里；这里只留"这次流式发生了多少帧、花了多久"。
+    'assistant/stream',
     'compaction/end',
     'compaction/start',
     'compaction/summary',

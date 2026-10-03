@@ -1,16 +1,18 @@
 """循环层：turn/step 两级循环 + 工具分组执行。
 
-step 内层 while(true)：组请求 → 流式（每 chunk 落 assistant/chunk 日志，
-思维链另落 assistant/reasoning/chunk 痕迹日志）→ 组装消息（落
-assistant/message）→ 有工具调用就执行（结果落 tool/result 表面日志）→
-再调模型，直到纯文本。工具结果直接进日志，下一步请求的 derive_messages
-自动带上它们——不需要另存一份对话状态。思维链只作为痕迹数据，不回灌。
+step 内层 while(true)：组请求 → 流式（**流帧不落日志**：走 `session.emit_stream` 喂实时
+订阅者，每步只在末尾落一条 `assistant/stream` 汇总）→ 组装消息（落
+assistant/message，正文与工具调用参数全文都在这里）→ 有工具调用就执行（结果落 tool/result
+表面日志）→ 再调模型，直到纯文本。工具结果直接进日志，下一步请求的 derive_messages
+自动带上它们——不需要另存一份对话状态。思维链全文落 `assistant/reasoning`，只作为痕迹
+数据，不回灌。
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
+import time
 
 from ..capability.hooks import PreStepContext, RequestContext, RequestErrorContext
 from ..capability.llm import LlmError, LlmRequest, StreamChunk
@@ -216,7 +218,8 @@ async def _run_step(agent, turn: int, step: int, assembly: dict,
     - 组请求：system 用本回合的提示词快照，messages 是此刻日志折叠出的记忆，
       tools 是全部工具 schema——三者都从投影来，不存第二份状态
     - request/header 落日志：含 system 全文和工具名，resume 恢复路由靠它
-    - 流式：每个 chunk 都落 assistant/chunk 痕迹日志，再喂给组装器
+    - 流式：帧**不落日志**（`emit_stream` 只喂实时订阅者），末尾落一条 `assistant/stream`
+      汇总；内容完整性由 `assistant/message` + `assistant/reasoning` 保证（issue #42）
     - request_error 钩子：返回 'retry' 就 continue 重新组请求
     - 工具结果只落日志；下一个 step 组请求时 derive_messages 自动带上
     """
@@ -275,17 +278,29 @@ async def _run_step(agent, turn: int, step: int, assembly: dict,
                if closing and agent.progress.closing_text else {}),
         })
         assembler = _BlockAssembler()
+        # 流式帧的统计（issue #42）：帧本身**不落日志**，只发瞬时通道；
+        # 这一步结束后落一条 `assistant/stream` 汇总。为什么改：实测 423,617 行日志里
+        # 98.9% 是帧，而其中 98–99% 的字节是**逐行 JSON 固定开销**（一个 step 2,793 行 = 736 KB，
+        # 内容只有 8.9 KB）；内容并没有丢——`_BlockAssembler` 就是用同一批 chunk 拼出
+        # `assistant/message`（正文 + 工具调用参数）与 `assistant/reasoning`（思维链全文）的。
+        stream_started = time.monotonic()
+        frames = reasoning_frames = 0
+        text_chars = reasoning_chars = 0
         try:
             async for chunk in agent.llm.stream(request):
-                # 纯思维链帧只落 reasoning 痕迹，不产生空的 assistant/chunk。
+                # 纯思维链帧只发 reasoning 帧，不产生空的 assistant/chunk。
                 if chunk.text or chunk.tool_calls or chunk.finish_reason or chunk.usage:
-                    session.append('assistant/chunk', {
+                    session.emit_stream('assistant/chunk', {
                         'turn': turn, 'step': step, 'chunk': _chunk_to_data(chunk),
                     })
+                    frames += 1
+                    text_chars += len(chunk.text or '')
                 if chunk.reasoning:
-                    session.append('assistant/reasoning/chunk', {
+                    session.emit_stream('assistant/reasoning/chunk', {
                         'turn': turn, 'step': step, 'reasoning': chunk.reasoning,
                     })
+                    reasoning_frames += 1
+                    reasoning_chars += len(chunk.reasoning)
                 assembler.push(chunk)
         except asyncio.CancelledError:
             # 取消是一类**尝试的结局**（不是成功）：留档后原样放行（不变式⑤）。
@@ -326,6 +341,20 @@ async def _run_step(agent, turn: int, step: int, assembly: dict,
             'message': message,
             **({'usage': assembler.usage} if assembler.usage else {}),
         }, surface_op='append')
+
+        # 流式汇总（issue #42）：每 step **一条**，替代原来每个流帧一条事件。
+        # 落 `ignorable=True`：这是**词汇增长**（新类型），旧读取者不认识它可以跳过，
+        # 所以按仓库规则**不 bump 格式版本**（结构性变化才 bump）。
+        if frames or reasoning_frames:
+            session.append('assistant/stream', {
+                'turn': turn,
+                'step': step,
+                'frames': frames,
+                'reasoning_frames': reasoning_frames,
+                'text_chars': text_chars,
+                'reasoning_chars': reasoning_chars,
+                'ms': round((time.monotonic() - stream_started) * 1000),
+            }, ignorable=True)
 
         if assembler.finish_reason == 'length':
             # 输出被 max_tokens 截断。demo 到此收尾（记 max-tokens）；

@@ -14,7 +14,13 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import cast
 
-from ..values.messages import Message, SessionEvent, new_event, new_session_header
+from ..values.messages import (
+    Message,
+    SessionEvent,
+    StreamFrame,
+    new_event,
+    new_session_header,
+)
 
 # 唯一能"浮上水面变成模型消息"的三类事件。
 # surface_op 校验：这三类必须带 surface_op（'append' 或 'replace'），
@@ -31,6 +37,7 @@ class Session:
       'replace' 会把被遮蔽 seq 移除、新 seq 原位插入，所以它是
       "当前模型可见顺序"，顺序正确（摘要在前、新对话在后）
     - _listeners：订阅者（持久化/UI 都通过订阅消费日志）
+    - _stream_listeners：**瞬时帧**的订阅者（issue #42）——流式帧不落日志，见 `emit_stream`
 
     两个写入路径不对称，这是 resume 机制的全部秘密：
     - append：新事件 → 校验 + 落日志 + 更新投影 + 通知 listener
@@ -42,6 +49,7 @@ class Session:
         self._log: list[SessionEvent] = []
         self._surface: list[int] = []
         self._listeners: list[Callable[[SessionEvent], None]] = []
+        self._stream_listeners: list[Callable[[StreamFrame], None]] = []
 
     @property
     def events(self) -> tuple[SessionEvent, ...]:
@@ -75,6 +83,26 @@ class Session:
         self._listeners.append(listener)
         return lambda: self._listeners.remove(listener)
 
+    def on_stream(self, listener: Callable[[StreamFrame], None]):
+        """订阅**瞬时流帧**（issue #42）：只给"此刻正在看的人"，不落盘。
+
+        与 `on_event` 分开是必须的：`bind_store` 就是把 `save_event` 挂在 `on_event` 上——
+        若流帧也走那条通道，它就会被写进日志（那正是写放大的来源）。
+        """
+        self._stream_listeners.append(listener)
+        return lambda: self._stream_listeners.remove(listener)
+
+    def emit_stream(self, type_: str, data=None) -> None:
+        """发一帧瞬时数据（流式打字机）。**不落日志、不占 seq、不进投影。**
+
+        判据：**流帧不是状态**。模型的可见内容由 `assistant/message`（正文 + 工具调用参数）
+        与 `assistant/reasoning`（思维链全文）保证——帧只是这些内容的"传输过程"，
+        没有它不影响任何可重建事实（见 `docs/notes/implemented/…`）。
+        """
+        frame = StreamFrame(type=type_, data=data)
+        for listener in list(self._stream_listeners):
+            listener(frame)
+
     def bind_store(self, path):
         """把后续事件实时追加落盘（listener 在 append 提交后触发）。返回解绑函数。
 
@@ -89,11 +117,13 @@ class Session:
         return self.on_event(lambda event: save_event(path, event))
 
     def append(self, type_: str, data=None, surface_op: str | None = None,
-               shadowed: tuple | None = None) -> SessionEvent:
+               shadowed: tuple | None = None, ignorable: bool = False) -> SessionEvent:
         """落一条新事件：先校验 → 再记日志 → 更新投影 → 通知 listener。
 
         顺序很重要：listener 在 append 提交之后才触发，
         保证订阅者（比如落盘）看到的状态和日志一致。
+
+        `ignorable=True`：这条事件对**旧读取者**可以"不认识就跳过"（词汇增长不 bump 版本）。
         """
         if type_ in SURFACE_EVENT_TYPES:
             if surface_op not in ('append', 'replace'):
@@ -105,7 +135,7 @@ class Session:
             raise ValueError(f"replace event {type_!r} requires shadowed=(start_seq, end_seq)")
         if surface_op != 'replace' and shadowed is not None:
             raise ValueError(f'shadowed is only valid with surface_op="replace" (got {surface_op!r})')
-        event = new_event(len(self._log), type_, data, surface_op, shadowed)
+        event = new_event(len(self._log), type_, data, surface_op, shadowed, ignorable)
         self._log.append(event)
         self._apply_surface(event)
         for listener in list(self._listeners):

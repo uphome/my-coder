@@ -199,7 +199,7 @@ Web 端默认只绑 `127.0.0.1` 且不校验来源——**不要**把它暴露�
 ```sh
 python -m ruff check my_coder tests   # 风格
 python -m mypy my_coder               # 类型
-python -m pytest                      # 218 个测试（3 条平台相关会 skip）
+python -m pytest                      # 224 个测试（3 条平台相关会 skip）
 ```
 
 三绿才提交。测试按关注点分 15 个文件 + `conftest.py` + `test_architecture.py`（依赖方向 = 包结构）。
