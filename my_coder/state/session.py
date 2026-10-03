@@ -15,12 +15,14 @@ from collections.abc import Callable
 from typing import cast
 
 from ..values.messages import (
+    TRACE_FRAME_TYPES,
     Message,
     SessionEvent,
     StreamFrame,
     new_event,
     new_session_header,
 )
+from ..values.persistence import iter_events, scan_index
 
 # 唯一能"浮上水面变成模型消息"的三类事件。
 # surface_op 校验：这三类必须带 surface_op（'append' 或 'replace'），
@@ -53,6 +55,26 @@ class Session:
         # `events` 的按变更缓存（issue #46 ②）：`None` = 脏，下次访问重建一次。
         # 失效点只有两个（`append` / `adopt`）——`_log` 没有别的写入者。
         self._events_cache: tuple[SessionEvent, ...] | None = None
+
+    @classmethod
+    def from_path(cls, path, session_id: str = '',
+                  skip_types: tuple[str, ...] = TRACE_FRAME_TYPES) -> Session:
+        """从日志**重放**出一个会话——所有"打开/读取一个会话"的入口都该走这里（issue #46 ③）。
+
+        与 `load_events` + `adopt` 的区别只有一个：**整类跳过 `skip_types`**（默认流式帧）。
+        它们连 payload 都不解析，所以老日志（帧占 98.9%）的重放代价降两个数量级；
+        新会话（v2）本就没有帧，这条路径对它是恒等的。
+
+        **为什么跳过是安全的**：帧是纯痕迹、不在检索面里（`SURFACE` 不含），内容也不是独有的
+        （`assistant/message` 有正文与工具参数全文、`assistant/reasoning` 有思维链全文，
+        #42 有逐字节等价的机械证明）。所以 `derive_messages` / 召回 / 历史渲染的结果**不变**。
+        需要看帧的场景（帧时代的实时回放）本来也只在**当时的进程内**发生，不靠重放。
+        """
+        index = scan_index(path)
+        session = cls(session_id or getattr(path, 'stem', ''))
+        for event in iter_events(index, skip_types=skip_types):
+            session.adopt(event)
+        return session
 
     @property
     def events(self) -> tuple[SessionEvent, ...]:

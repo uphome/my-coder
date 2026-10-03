@@ -39,7 +39,6 @@ from pathlib import Path
 
 from ..state.session import Session
 from ..values.messages import Message, TextBlock, ToolCallBlock, ToolResultBlock
-from ..values.persistence import iter_events, scan_index
 from .workspace import normalize_recorded_workspace
 
 log = logging.getLogger('recall')
@@ -563,11 +562,7 @@ def load_session_log(path: Path, session_id: str = '') -> Session:
     **98.9%** 的事件——实测一个 42.5 万事件的会话，跳过帧后只重放约 **4.7k** 条；新会话（v2）
     本就没有帧，这条路径对它是恒等的。实现走索引，连帧的 payload 都不解析。
     """
-    index = scan_index(path)
-    session = Session(session_id or path.stem)
-    for event in iter_events(index, skip_types=FRAME_TYPES):
-        session.adopt(event)
-    return session
+    return Session.from_path(path, session_id)
 
 
 def row_from_session(session: Session, default_workspace: str = '',
