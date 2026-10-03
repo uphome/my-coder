@@ -120,6 +120,10 @@ def _scan_one(path: Path, default_workspace: str) -> SessionRow:
     summary = title = title_source = workspace = ''
     with path.open(encoding='utf-8') as handle:
         for line in handle:
+            # 第一行是会话头（文件级元数据，不是事件）：跳过，否则目录里的
+            # "事件数"比真实事件多 1，且它不匹配任何 `"type"` 分支。
+            if line.startswith('{"session": true'):
+                continue
             events += 1
             if '"type": "user/message"' in line:
                 # **checkpoint 也是一条 user/message**（`surface_op='replace'` 写的合成消息）：

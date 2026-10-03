@@ -228,11 +228,139 @@ class SessionEvent:
     ignorable: bool = False
 
 
+@dataclass(frozen=True)
+class StreamFrame:
+    """瞬时流帧（issue #42）：**不进日志、不占 seq、不进投影**。
+
+    它是"传输中的字节"，不是状态——模型可见性由 `assistant/message`（正文 + 工具调用参数）
+    与 `assistant/reasoning`（思维链全文）保证，帧只喂给实时订阅者（终端打字机、Web SSE）。
+    与 `SessionEvent` 分开是因为两者的**消费者不同**：事件给日志/投影/重放，
+    帧只给"此刻正在看的人"。
+    """
+
+    type: str
+    data: object = None
+
+
 def new_event(seq: int, type_: str, data=None, surface_op: str | None = None,
-              shadowed: tuple | None = None) -> SessionEvent:
-    """事件工厂：打上当前时间戳，seq 由调用方（Session）保证单调。"""
+              shadowed: tuple | None = None, ignorable: bool = False) -> SessionEvent:
+    """事件工厂：打上当前时间戳，seq 由调用方（Session）保证单调。
+
+    `ignorable=True` 表示"**旧读取者可以不认识它**"：词汇增长（加新事件类型）走这条路，
+    不 bump 格式版本；结构性变化才 bump（判据见上面那段锚点说明）。
+    """
     return SessionEvent(seq=seq, time=time.time(), type=type_, data=data,
-                        surface_op=surface_op, shadowed=shadowed)
+                        surface_op=surface_op, shadowed=shadowed, ignorable=ignorable)
+
+
+# ---- 日志格式锚点（DSH `SessionHeader` + 方向感知拒绝的复刻）----
+#
+# 为什么需要：日志是唯一事实源，但**格式本身没有版本**——写日志的进程升级、
+# 事件类型增删之后，旧读取者会静默地按自己的理解重建一份**语义不同**的会话。
+# 三条设计原则（对齐 DSH 的 session-log-version-mechanism）：
+#   1. **一个单调整数，不分主次版本**：能否自动升级是那一步 upgrader 的属性，
+#      不该由版本号形态预先承诺；
+#   2. **写入者决定 bump**：判据不是"能否解析"，而是"旧运行时还能否**语义正确**
+#      地处理"；拿不准就 bump（近乎恒等的 upgrader 几乎免费，漏 bump 会静默毁掉
+#      旧读取者）；
+#   3. **按方向读**：相等 → 正常；日志版本 > 读取者 → **拒绝**（指明升级方向，
+#      与"损坏"分开——什么都没坏）；日志版本 < 读取者 → 内存里跑迁移链，源文件不动。
+#
+# 配套第二轴：**未知事件默认"必读"**——不认识的、又没标 `ignorable: true`
+# 的事件 → 拒绝重建。"忘标记 → 过度拒绝（麻烦）"远好于"默认忽略 → 静默恢复出
+# 一份被掏空的会话（安全事故）"。**只有结构性变化才 bump 版本；词汇增长靠
+# `ignorable` 标记，不 bump。**
+SESSION_FORMAT_VERSION = 1
+
+# 没有会话头的日志按这个版本读（本机制落地前写的文件，与 v1 的事件形状相同）。
+LEGACY_SESSION_FORMAT_VERSION = 0
+
+# 已知事件类型（闭集）。读取端拿它做未知事件守卫——**加新事件类型要同时加到这里**，
+# 忘了加不会静默：新类型的日志在旧读取者那里会明确报"未知且不可忽略"。
+# 判据：事件类型是否出现在 `my_coder/` 的 `session.append(...)` 里。
+KNOWN_SESSION_EVENT_TYPES = frozenset({
+    'agent/inbox/spliced',
+    'assistant/attempt',
+    'assistant/chunk',
+    'assistant/message',
+    'assistant/reasoning',
+    'assistant/reasoning/chunk',
+    # 流式汇总（issue #42）：每 step 一条，替代"每个流帧一条事件"。
+    # 它**不是** surface 事件、也不带内容——内容已经在 assistant/message 与
+    # assistant/reasoning 里；这里只留"这次流式发生了多少帧、花了多久"。
+    'assistant/stream',
+    'compaction/end',
+    'compaction/start',
+    'compaction/summary',
+    'request/header',
+    'session/repaired',
+    'session/title',
+    'session/workspace',
+    'step/end',
+    'step/start',
+    'todo/write',
+    'tool/call',
+    'tool/result',
+    'tool/skipped',
+    'turn/end',
+    'turn/start',
+    'user/message',
+    'web/search',
+})
+
+
+@dataclass(frozen=True)
+class SessionHeader:
+    """会话文件的第一行：**不是事件**，不参与 seq 编号，也不进任何投影。
+
+    为什么不把它做成 `SessionEvent`：`Session._log[seq]` 依赖"seq == 索引"
+    （`derive_messages` 直接按下标取），让头占掉 seq 0 会把整库序号平移，
+    并且坏掉所有"按 seq 下标取事件"的读取方（如召回审计脚本）。
+    头是**文件级元数据**，与事件流正交——这也是 DSH 把 `SessionHeader` 与
+    事件信封分开的原因。
+
+    字段刻意只有三个：**头的职责就是钉住格式版本**。工作区已经有
+    `session/workspace` 痕迹事件这个家（一个事实只有一个家），塞进头里
+    会立刻变成第二个会漂的副本。
+    """
+    version: int = SESSION_FORMAT_VERSION
+    id: str = ''
+    time: float = 0.0
+
+
+def session_header_to_json(header: SessionHeader) -> dict:
+    """会话头 → 磁盘形态（JSONL 的第一行）。"""
+    return {
+        'session': True,
+        'format_version': header.version,
+        'id': header.id,
+        'time': header.time,
+    }
+
+
+def session_header_from_json(data: dict) -> SessionHeader:
+    """`session_header_to_json` 的严格逆操作。"""
+    return SessionHeader(
+        version=int(data['format_version']),
+        id=str(data.get('id', '')),
+        time=float(data.get('time', 0.0)),
+    )
+
+
+def new_session_header(session_id: str,
+                       version: int = SESSION_FORMAT_VERSION) -> SessionHeader:
+    """新建会话头（时间戳在此打上）。"""
+    return SessionHeader(version=version, id=session_id, time=time.time())
+
+
+def is_session_header_line(data: dict) -> bool:
+    """这一行是不是会话头（用 `session: true` 标记，与事件信封区分）。
+
+    判据刻意用**显式标记**而不是"没有 type 字段"：后者会把将来任何结构变化
+    误判成头，而且没法与"损坏的行"区分。
+    """
+    return data.get('session') is True
+
 
 
 # ---- JSONL 编解码：tagged dict 方案 ----

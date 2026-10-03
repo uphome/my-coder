@@ -98,8 +98,14 @@ def load_events(path: Path) -> list[dict]:
     events = []
     with path.open('r', encoding='utf-8') as handle:
         for line in handle:
-            if line.strip():
-                events.append(json.loads(line))
+            if not line.strip():
+                continue
+            data = json.loads(line)
+            # 第一行是会话头（文件级元数据，不是事件）：跳过，否则 events[seq]
+            # 的下标会整体错位一格（本模块按下标取事件）。
+            if data.get('session') is True:
+                continue
+            events.append(data)
     return events
 
 

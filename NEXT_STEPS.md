@@ -25,7 +25,10 @@
 | **web_search（联网搜索）** | ✅ 已完成（DeepSeek 官方原生搜索，见下节） |
 | 阶段一收尾（更新 README / ARCHITECTURE 定稿） | ✅ 已完成（含 2026-09 架构重构与本文档同步） |
 
-> 当前全量测试：85 passed（AGENTS.md 里的数字保持同步）。
+> **2026-10-03 日志粒度（issue #42）**：流式帧不再落盘（Session.emit_stream 只喂实时 UI），每 step 落一条 ssistant/stream 汇总。实测同一份日志投影：**116.3 MB / 425,854 行 → 约 12.5 MB / 4,530 行**（帧占 89.3% 字节、98.9% 行）；内容完整性有机械证明（帧拼接 == 落盘的正文/参数/思维链）。见 [粒度那篇](docs/notes/implemented/feature/2026-10-03-stream-log-granularity.md)。
+>
+> 当前全量测试：224 个（3 条平台相关 skip）——数字由 `tests/test_doc_numbers.py` **机械保证**
+> （文档里任何测试数/行数与代码不符，那个门禁就会红；不再靠"记得同步"）。
 
 ## read_file 升级（已完成）
 
@@ -832,6 +835,36 @@ python eval/recall/export_sessions.py                       # 证据导出成可
    被遮蔽区"的探针 **3 条/54 MB 会话**（`刚才你是不是加载了一个skill？` /
    `先为刚才的问题写一个 todo-write吧` / `我们之前谈过什么的呢？`）——判据可从日志取真值。
    要做就写 `eval/recall/real_probes.py`（抽出 + 判据 + R2/R3 配对）。
+
+## assistant/attempt：失败/重试/取消的尝试留档（P1-1，2026-10-01 落地）
+
+**问题**：`assistant/message` 只记**成功的那次**。失败、重试、取消此前在日志里
+**什么都不留**（全仓 `grep assistant/attempt` = 0 处）——长任务事后答不出"它试了几次、
+为什么失败"，而这正是可观测性的核心问题。
+
+**母本依据**：DSH `.agents/notes/implemented/architecture/2026-09-01-v2-embedded-assistant-streams.md`
+——每次尝试要么结算为 `assistant/message`（成功，v2 里还内嵌紧凑 timed stream），
+要么结算为 `assistant/attempt`（失败 / 重试 / 取消 / 流错误，**log-only，不进模型历史**）。
+
+**落地**：`runtime/loop.py` 的 `_record_attempt()`，两处调用——
+
+- `except LlmError`：`outcome` = 钩子给的 `retry` / `throw`（没挂钩子时是 `throw`），
+  带上 `code` / `message`（LlmError 的两段式）；
+- `except asyncio.CancelledError`：`outcome='cancelled'`，**记完再抛**（取消单向传播不变）。
+
+两者都带 `partial`（已流出的半截文本，截到 `values/limits.py` 的
+`ATTEMPT_PARTIAL_MAX_CHARS = 500`）——留档要能回答"它到哪一步才挂的"。
+
+**两条边界**：① **不是 surface**（不进 `derive_messages`）——留档是给人看的可观测性，
+把失败的半截输出回灌给模型只会污染它；② **硬进程丢失（kill/断电）发生在结算之前时
+没有尝试可恢复**，日志停在半截流上（DSH 同样如此，这是已知代价不是缺陷）。
+
+**顺带**：`KNOWN_SESSION_EVENT_TYPES`（§P0-3 的闭集）加上 `assistant/attempt`——
+闭集有双向断言（不许漏登记，也不许留僵尸），所以新事件类型漏登记会在测试里响亮地炸。
+
+**验收**：`tests/test_loop.py` 三条新用例——失败后重试留档（含 code/message/turn/step/
+provider/model）+ 不进模型历史 / 取消留档且 `partial` 是半截文本（同时 `turn/end` 仍记
+`aborted`）/ `partial` 截断上限。全量 224 个测试（3 条 skip）。
 
 ## 工具收敛（issue #2，2026-09-30 落地）
 

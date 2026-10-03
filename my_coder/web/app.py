@@ -237,6 +237,9 @@ async def chat(request: Request) -> StreamingResponse:
 
     queue: asyncio.Queue = asyncio.Queue()
     unsubscribe = session.on_event(lambda event: queue.put_nowait(event))
+    # 流式帧（issue #42）：不落日志、只推给这条 SSE 流。返回的退订函数要一起收藏，
+    # 否则客户端断开后帧订阅还挂在 Session 上（长命宿主会累积）。
+    unsubscribe_stream = session.on_stream(lambda frame: queue.put_nowait(frame))
 
     # 自动起名：首条用户消息一旦落日志立即触发（不等回合结束——回合可能因
     # approval / 长任务迟迟不结束；标题只依赖第一条消息，尽早起名体验最好）。
@@ -298,6 +301,7 @@ async def chat(request: Request) -> StreamingResponse:
                 seat.agent.cancel()
             task.cancel()
             unsubscribe()
+            unsubscribe_stream()   # 流式帧的订阅也要退（同一生命周期，见上面的挂载处）
             watch()   # 退订首条消息监听（会话切换后不留悬挂监听）
             if seat.queue is queue:   # 只有自己挂的才清（并发：别清掉别的流的）
                 seat.queue = None

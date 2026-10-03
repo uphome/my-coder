@@ -1,20 +1,23 @@
 """循环层：turn/step 两级循环 + 工具分组执行。
 
-step 内层 while(true)：组请求 → 流式（每 chunk 落 assistant/chunk 日志，
-思维链另落 assistant/reasoning/chunk 痕迹日志）→ 组装消息（落
-assistant/message）→ 有工具调用就执行（结果落 tool/result 表面日志）→
-再调模型，直到纯文本。工具结果直接进日志，下一步请求的 derive_messages
-自动带上它们——不需要另存一份对话状态。思维链只作为痕迹数据，不回灌。
+step 内层 while(true)：组请求 → 流式（**流帧不落日志**：走 `session.emit_stream` 喂实时
+订阅者，每步只在末尾落一条 `assistant/stream` 汇总）→ 组装消息（落
+assistant/message，正文与工具调用参数全文都在这里）→ 有工具调用就执行（结果落 tool/result
+表面日志）→ 再调模型，直到纯文本。工具结果直接进日志，下一步请求的 derive_messages
+自动带上它们——不需要另存一份对话状态。思维链全文落 `assistant/reasoning`，只作为痕迹
+数据，不回灌。
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
+import time
 
 from ..capability.hooks import PreStepContext, RequestContext, RequestErrorContext
 from ..capability.llm import LlmError, LlmRequest, StreamChunk
 from ..state.progress import NUDGE
+from ..values.limits import ATTEMPT_PARTIAL_MAX_CHARS
 from ..values.messages import (
     Message,
     TextBlock,
@@ -75,6 +78,16 @@ class _BlockAssembler:
             blocks.append(ToolCallBlock(id=call['id'], name=call['name'], arguments=call['arguments']))
         return blocks
 
+    def partial_text(self, limit: int = ATTEMPT_PARTIAL_MAX_CHARS) -> str:
+        """已经流出来的半截文本（**给失败/取消的尝试留档用**）。
+
+        为什么留它：请求失败或被杀时，日志原先只剩半截 stream，事后答不出
+        "它到哪一步才挂的"。截到 `limit` 就够判断了，记全文只会把日志撑大。
+        """
+        if len(self.text) <= limit:
+            return self.text
+        return self.text[:limit] + f'…(+{len(self.text) - limit} chars)'
+
 
 async def run_turn(agent) -> bool:
     """一个 turn：turn/start → [pre_step + step] 循环 → turn/end。返回是否还有下一回合。
@@ -114,9 +127,19 @@ async def run_turn(agent) -> bool:
         closing_step = False
         while True:
             step += 1
-            claimed = agent.inbox.claim(target, turn)
-            messages = await _resolve_pre_step(agent, turn, step, claimed)
+            # **取消点全部提到动队列之前**：pre_step 钩子与 request 钩子都可能 await，
+            # 而"认领"会把消息从队列摘掉。旧顺序（claim → await pre_step）留下一个
+            # 致命窗口：取消打在那儿，消息三处都不在（队列没了、surface 没有、日志也
+            # 没有 canceled 标记）——用户原话静默消失。现在两个 await 都在 claim 前，
+            # 取消时队列**一个字没动**，clear() 能正常把它标成 canceled。
+            pending = agent.inbox.peek(target)
+            messages = await _resolve_pre_step(agent, turn, step, pending)
             if messages is None:
+                # 钩子拒绝：**也要把批次消费掉**。不消费的话消息还躺在队列里，
+                # run_turn 返回 has_pending=True → 被动状态机立刻拿同一条消息再开
+                # 一轮 → 无限空转（实测：测试 40s 不返回）。拒绝的语义是"这条不发给
+                # 模型"，不是"留着下次再问一次"；消费动作无 await，仍然原子。
+                agent.inbox.claim(target, turn)
                 end_reason = 'blocked'
                 break
             if end_reason is not None and not messages:
@@ -124,15 +147,22 @@ async def run_turn(agent) -> bool:
             if step == 1 and not messages:
                 end_reason = 'completed'   # 首步没货：不花模型调用
                 break
+            config = await _resolve_request(agent, turn, step)   # 取消点（仍在 claim 前）
             # 上一步的只读调查触到上限 → 这一步是**收尾步**：不带工具面 + 一条收尾指令。
             # 它仍是一次正常的模型请求（模型有完整的文字表达能力），所以不会产生
             # "带了 tool_calls 却没有结果"的非法 wire。
             closing_step = agent.progress.closing
+            # ---- 下面到 user/message 落盘之间**没有 await**：认领与落盘一次性提交 ----
+            # 注意 pre_step 允许"改写"：它可能返回一条全新 id 的消息（原来那条
+            # 随之被 claim 摘掉）。这是钩子契约的一部分，不是异常——所以这里只做
+            # 提交，不校验"返回的是不是刚认领的那几条"。
+            agent.inbox.claim(target, turn)
             session.append('step/start', {'turn': turn, 'step': step})
             for message in messages:
                 # 认领到的消息在此刻浮上水面：从队列载荷变成模型记忆
                 session.append('user/message', message, surface_op='append')
-            outcome = await _run_step(agent, turn, step, assembly, closing=closing_step)
+            outcome = await _run_step(agent, turn, step, assembly, config=config,
+                                      closing=closing_step)
             session.append('step/end', {'turn': turn, 'step': step})
             if end_reason != 'max-tokens':     # max-tokens 粘性：不降级
                 end_reason = outcome
@@ -167,7 +197,7 @@ async def _resolve_pre_step(agent, turn: int, step: int, claimed: list[Message])
 
 
 async def _run_step(agent, turn: int, step: int, assembly: dict,
-                    closing: bool = False) -> str | None:
+                    config: dict | None = None, closing: bool = False) -> str | None:
     """一个 step：**只发一次**模型请求（+ 它发起的工具调用）。返回结束原因。
 
     返回 None = 本步发起了工具调用、回合还没收尾：工具结果已落日志，
@@ -180,17 +210,25 @@ async def _run_step(agent, turn: int, step: int, assembly: dict,
 
     内层 while 只服务一件事：request_error 钩子返回 'retry' 时重发本次请求。
 
+    `config` 由 `run_turn` 在**认领之前**解析好传进来（这样才能把 request 与
+    pre_step 两个 await 都挪到动队列之前，见 run_turn 的注释）；`None`（或重试）
+    时本函数自己解析——重试要按当时的钩子重新取路由，不能用第一次的快照。
+
     循环体内的关键机制：
     - 组请求：system 用本回合的提示词快照，messages 是此刻日志折叠出的记忆，
       tools 是全部工具 schema——三者都从投影来，不存第二份状态
     - request/header 落日志：含 system 全文和工具名，resume 恢复路由靠它
-    - 流式：每个 chunk 都落 assistant/chunk 痕迹日志，再喂给组装器
+    - 流式：帧**不落日志**（`emit_stream` 只喂实时订阅者），末尾落一条 `assistant/stream`
+      汇总；内容完整性由 `assistant/message` + `assistant/reasoning` 保证（issue #42）
     - request_error 钩子：返回 'retry' 就 continue 重新组请求
     - 工具结果只落日志；下一个 step 组请求时 derive_messages 自动带上
     """
     session = agent.session
+    # 第一次用调用方（run_turn）解析好的 config；之后（重试）自己重新解析——
+    # 重试要按当时的钩子重新取路由，不能用失败前那份快照。
+    attempt = config if config is not None else await _resolve_request(agent, turn, step)
     while True:
-        config = await _resolve_request(agent, turn, step)
+        config = attempt
         header = session.request_header()
         # 三级 fallback：request 钩子 > agent.options > 上次 request/header（resume 恢复）
         provider = config.get('provider') or agent.options.get('provider') or (header or {}).get('provider', '')
@@ -240,25 +278,50 @@ async def _run_step(agent, turn: int, step: int, assembly: dict,
                if closing and agent.progress.closing_text else {}),
         })
         assembler = _BlockAssembler()
+        # 流式帧的统计（issue #42）：帧本身**不落日志**，只发瞬时通道；
+        # 这一步结束后落一条 `assistant/stream` 汇总。为什么改：实测 423,617 行日志里
+        # 98.9% 是帧，而其中 98–99% 的字节是**逐行 JSON 固定开销**（一个 step 2,793 行 = 736 KB，
+        # 内容只有 8.9 KB）；内容并没有丢——`_BlockAssembler` 就是用同一批 chunk 拼出
+        # `assistant/message`（正文 + 工具调用参数）与 `assistant/reasoning`（思维链全文）的。
+        stream_started = time.monotonic()
+        frames = reasoning_frames = 0
+        text_chars = reasoning_chars = 0
         try:
             async for chunk in agent.llm.stream(request):
-                # 纯思维链帧只落 reasoning 痕迹，不产生空的 assistant/chunk。
+                # 纯思维链帧只发 reasoning 帧，不产生空的 assistant/chunk。
                 if chunk.text or chunk.tool_calls or chunk.finish_reason or chunk.usage:
-                    session.append('assistant/chunk', {
+                    session.emit_stream('assistant/chunk', {
                         'turn': turn, 'step': step, 'chunk': _chunk_to_data(chunk),
                     })
+                    frames += 1
+                    text_chars += len(chunk.text or '')
                 if chunk.reasoning:
-                    session.append('assistant/reasoning/chunk', {
+                    session.emit_stream('assistant/reasoning/chunk', {
                         'turn': turn, 'step': step, 'reasoning': chunk.reasoning,
                     })
+                    reasoning_frames += 1
+                    reasoning_chars += len(chunk.reasoning)
                 assembler.push(chunk)
+        except asyncio.CancelledError:
+            # 取消是一类**尝试的结局**（不是成功）：留档后原样放行（不变式⑤）。
+            # 不记的话日志里只剩半截 stream，事后答不出"这次请求怎么了"。
+            _record_attempt(session, turn, step, request, 'cancelled',
+                            partial=assembler.partial_text())
+            raise
         except LlmError as failure:
             action = 'throw'
             if agent.hooks.request_error is not None:
                 action = await agent.hooks.request_error(RequestErrorContext(
                     turn=turn, step=step, code=failure.code, message=failure.message,
                 ))
+            # 失败/重试都留档：`assistant/message` 只记成功的那次，失败的那次
+            # 此前在日志里**什么都不留**——长任务事后答不出"它试了几次、为什么失败"。
+            _record_attempt(session, turn, step, request, action, error=failure,
+                            partial=assembler.partial_text())
             if action == 'retry':
+                # 重发要重新解析路由（钩子可能已经改了 model/max_tokens），
+                # 不能拿失败前那份快照再发一次
+                attempt = await _resolve_request(agent, turn, step)
                 continue
             raise
 
@@ -279,6 +342,20 @@ async def _run_step(agent, turn: int, step: int, assembly: dict,
             **({'usage': assembler.usage} if assembler.usage else {}),
         }, surface_op='append')
 
+        # 流式汇总（issue #42）：每 step **一条**，替代原来每个流帧一条事件。
+        # 落 `ignorable=True`：这是**词汇增长**（新类型），旧读取者不认识它可以跳过，
+        # 所以按仓库规则**不 bump 格式版本**（结构性变化才 bump）。
+        if frames or reasoning_frames:
+            session.append('assistant/stream', {
+                'turn': turn,
+                'step': step,
+                'frames': frames,
+                'reasoning_frames': reasoning_frames,
+                'text_chars': text_chars,
+                'reasoning_chars': reasoning_chars,
+                'ms': round((time.monotonic() - stream_started) * 1000),
+            }, ignorable=True)
+
         if assembler.finish_reason == 'length':
             # 输出被 max_tokens 截断。demo 到此收尾（记 max-tokens）；
             # 续写粘性（自动继续）是进化阶段的课题。
@@ -295,6 +372,37 @@ async def _run_step(agent, turn: int, step: int, assembly: dict,
         # 循环 → 下一个 step 的 claim 有机会吸收插队消息 → 再发下一次请求
         # （那时 derive_messages 自动带上工具结果，不需要"把结果发给模型"的代码）。
         return None
+
+
+def _record_attempt(session, turn: int, step: int, request, outcome: str,
+                    error: LlmError | None = None, partial: str = '') -> None:
+    """给一次**没能成功结算**的模型请求留档（`assistant/attempt`）。
+
+    为什么需要：`assistant/message` 只记"成功的那次"。失败、重试、取消此前在
+    日志里**什么都不留**——长任务事后答不出"它试了几次、为什么失败"。
+    对齐 DSH 的 `assistant/attempt`：每次尝试要么结算为 `assistant/message`
+    （成功），要么结算为 `assistant/attempt`（失败/重试/取消/流错误）。
+
+    **它不进模型历史**（不是 surface 事件，`derive_messages` 只认三类 surface）：
+    留档是给人看的可观测性，不是给模型的上下文——失败的半截输出回灌给模型
+    反而会污染它。
+
+    已知代价：硬进程丢失（kill/断电）发生在结算之前时，**没有尝试可恢复**
+    （DSH 同样如此）——那种情况下日志停在半截 stream 上。
+    """
+    payload = {
+        'turn': turn,
+        'step': step,
+        'outcome': outcome,          # cancelled / retry / throw
+        'provider': getattr(request, 'provider', ''),
+        'model': getattr(request, 'model', ''),
+    }
+    if error is not None:
+        payload['code'] = error.code
+        payload['message'] = error.message
+    if partial:
+        payload['partial'] = partial
+    session.append('assistant/attempt', payload)
 
 
 async def _resolve_request(agent, turn: int, step: int) -> dict:

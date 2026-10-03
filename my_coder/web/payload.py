@@ -233,6 +233,11 @@ def event_to_payload(event, session: Session | None = None, agent=None) -> dict 
         reasoning = event.data['reasoning']
         return ({'type': 'reasoning', 'turn': event.data['turn'], 'step': event.data['step'],
                  'text': reasoning} if reasoning else None)
+    if event.type == 'assistant/stream':
+        # 流式汇总（issue #42）：**不进历史**。历史要展示的是"说了什么/想了什么"，
+        # 两者分别由 assistant/message 与 assistant/reasoning 提供（v1/v2 都有），
+        # 这条只回答"这一步流了多久、多少帧"——想看就去日志里查（它是可审计的）。
+        return None
     if event.type == 'tool/call':
         return {
             'type': 'tool_call',

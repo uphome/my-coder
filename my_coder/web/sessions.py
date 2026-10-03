@@ -250,6 +250,10 @@ def scan_sessions() -> list[dict]:
         workspace = ''
         with path.open(encoding='utf-8') as fh:
             for line in fh:
+                # 第一行是会话头（文件级元数据，不是事件）：计数与快扫都跳过它，
+                # 否则列表里的"事件数"会比真实事件多 1。
+                if line.startswith('{"session": true'):
+                    continue
                 events += 1
                 # 找第一条 user/message 当 fallback 摘要
                 if not summary and '"type": "user/message"' in line:

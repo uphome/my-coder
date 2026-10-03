@@ -57,17 +57,16 @@ Windows 控制台是 GBK：用 `--no-capture-output`；`conda run -c` 不支持�
 
 ## 约定（每条 = 判据 + 去哪看）
 
-- **提示词纪律的归属**：`system` 是唯一"每轮都生效"的通道，**文档挡不住**，
-  所以反复被踩的坑要提成 system 里的通用规则。分层：通用规则进 `identity`/`persona`/`discipline`，
-  工具专属规则进各自的 `tool:*` 段，两者不互串。当前六条纪律（**原文在 `app/factory.py` 的
-  `discipline` 段**）：**Scope**（"看看/评估/解释"=只读调查）、**Economy**（先查工作区、
-  不重复调用、昂贵操作先自问必要）、**Evidence**（命令必须自证输出）、**Cleanup**（scratch
-  出工作区；绝不删不是自己造的/git 跟踪的/会话日志；`git status` 自证）、**Instructions**
-  （`AGENTS.md` 是长期约定：先读并遵循、稳定知识提议写进去、不静默改）、**Continuity**
-  （任务依赖你看不到的既有决定/约束时**先回查会话历史**，绝不用看起来合理的值补空缺）。
+- **提示词纪律的归属**：`system` 是唯一"每轮都生效"的通道，**文档挡不住**——反复被踩的坑
+  要提成 system 里的通用规则。分层：通用规则进 `identity`/`persona`/`discipline`，工具专属
+  规则进各自的 `tool:*` 段，不互串。当前六条纪律（**原文在 `app/factory.py` 的 `discipline` 段**）：
+  Scope（只读调查）/ Economy / Evidence / Cleanup / Instructions / Continuity。
   **新工具落地 = 实现 + 供给面**：什么时候用（通用规则）· 怎么用（`tool:*` 段）·
   在需求发生处提醒（运行时状态贡献者）。理由见
   [召回那篇](docs/notes/implemented/feature/2026-09-19-context-recall.md)。
+- **流式帧不是状态**：帧**不落日志**，走 `Session.emit_stream` 只喂实时 UI（每步落一条
+  `assistant/stream` 汇总）。加新事件类型要同时进 `KNOWN_SESSION_EVENT_TYPES` 并标 `ignorable`
+  （**词汇增长不 bump 版本**）。见[粒度那篇](docs/notes/implemented/feature/2026-10-03-stream-log-granularity.md)。
 - **循环的 step 粒度 = 一次模型请求**（对齐 harness）：工具循环由 `run_turn` 外层驱动，
   **每轮开头都 claim inbox**；别合并回 `_run_step` 的内层 while（插队消息的落地时机、
   停止及时性、每请求卡点全依赖它）。见 `docs/architecture.md` §3.6。
@@ -84,7 +83,7 @@ Windows 控制台是 GBK：用 `--no-capture-output`；`conda run -c` 不支持�
   `build(session) -> str | None`（**无内容返回 None**）；`register` 对空名/重名/不可调用**当场抛错**；
   非空者各贴一条合成 user 消息在末尾（不进日志、不进 `derive_messages`）；**加一个源 =
   `app/factory.py` 的 `_runtime_status()` 里一行**，循环一行都不用改；`build` 必须是日志投影的
-  纯函数且便宜（每请求求值）；坏一个不炸对话（记 ERROR 跳过，`except Exception` 不捕 `BaseException`）。
+  纯函数且便宜（每请求求值）；坏一个不炸对话（记 ERROR 跳过）。
 - **上下文召回**：压缩只改变"看得见什么"，不改变"存在什么"——三层补差：**L0 会话目录**
   （每请求的状态贡献者）→ **L1 用户话清单**（`session_manifest`）→ **L2 回合明细**（`read_turn`）。
   判据：检索面 = 曾经进过模型上下文的事件**全集**（含被遮蔽的），痕迹事件不进；
@@ -119,8 +118,8 @@ Windows 控制台是 GBK：用 `--no-capture-output`；`conda run -c` 不支持�
   `/history` 与 `sessions/*/switch|new` 三条通道幂等。见 `docs/prior-art.md` §5。
 - **工具收敛（issue #2）**：判据是"**自上次变更以来连续多少次只读调用**"，不是回合步数
   （实测：实现型长回合 61 步、最长只读段只有 4，按步数砍会砍掉合法的大任务）。纯读工具**必须声明**
-  `ToolSpec.cacheable=True`（六条：`read_file`/`list_files`/`grep`/`glob`/`session_manifest`/`read_turn`；
-  默认 `False` = 会变更，出现一次变更类调用就清零计数）；到阈值把提示写进**那次工具结果的正文**；
+  `ToolSpec.cacheable=True`（六条纯读工具在 `my_coder/tools/` 里各自声明；默认 `False` = 会变更，
+  出现一次变更类调用就清零计数）；到阈值把提示写进**那次工具结果的正文**；
   到硬上限时下一步**不带工具面**（收尾步；模型若仍发调用则**不执行**、补 `is_error`），
   `turn/end` 记 **`read-budget`**。开关：`--readonly-nudge/--readonly-close/--no-convergence`。
   见[工具收敛那篇](docs/notes/implemented/feature/2026-09-30-tool-convergence.md)。
@@ -135,8 +134,8 @@ Windows 控制台是 GBK：用 `--no-capture-output`；`conda run -c` 不支持�
 
 - 注释/文档全部中文，教学式讲解动机；每个文件顶部 `from __future__ import annotations`
 - 值对象必须 frozen dataclass + tuple，禁止把可变容器放进消息/事件
-- **严格校验哲学**：未注册 prompt 变量、重复工具名、非法执行模式、缺 `surface_op` 都在写入时刻抛错，宁炸勿静默
-- 提交前三绿；`docs/` 的格式与 `AGENTS.md` 的预算由 `tests/test_docs.py` 守着
+- **严格校验哲学**：未注册 prompt 变量、重复工具名、非法执行模式、缺 `surface_op` 都在写入时刻抛错；读日志同理，格式更新或未知事件一律拒绝重建
+- 提交前三绿；`docs/` 格式、注入预算与文档数字由 `tests/test_docs.py` / `test_doc_numbers.py` 守
 
 ## 入口与工具
 

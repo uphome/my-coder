@@ -7,3 +7,4 @@ __pycache__/
 .pytest_tmp/
 .eval/
 eval/recall/RENDERING_SAMPLE.md
+_tmp_*.txt
