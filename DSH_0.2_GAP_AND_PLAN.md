@@ -683,15 +683,15 @@ ls packages/compaction             # 期望无 compact-recallable
 
 ```text
 P0-1  .eval/ 入库（生成器 + 报告 + 题库，不含大语料）+ .eval/README.md      [ ]
-P0-2  tests/test_doc_numbers.py + 5 处漂移清零 + 反静默通过设计              [ ]
-P0-3  SESSION_FORMAT_VERSION + 会话头 + 方向感知拒绝 + 未知事件守卫          [ ]
+P0-2  tests/test_doc_numbers.py + 5 处漂移清零 + 反静默通过设计              [x]  ✅ commit 759f4cd
+P0-3  SESSION_FORMAT_VERSION + 会话头 + 方向感知拒绝 + 未知事件守卫          [x]  ✅ commit 2604eee
       + 6 条契约测试全绿 + 所有读取方同步改造                                [ ]
-P1-1  assistant/attempt（失败/重试/取消留档，不进模型历史）                  [ ]
-P1-2  prepareCall 取消原子性                                                 [ ]
+P1-1  assistant/attempt（失败/重试/取消留档，不进模型历史）                  [x]  ✅ commit eded733
+P1-2  prepareCall 取消原子性                                                 [x]  ✅ commit 951592d
 P1-3  渲染静默截断                                        [x] ✅ 已完成（commit 54db8c8）
       └ 遗留核对：eval/recall 审计脚本是否识别新截断标记                      [ ]
 P1-4  题库可复现性闭环（生成器 + 校验入库）                                  [ ]
-P1-5  收敛压力改善（含前后实测对比）                                         [ ]
+P1-5  收敛压力改善（含前后实测对比）                                         [x]  ✅ commit e5b5968（PR #41 已合并）
 P2-1  文档路径 + §N 引用检查                                                 [ ]
 P2-2  **L3 长文**字数上限（L1 ≤8000 字符与 note ≤300 行已有，见 docs/AGENTS.md §五） [ ]
 P2-3  术语表（属 L3，不要塞进 L1）                                           [ ]
@@ -713,7 +713,6 @@ P3-3  字面检索（**仅在 §6.4(d) 触发条件满足时**才考虑；形态
 P3-4  冻结 stub / 可变 state 两分（大改动，先确认是否需要缓存经济学）         [ ]
 
 已完成（不要重做）
-      P1-3 渲染静默截断（commit 54db8c8）                                      [x]
 ```
 
 > **P0-1 的复核行**（改写后）：
@@ -740,5 +739,7 @@ P3-4  冻结 stub / 可变 state 两分（大改动，先确认是否需要缓�
 | **L1 注入预算**（本仓库原创门禁） | 母本对应 `docs/AGENTS.md` 的字数预算与 `verify-doc-budgets`；本仓库另有"渲染后不许截断"的运行时门禁 |
 
 ---
+
+> **交接记录**：2026-10-03 起由架构会话**接管执行**（前一执行会话已停手，交接前核对：无其它写入进程、工作树无在飞改动）。执行顺序：账本对齐 → 第 4 项流式持久化（A）→ P1-4 → P2-1/P2-2 → 内存席位置换。**每落地一项就打勾 + 写一篇 `docs/notes/` 的设计记录**（L1.5 规则，见 `docs/AGENTS.md` §一）。
 
 *本文由架构对照会话产出；证据均可用第 0 节的复核命令重新验证。若发现本文与代码不符，以代码为准并在 `NEXT_STEPS.md` 记一条漂移。*
