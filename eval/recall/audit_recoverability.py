@@ -171,7 +171,9 @@ def audit(session_id: str, limit: int, max_df: int) -> dict:
     # （有 → 这条事实没丢），不是"它出现的那条事件还活着"（那样恒为 False，等于没测）
     live_text = '\n'.join(mining.text_of(events[seq]) for seq in sorted(live_seqs))
     summary_of_seq: dict[int, str] = {}
+    all_summaries: list[str] = []
     for span in spans:
+        all_summaries.append(span['summary'])
         for seq in span['seqs']:
             summary_of_seq[seq] = span['summary']
 
@@ -184,7 +186,12 @@ def audit(session_id: str, limit: int, max_df: int) -> dict:
             'kind': fact.kind, 'value': fact.value, 'seq': fact.seq, 'turn': fact.turn,
             'event': fact.event_type,
             'in_live': fact.value in live_text,
-            'in_summary': fact.value in summary_of_seq.get(fact.seq, ''),
+            # "这个值是不是**摘要说的**"。必须用摘要正文语料兜底：`summary_of_seq` 只覆盖
+            # **被遮蔽区间内**的 seq，而被采样到的值可能挂在 **checkpoint 自己那条消息**上
+            # （它的 seq 在区间**之外**，例如 shadowed=(4,10151) 而 checkpoint 是 10644）
+            # —— 只查表会漏掉它，把"摘要新增的措辞"误判成"★ 真损失"（issue #50）
+            'in_summary': (fact.value in summary_of_seq.get(fact.seq, '')
+                           or any(fact.value in text for text in all_summaries)),
             # path 类事实的"可重算"判**文件真的在不在**，而不是"这个串在某个文件里被提到过"
             # ——后者会把 `hidden.py` 这种**夹具名**（写在测试代码里的字符串）算成"可重算"，
             # 而它根本不是工作区里的文件（§5.4 把夹具路径列为硬过滤的噪音）
