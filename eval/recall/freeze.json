@@ -1,0 +1,57 @@
+{
+  "schema": 1,
+  "why": "这两份题库是评测的历史基线：它们的数字（36 题 / 13 题）到处被引用，而 navigation.jsonl 重建要花 API。没有本文件之前，改一行、删两条、重排顺序都不会被任何自动检查发现——评测结论会静默对不上。这里冻结的是\"当时那份\"，不是\"应该长什么样\"。",
+  "render_contract": {
+    "status": "drifted",
+    "rebuildable_in_place": false,
+    "note": "题库是用**旧版** render_turn 产出的：产品渲染其后改过三次——v1 加回合头、截断时列可用 step；2026-09 删掉单块静默截断（改按行分页 offset）、删 max_events。所以今天重跑生成器**不会**得到同一份题库，sha256 必然对不上。本文件保证的是\"没被手改\"，**不是**\"可原地复现\"；要复现旧数字必须回到产出它的提交（见 docs/notes/implemented/testing/2026-09-19-context-recall-evaluation.md 与 eval/recall/manifest.py 的说明）。"
+  },
+  "datasets": [
+    {
+      "path": "eval/recall/questions.jsonl",
+      "generator": "eval/recall/build_dataset.py",
+      "rebuild_needs_api": false,
+      "how": "python eval/recall/build_dataset.py（纯本地计算，零 API）",
+      "sha256": "26ed6ffecd11f52cee8a8c83334f340d7caef54dffa17f13f87dfa6b1b2bb8a3",
+      "sha256_scheme": "对文件做 UTF-8 解码后（通用换行：\r\n 归一为 \n）重新编码取 sha256。这样 git 存储形态与 Windows 检出（core.autocrlf=true）哈希一致，行尾差异不会把门禁弄红，而真实的内容改动一定会。",
+      "lines": 36,
+      "bytes": 17598,
+      "fields": [
+        "answer",
+        "answer_kind",
+        "class",
+        "df",
+        "gold",
+        "gold_all",
+        "id",
+        "labels",
+        "query",
+        "shadowed",
+        "source"
+      ]
+    },
+    {
+      "path": "eval/recall/navigation.jsonl",
+      "generator": "eval/recall/build_navigation.py",
+      "rebuild_needs_api": true,
+      "how": "python eval/recall/build_navigation.py（要 DEEPSEEK_API_KEY；LLM 造题，重跑不会得到同一份——所以本文件是\"冻结\"而不是\"期望值\"）",
+      "sha256": "85f372880060f04d7c5ca7b012c2a90696ee0da81b764d0e75b29c6ac7962483",
+      "sha256_scheme": "对文件做 UTF-8 解码后（通用换行：\r\n 归一为 \n）重新编码取 sha256。这样 git 存储形态与 Windows 检出（core.autocrlf=true）哈希一致，行尾差异不会把门禁弄红，而真实的内容改动一定会。",
+      "lines": 13,
+      "bytes": 4940,
+      "fields": [
+        "anchor_declared",
+        "anchors",
+        "answer_turn",
+        "difficulty",
+        "id",
+        "manifest_chars",
+        "manifest_turns",
+        "overlap",
+        "overlap_ratio",
+        "query",
+        "session"
+      ]
+    }
+  ]
+}

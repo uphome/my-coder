@@ -681,42 +681,82 @@ ls packages/compaction             # 期望无 compact-recallable
 
 ## 8. 验收总清单
 
+> **2026-10-03 全量复核**：下面每一行都用命令现场验过，不是照抄旧状态。**本文件之前的
+> 数字与勾号已过期**（仓库在我离场后又合并了 #43/#45/#47/#48/#49，另有 #50 收尾）。
+> 复核方法写在各行的「验」注里，任何人都能重跑。
+
 ```text
-P0-1  .eval/ 入库（生成器 + 报告 + 题库，不含大语料）+ .eval/README.md      [ ]
+P0-1  结论落在 note 里（**不是**把 .eval/ 入库——见本节正文的更正）          [x]  ✅ 已完成
+      · 验：`git ls-files eval | wc -l` = 12 > 0（工具链 + 两份题库在库）
+      · 验：评测 note 含完整复现命令（含 `conda run -n agent-demo …`）
 P0-2  tests/test_doc_numbers.py + 5 处漂移清零 + 反静默通过设计              [x]  ✅ commit 759f4cd
 P0-3  SESSION_FORMAT_VERSION + 会话头 + 方向感知拒绝 + 未知事件守卫          [x]  ✅ commit 2604eee
-      + 6 条契约测试全绿 + 所有读取方同步改造                                [ ]
+      + 7 条契约测试全绿 + 所有读取方同步改造                                [x]  ✅
+      · 验：`pytest tests/test_session_format.py -q` → 7 passed
+      · 验：`load_events` 仍是唯一入口（cli/session/persistence/messages 都走它）
 P1-1  assistant/attempt（失败/重试/取消留档，不进模型历史）                  [x]  ✅ commit eded733
 P1-2  prepareCall 取消原子性                                                 [x]  ✅ commit 951592d
-P1-3  渲染静默截断                                        [x] ✅ 已完成（commit 54db8c8）
-      └ 遗留核对：eval/recall 审计脚本是否识别新截断标记                      [ ]
-P1-4  题库可复现性闭环（生成器 + 校验入库）                                  [ ]
+P1-3  渲染静默截断                                                           [x]  ✅ commit 54db8c8
+      └ 遗留核对：eval/recall 审计脚本是否识别新截断标记                      [x]  ✅ 已识别
+        · 验：`eval/recall/audit_recoverability.py` 明说"已删掉静默截断（改成按行
+          分页）"并按 `offset` 分页（:11/:16/:98/:144）
+P1-4  题库可复现性闭环（生成器 + 校验入库）                                  [x]  ✅ 已完成
+      · 落地：`eval/recall/freeze.json`（sha256 + 行数 + 字段集 + 重建说明）
+        + `tests/test_eval_freeze.py`（5 条）
+      · 验：`pytest tests/test_eval_freeze.py -q` → 5 passed
+      · 验（篡改即红，实测非推断）：改 `navigation.jsonl` 一题的 id（合法 JSON、
+        行数字段不变）→ 门禁红并报出两个哈希；还原后复绿
+      · 关键设计：冻结值锚在 **git 的 HEAD 内容**（不是工作区），哈希前做换行归一
+        （`core.autocrlf=true` 下工作区 CRLF 与 git 里 LF 同哈希）；
+        并在 freeze.json 里记死 `render_contract.status = 'drifted'` ——
+        题库是旧版 `render_turn` 的产物，**不能原地复现**，freeze 只保证"没被手改"
 P1-5  收敛压力改善（含前后实测对比）                                         [x]  ✅ commit e5b5968（PR #41 已合并）
-P2-1  文档路径 + §N 引用检查                                                 [ ]
-P2-2  **L3 长文**字数上限（L1 ≤8000 字符与 note ≤300 行已有，见 docs/AGENTS.md §五） [ ]
-P2-3  术语表（属 L3，不要塞进 L1）                                           [ ]
-P2-4  恢复 CI（文档校验 + 三绿）                                             [ ]
-P2-5a 门禁强制 `## Alternatives considered`                                  [ ]
-P2-5b 门禁校验反引号里的仓库路径（含 `assert scanned >= 10` 反静默通过）      [ ]
-P2-5c README 补"删除 vs 保留"规则（**不建归档树**，写触发条件）              [ ]
-P2-5d rejected 语域改为提案语域（**已决定 A**：改门禁 + 那篇 note + README 骨架说明）  [ ]
-P2-6a 根 AGENTS.md 加一句提交/PR 判据（不超注入预算）                        [ ]
-P2-6b 新建 `.github/pull_request_template.md`（含"设计记录"一行）            [ ]
-P2-6c 新建 `.github/ISSUE_TEMPLATE/`（bug/feature/task，可选）               [ ]
-P2-6d 新建 `skills/gh-pr.md`（与 gh-issue.md 同构的 agent 工作流）           [ ]
-P2-6e commit-msg 钩子（可选；**CI 已移除，只在本地生效**，文档要写明）       [ ]
+P2-1  文档路径 + §N 引用检查                                                 [ ]  ⬜ 未做
+      · 验：门禁只查 markdown 链接与 note 相对链接；`§N` 引用 0 处校验
+P2-2  **L3 长文**字数上限（L1 ≤8000 字符与 note ≤300 行已有）                [ ]  ⬜ 未做
+      · 验：唯一的预算门禁是 `test_agents_md_fits_the_system_prompt_budget`
+        （只管根 AGENTS.md）；L3 无上限——`docs/architecture.md` 924 行、
+        `docs/prior-art.md` 997 行
+P2-3  术语表（属 L3，不要塞进 L1）                                           [ ]  ⬜ 未做
+      · 验：仓库内无 `GLOSSARY.md`
+P2-4  恢复 CI（文档校验 + 三绿）                                             [ ]  ⬜ 未做
+      · 验：无 `.github/workflows/`（`.github/` 目录整个不存在）
+P2-5a 门禁强制 `## Alternatives considered`                                  [ ]  ⬜ 未做
+      · 验：`grep -c Alternatives tests/test_docs.py` = 0
+P2-5b 门禁校验反引号里的仓库路径（含 `assert scanned >= 10` 反静默通过）      [ ]  ⬜ 未做
+P2-5c README 补"删除 vs 保留"规则（**不建归档树**，写触发条件）              [ ]  ⬜ 未做
+      · 验：`docs/notes/README.md:89` 只有"被完全取代可合并删除"一句；
+        无"部分取代不算"、无归档树触发条件
+P2-5d rejected 语域改为提案语域（**已决定 A**：改门禁 + 那篇 note + README 骨架说明）  [ ]  ⬜ 未做
+      · 验：那篇 note 仍是 `## Decision`（`docs/notes/rejected/feature/
+        2026-09-19-llm-selected-turns.md:16`）；门禁仍是单条 `== 'proposed' or …`
+        （`tests/test_docs.py:74`）；README §三 仍只有 proposed/implemented 两套骨架
+P2-6a 根 AGENTS.md 加一句提交/PR 判据（不超注入预算）                        [ ]  ⬜ 未做
+      · 验：`AGENTS.md` / `docs/AGENTS.md` 里 0 处提 Conventional Commits 或提交格式
+P2-6b 新建 `.github/pull_request_template.md`（含"设计记录"一行）            [ ]  ⬜ 未做
+P2-6c 新建 `.github/ISSUE_TEMPLATE/`（bug/feature/task，可选）               [ ]  ⬜ 未做
+P2-6d 新建 `skills/gh-pr.md`（与 gh-issue.md 同构的 agent 工作流）           [ ]  ⬜ 未做
+      · 验：`skills/` 只有 `gh-issue.md`
+P2-6e commit-msg 钩子（可选；**CI 已移除，只在本地生效**，文档要写明）       [ ]  ⬜ 未做
+      · 验：`.git/hooks/` 只有 `*.sample`
 
 可选（§6.4(e)，各自独立提交，先与作者确认）
-P3-1  膨胀守卫（压缩后不小于压缩前 → 不提交）                                 [ ]
-P3-2  代码生成 footer 指针（模型确知被哪个 checkpoint 遮蔽）                  [ ]
-P3-3  字面检索（**仅在 §6.4(d) 触发条件满足时**才考虑；形态=无索引字面扫描）  [ ]
-P3-4  冻结 stub / 可变 state 两分（大改动，先确认是否需要缓存经济学）         [ ]
+P3-1  膨胀守卫（压缩后不小于压缩前 → 不提交）                                 [x]  ✅ 已做（复核时发现）
+      · 验：`my_coder/app/compaction.py:440` —— `'error': 'summary not smaller
+        than content'`，摘要不小于原文即拒收并记 `compaction/end`
+P3-2  代码生成 footer 指针（模型确知被哪个 checkpoint 遮蔽）                  [ ]  ⬜ 未做
+P3-3  字面检索（**仅在 §6.4(d) 触发条件满足时**才考虑；形态=无索引字面扫描）  [ ]  ⬜ 未做
+P3-4  冻结 stub / 可变 state 两分（大改动，先确认是否需要缓存经济学）         [ ]  ⬜ 未做
 
 已完成（不要重做）
 ```
 
-> **P0-1 的复核行**（改写后）：
-> `git ls-files eval | wc -l` > 0；且
+**复核后的净结论**：P0 全清、P1 只剩 P1-4、**P2 十三项一项未动**、P3 意外已做一项（P3-1）。
+新出现的前沿不在本文件里——是 issue **#53**（`request/header` 逐请求重存 system 全文），
+工作区里已有它的契约测试 `tests/test_system_prompt_storage.py`（**未跟踪、实现未开始**）。
+
+> **P0-1 的复核行**（更正：**不是**"`.eval/` 入库"——见本节正文的更正）：
+> `git ls-files eval | wc -l` = 12 > 0；且
 > `docs/notes/implemented/testing/2026-09-19-context-recall-evaluation.md` 里含三臂设计、
 > 判据分类、关键结论数字、完整复现命令。
 

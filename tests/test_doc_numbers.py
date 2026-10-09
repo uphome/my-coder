@@ -71,6 +71,24 @@ def _count_loc(paths) -> int:
     return sum(len(p.read_text(encoding='utf-8').splitlines()) for p in paths)
 
 
+def _tracked(subdir: str, pattern: str) -> list[Path]:
+    """列出**已跟踪**的匹配文件（路径排序）；未跟踪的在途文件一律不算。
+
+    为什么不能直接 `rglob`/`glob` 扫工作区：这道门禁量的是"**仓库**里的数字"。
+    实测踩过——工作区里躺着一个还没 `git add` 的在途测试文件（3 条用例），
+    `pytest --collect-only` 把它算了进去：实测 249 而文档写 246，门禁**长期红着**；
+    而"一直红"等于没有门禁（红成了背景噪声，真漂移就淹没了）。未跟踪文件不是仓库的
+    一部分，它被 `git add` 的那一刻才该进统计。
+
+    不是 git 仓库时（打包快照、导出目录）退回扫工作区——门禁不该因为拿不到 git 而失效。
+    """
+    listed = subprocess.run(['git', 'ls-files', f'{subdir}/{pattern}'],
+                            cwd=REPO, capture_output=True, text=True)
+    if listed.returncode != 0:
+        return sorted((REPO / subdir).glob(pattern))
+    return sorted(REPO / line for line in listed.stdout.splitlines() if line.strip())
+
+
 @lru_cache(maxsize=1)
 def measure() -> dict:
     """现场测量所有被校验的量。**不要**把这些数字写死进测试——它们就是被测对象。
@@ -80,11 +98,13 @@ def measure() -> dict:
     若在模块级调用，内层 pytest 又导入本模块又 spawn，**无限递归**（实测：进程
     炸开、60s 不返回）。缓存 `maxsize=1` 保证一次跑测试只 spawn 一次。
     """
-    package = [p for p in (REPO / 'my_coder').rglob('*.py') if '__pycache__' not in p.parts]
-    tests = sorted((REPO / 'tests').glob('test_*.py'))
+    package = _tracked('my_coder', '*.py')
+    tests = _tracked('tests', 'test_*.py')
     architecture = (REPO / 'docs' / 'architecture.md').read_text(encoding='utf-8')
+    # 只数**已跟踪**的测试文件（见 _tracked）。口径是"仓库里有多少条测试"，
+    # 不是"本地工作区跑起来会收集多少条"——未跟踪的在途文件不算仓库的一部分。
     collected = subprocess.run(
-        [sys.executable, '-m', 'pytest', '--collect-only', '-q'],
+        [sys.executable, '-m', 'pytest', '--collect-only', '-q', *map(str, tests)],
         cwd=REPO, capture_output=True, text=True,
     )
     match = re.search(r'(\d+)\s+tests? collected', collected.stdout)
