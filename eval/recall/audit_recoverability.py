@@ -334,7 +334,6 @@ def render_report(result: dict, corpus: list[tuple[str, int, int]]) -> str:
     # 属于"摘要新增的措辞"；根因是 in_summary 只查 summary_of_seq（只覆盖被遮蔽
     # 区间内的 seq），而 checkpoint 自己的 seq 在区间**之外** ⇒ 查表落空。
     # 修正后 ★ 由 52 → 0。教训：审计的判据本身要先被验证。
-        '修它只看 `render_message` / `render_turn` 的上限，不需要动压缩。')
     add('- 候选来自正则 → **偏机器长相的字符串**；决策理由、被否决方案这类散文事实抽不出来，'
         '所以真实"真损失"占比只会比这里更高（§5.6 陷阱 3）。')
     add('')
