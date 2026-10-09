@@ -60,6 +60,9 @@ class Session:
         # 但**稠密会话绝不能为此再存一份映射**（那等于每个事件两份内存，与省内存的初衷相反），
         # 所以 `by_seq` 先走"下标即 seq"的快路，只有不成立时才查这张表；表也只在真稀疏时才填。
         self._sparse: dict[int, SessionEvent] = {}
+        # **seq 游标**（不是 `len(_log)`）：跳帧重放后 `_log` 只装"该留的"事件，
+        # 长度与真实 seq 差一个数量级，拿长度当 seq 会写出**重复 seq**、破坏日志契约。
+        self._next_seq = 0
 
     def by_seq(self, seq: int) -> SessionEvent:
         """按 seq 取事件（**稀疏日志也成立**；稠密时零额外开销）。
@@ -182,7 +185,8 @@ class Session:
             raise ValueError(f"replace event {type_!r} requires shadowed=(start_seq, end_seq)")
         if surface_op != 'replace' and shadowed is not None:
             raise ValueError(f'shadowed is only valid with surface_op="replace" (got {surface_op!r})')
-        event = new_event(len(self._log), type_, data, surface_op, shadowed, ignorable)
+        event = new_event(self._next_seq, type_, data, surface_op, shadowed, ignorable)
+        self._next_seq = event.seq + 1
         self._log.append(event)
         if event.seq != len(self._log) - 1:   # 只有稀疏（跳帧重放）才需要映射
             self._sparse[event.seq] = event
@@ -193,8 +197,9 @@ class Session:
         return event
 
     def adopt(self, event: SessionEvent) -> None:
-        """从磁盘重放：只重建投影，不触发监听、不重跑任何逻辑。"""
+        """从磁盘重放：只重建投影、不触发监听、不重跑任何逻辑。"""
         self._log.append(event)
+        self._next_seq = max(self._next_seq, event.seq + 1)
         if event.seq != len(self._log) - 1:   # 只有稀疏（跳帧重放）才需要映射
             self._sparse[event.seq] = event
         self._events_cache = None      # 重放同样要让缓存失效
