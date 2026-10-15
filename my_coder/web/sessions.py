@@ -167,7 +167,13 @@ def open_session_seat(sid: str, *, allow_missing: bool,
     # 新建席位之后再看要不要冷却释放（issue #46 ①）：**只在这里触发**，不搞后台任务——
     # "打开新会话"正是常驻席位增长的那一刻，在这里收口最简单也最好测。
     # `keep` 传 sid（刚建的这个）与焦点会话：前端正在看的那个绝不能放。
-    evict_idle_seats(keep=sid)
+    #
+    # **返回值必须留住**（issue #54 ②）：回收曾经是静默的——被释放的标签页只会在下一次请求时
+    # 撞上 `not open — switch to it first`，而不知道为什么。记到刚建的这个 seat 上，路由就能
+    # 回给前端（"该会话已释放，点击重开"）。上限从宿主参数取，缺省回退到模块常量。
+    seat.evicted = evict_idle_seats(
+        keep=sid, max_open=getattr(getattr(state, 'args', None), 'max_open_seats',
+                                  MAX_OPEN_SEATS))
     return seat
 
 

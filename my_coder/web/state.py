@@ -41,6 +41,11 @@ class Seat:
     # 粗粒度就够——更新点是 `open_session_seat`（切会话 / 发消息都要经过它），
     # 不必每个路由都戳一次；判据是"释放一个**空闲**席位"，不是精确 LRU。
     last_used: float = 0.0
+    # 本席位创建时**连带释放掉**的其它席位（issue #54 ② / #46 ① 的收尾）：
+    # 回收曾经是"静默"的——`evict_idle_seats` 明明返回了被释放的 sid，调用方却丢掉了，
+    # 于是用户那个还挂着的标签页只能在**下一次请求**时收到 `not open — switch to it first`，
+    # 而不知道发生了什么。记在这里，路由就能把它回给前端（"该会话已释放，点击重开"）。
+    evicted: list[str] = field(default_factory=list)
 
     def is_idle(self) -> bool:
         """能不能安全释放：**没有在跑的回合、没有活跃 SSE 流、没有待审批**。
