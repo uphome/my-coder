@@ -8,7 +8,7 @@
 
 ## 1. 项目定位
 
-deepseek-harness 核心架构的 Python 复刻（学习用），约 8000 行，忠实实现
+deepseek-harness 核心架构的 Python 复刻（学习用），约 9800 行，忠实实现
 harness 的四个核心设计：
 
 1. **日志是唯一事实源**

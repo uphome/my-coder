@@ -335,10 +335,19 @@ def extract_file_ops(session: Session, start_seq: int, end_seq: int) -> FileOps:
     read: set[str] = set()
     written: set[str] = set()
     edited: set[str] = set()
-    # 定位区间两端 seq 在日志里的位置：日志按 seq 排序，区间 [a..b] 是
-    # seq 值连续的（日志 seq 单调）——直接按 seq 值过滤即可
+    # **端点是 surface 位置语义**（见 `_shadowed_messages`）：`replace`（checkpoint）事件的 seq
+    # 很大却坐在 surface 前部，所以 `start_seq > end_seq` 是**正常**的，**不能**按数值区间过滤
+    # ——那会一条都取不到（实测：真实会话里第二次压缩就是这个现象）。
+    # 文件操作只存在于 `tool/call` **痕迹**事件里（不是 surface 事件），拿不到"精确集合"，
+    # 所以取被压那段 surface 的 seq **包络**来筛：宽一点对"哪些文件被动过"这个启发式无害。
+    surface = list(session.surface)
+    if start_seq not in surface or end_seq not in surface:
+        return FileOps()
+    left, right = surface.index(start_seq), surface.index(end_seq)
+    covered = surface[min(left, right):max(left, right) + 1]
+    low_seq, high_seq = min(covered), max(covered)
     for event in session.events:
-        if not (start_seq <= event.seq <= end_seq):
+        if not (low_seq <= event.seq <= high_seq):
             continue
         if event.type != 'tool/call':
             continue
@@ -361,11 +370,20 @@ def extract_file_ops(session: Session, start_seq: int, end_seq: int) -> FileOps:
 
 
 def _shadowed_messages(session: Session, start_seq: int, end_seq: int) -> list:
-    """被压区间的模型可见消息（surface 折叠后按顺序取区间内的）。"""
+    """被压区间的模型可见消息（surface 折叠后按顺序取区间内的）。
+
+    **端点是 surface 位置语义，不是数值区间**：checkpoint（`replace`）事件的 seq **很大**却坐在
+    surface **前部**（它顶替了那段旧区间），所以 `start_seq > end_seq` 是**正常**的。按数值区间
+    判定会**一条都选不中** ⇒ 摘要是从**空对话**生成的，而 checkpoint 照样把那一段遮蔽掉
+    ⇒ 模型永久失去那段历史（只能靠召回读回）。实测证据：真实会话（压过 5 次）上第二次压缩时
+    本函数返回 **0 条**。
+    """
+    surface = list(session.surface)
+    if start_seq not in surface or end_seq not in surface:
+        return []
+    left, right = surface.index(start_seq), surface.index(end_seq)
     msgs = []
-    for seq in session.surface:
-        if not (start_seq <= seq <= end_seq):
-            continue
+    for seq in surface[min(left, right):max(left, right) + 1]:
         # **按 seq 取**，不是 `session.events[seq]`：`events` 是 tuple，下标只在"重放一条不漏"
         # 时等于 seq。服务打开会话走的是**跳帧重放**（`Session.from_path`），那里 seq 是稀疏的
         # ——用下标要么越界（IndexError），要么**静默取到错的事件**（压缩据此算出的"被压内容"
