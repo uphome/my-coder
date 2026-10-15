@@ -167,7 +167,17 @@ def open_session_seat(sid: str, *, allow_missing: bool,
     # 新建席位之后再看要不要冷却释放（issue #46 ①）：**只在这里触发**，不搞后台任务——
     # "打开新会话"正是常驻席位增长的那一刻，在这里收口最简单也最好测。
     # `keep` 传 sid（刚建的这个）与焦点会话：前端正在看的那个绝不能放。
-    evict_idle_seats(keep=sid)
+    #
+    # **返回值必须留住**（issue #54 ②）：回收曾经是静默的——被释放的标签页只会在下一次请求时
+    # 撞上 `not open — switch to it first`，而不知道为什么。记到刚建的这个 seat 上，路由就能
+    # 回给前端（"该会话已释放，点击重开"）。上限从宿主参数取，缺省回退到模块常量。
+    # `--max-open-seats` 未给或给 0 → 用模块缺省（**不能**把 0 当'上限为零'：
+    # 那会把所有席位都踢掉，正好与本节的目的相反）
+    # 0/None = 用代码缺省；**负数必须夹到 1**——否则 `while len(seats) > limit` 会
+    # 把所有空闲席位逐个踢到只剩 `keep` 与焦点（自查发现的边界 bug）
+    configured = getattr(getattr(state, 'args', None), 'max_open_seats', None)
+    limit = max(1, configured) if configured else MAX_OPEN_SEATS
+    seat.evicted = evict_idle_seats(keep=sid, max_open=limit)
     return seat
 
 
@@ -253,6 +263,9 @@ def open_session(sid: str, *, allow_missing: bool,
         'todos': fold_todos(seat.session) or [],   # 当前 todo 投影：切换会话时恢复 dock
         'queue': queue_rows(seat.agent),           # 待处理队列投影：切换会话时恢复队列区
         'context': context_payload(seat.session),  # 上下文占用：切换会话时恢复圆环
+        # 本次打开**连带释放掉**的其它席位（issue #54 ②）：回收不能是静默的——
+        # 前端据此提示"该会话已释放，点击重开"，而不是等下一次请求撞 404 才知道。
+        'evicted': list(seat.evicted),
     }
 
 

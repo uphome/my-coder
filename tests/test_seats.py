@@ -78,3 +78,47 @@ def test_busy_seats_are_never_released_even_over_the_limit(tmp_path):
     assert len(web_state.seats) > MAX_OPEN_SEATS, '忙的时段允许超编'
     for index in range(MAX_OPEN_SEATS):
         assert web_state.seats[f'b{index}'].queue is not None, '忙的席位必须原样留着'
+
+
+def test_eviction_is_reported_on_the_new_seat(tmp_path):
+    """#54 ② 回归：回收**不能是静默的**——被释放的 sid 必须记在刚建的那个席位上。
+
+    事故现场：`evict_idle_seats` 一直返回被释放的 sid，但调用方把返回值丢了，
+    于是用户还挂着的标签页只会在**下一次请求**撞上 `not open — switch to it first`，
+    而不知道发生了什么。（那个 404 就是 #52/#44 现象的真实根因。）
+    """
+    _init(tmp_path)
+    sids = [f'v{index}' for index in range(MAX_OPEN_SEATS + 1)]
+    seats = [open_session_seat(sid, allow_missing=True) for sid in sids]
+
+    reported = [sid for seat in seats for sid in seat.evicted]
+    assert reported, '超过上限时必须有席位被释放，且必须**被报告出来**'
+    released = set(sids) - set(web_state.seats)
+    assert set(reported) == released, (
+        f'报告的必须与实际释放的一致：报告 {sorted(set(reported))} vs 实际 {sorted(released)}')
+
+
+def test_max_open_seats_is_configurable(tmp_path):
+    """上限可配（`--max-open-seats` 落到 `state.args`）：不再写死 3。"""
+    _init(tmp_path)
+    web_state.args.max_open_seats = 2
+    seats = [open_session_seat(f'c{index}', allow_missing=True) for index in range(3)]
+
+    assert len(web_state.seats) <= 2, f'应收敛到配置的上限内，实际 {len(web_state.seats)}'
+    assert seats[-1].evicted, '最后一次打开应当报告它释放了谁'
+
+
+def test_negative_max_open_seats_does_not_evict_everything(tmp_path):
+    """自查发现的边界 bug：`--max-open-seats` 传负数时，不许把空闲席位全踢掉。
+
+    现场：`evict_idle_seats` 的条件是 `while len(state.seats) > max_open`。负数会让它恒真，
+    于是"LRU 收敛"退化成"逐个踢光"（只剩 `keep` 与焦点会话）——用户的多个标签页会一起失效。
+    上限夹到 >= 1 之后：负数 = 用缺省 3。
+    """
+    _init(tmp_path)
+    web_state.args.max_open_seats = -5
+    seats = [open_session_seat(f'n{index}', allow_missing=True) for index in range(4)]
+
+    assert len(web_state.seats) >= 2, (
+        f'负数上限把席位踢光了（剩 {len(web_state.seats)} 个）——应收敛到缺省值而不是 0 或 1')
+    assert all(seat is not None for seat in seats)
