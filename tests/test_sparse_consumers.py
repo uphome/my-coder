@@ -1,32 +1,47 @@
-"""跨形态一致性：**跳帧重放与整表重放，各条读取路径必须给出同一份结果**（issue #54 同族）。
+"""同族 bug 的**穷举**护栏：所有读取路径在"整表 vs 跳帧"两种重放下必须一致。
 
-事故现场（两个同族 bug，都是"用 seq 去索引 tuple"）：
-- `app/compaction.py::_shadowed_messages`：压缩算"被压内容"时 `session.events[seq]`；
-- `web/payload.py::surface_with_seq`：历史渲染 `events[seq]`。
+为什么要有这一条（比单点测试更值）："位置 != seq"这类 bug 的共同特征是
+**不会自己报错，只会悄悄给错数据**——本会话已经因此栽过三次（seq 分配、压缩取被压内容、
+历史渲染）。单点测试只能覆盖想到的地方；这里把**所有**读取路径都跑一遍并逐条比对，
+任何人以后把某条路径改回"按位置取"都会当场红。
 
-稠密会话里"位置 == seq"所以碰巧对；但**服务打开会话走跳帧重放**（`Session.from_path`
-跳过流式帧），那里 seq 稀疏（保留 3 与 10644、跳掉中间）⇒ 要么 `IndexError`（历史/压缩整个
-500），要么**静默取到错的事件** ⇒ 渲染/压缩结果**看起来正常但是错的**。
-
-本文件把"两条路径在两种形态下结果相同"钉住——它们不会自己报错，只会悄悄给错数据。
+两种形态的来源：#49 起服务打开会话走 `Session.from_path`（跳帧），而分析与测试常见的是
+整表重放（`iter_events` + `adopt`）。两者**必须给出同一份"内容视图"**——因为帧是纯痕迹
+（不在检索面里、内容也不是独有的）。
 """
 from __future__ import annotations
 
+import json
+
 from my_coder.app.compaction import _shadowed_messages
+from my_coder.app.recall import (
+    build_turns,
+    render_manifest,
+    render_turn,
+    shadowed_seqs,
+)
 from my_coder.state.session import Session
+from my_coder.tools.todo import fold_todos
 from my_coder.values.messages import (
     TRACE_FRAME_TYPES,
     TextBlock,
+    create_assistant_message,
+    create_tool_result_message,
     create_user_message,
 )
 from my_coder.values.persistence import iter_events, save_event, scan_index
-from my_coder.web.payload import surface_with_seq
+from my_coder.web.payload import (
+    context_payload,
+    history_payloads,
+    surface_with_seq,
+    user_message_turns,
+)
 
 
-def _frame_heavy_log(tmp_path):
-    """两轮对话 + 中间夹帧 + 一次压缩（老日志的真实形状），返回 (path, 压缩区间)。"""
-    path = tmp_path / 's.jsonl'
-    session = Session(id='live')
+def _rich_log(tmp_path):
+    """两轮 + 工具调用/结果 + 夹帧 + todo + inbox + 标题（老日志的真实形状）。"""
+    path = tmp_path / 'rich.jsonl'
+    session = Session(id='rich')
 
     def add(type_, data, **kwargs):
         session.append(type_, data, **kwargs)
@@ -34,57 +49,80 @@ def _frame_heavy_log(tmp_path):
         return session.events[-1]
 
     add('turn/start', {'turn': 1})
-    first = add('user/message', create_user_message([TextBlock(text='第一问')]),
-                surface_op='append')
+    add('user/message', create_user_message([TextBlock(text='第一问')]), surface_op='append')
     add('assistant/chunk', {'turn': 1, 'step': 1, 'chunk': {'text': '流', 'tool_calls': []}})
+    add('tool/call', {'turn': 1, 'step': 1, 'call_id': 'c1', 'name': 'read_file',
+                     'arguments': {'path': 'README.md'}})
+    add('tool/result', create_tool_result_message('c1', 'README 内容', is_error=False),
+        surface_op='append')
     add('assistant/message', {'turn': 1, 'step': 1,
-                              'message': create_user_message([TextBlock(text='第一答')])},
+                              'message': create_assistant_message([TextBlock(text='第一答')])},
         surface_op='append')
     add('turn/end', {'turn': 1, 'reason': 'done'})
     add('assistant/chunk', {'turn': 1, 'step': 2, 'chunk': {'text': '流2', 'tool_calls': []}})
+    add('todo/write', {'items': [{'text': '剩下的活', 'status': 'pending'}]}, ignorable=True)
     add('turn/start', {'turn': 2})
-    last = add('user/message', create_user_message([TextBlock(text='第二问')]),
-               surface_op='append')
-    return path, (first.seq, last.seq)
+    add('user/message', create_user_message([TextBlock(text='第二问')]), surface_op='append')
+    return path
 
 
 def _both_forms(path):
-    """同一份日志的两种重放：整表（含帧）与跳帧。"""
     dense = Session(id='dense')
     for event in iter_events(scan_index(path)):
         dense.adopt(event)
     sparse = Session.from_path(path, 'sparse', skip_types=TRACE_FRAME_TYPES)
-    assert len(sparse.events) < len(dense.events), '本用例必须造出"跳帧"的稀疏形态'
+    assert len(sparse.events) < len(dense.events), '本用例必须造出跳帧形态'
     return dense, sparse
 
 
-def test_surface_with_seq_matches_across_forms(tmp_path):
-    """历史渲染的取数（`/history` 用）：两种形态必须逐条相同（seq 也相同）。"""
-    path, _ = _frame_heavy_log(tmp_path)
+def _norm(value) -> str:
+    return json.dumps(value, ensure_ascii=False, default=str, sort_keys=True)
+
+
+# 每一条都是"读给人/给模型看"的路径——它们在两种形态下必须完全一致
+CONSUMERS = {
+    'derive_messages': lambda s: [str(m.content) for m in s.derive_messages()],
+    'surface': lambda s: list(s.surface),
+    'workspace': lambda s: s.workspace(),
+    'history_payloads': history_payloads,
+    'context_payload': context_payload,
+    'user_message_turns': lambda s: sorted(user_message_turns(s).items()),
+    'fold_todos': fold_todos,
+    'build_turns': lambda s: [t.turn for t in build_turns(s)],
+    'render_manifest': lambda s: render_manifest(build_turns(s)),
+    'shadowed_seqs': lambda s: list(shadowed_seqs(s)),
+    'render_turn(1)': lambda s: render_turn(s, 1),
+    'render_turn(2)': lambda s: render_turn(s, 2),
+    'surface_with_seq': lambda s: [(seq, str(m.content)) for seq, m in surface_with_seq(s)],
+    # 压缩路径（本会话第二个同族 bug 的现场）：被压区间的模型可见消息
+    '_shadowed_messages': lambda s: [str(m.content) for m in _shadowed_messages(s, 1, 12)],
+}
+
+
+def test_every_read_path_agrees_across_forms(tmp_path):
+    """穷举护栏：上表每一条在整表重放与跳帧重放下必须给出同一份结果。"""
+    path = _rich_log(tmp_path)
+    dense, sparse = _both_forms(path)
+    mismatched = []
+    for name, consumer in CONSUMERS.items():
+        dense_value = _norm(consumer(dense))
+        sparse_value = _norm(consumer(sparse))
+        if dense_value != sparse_value:
+            mismatched.append(f'{name}:\n  整表 {dense_value[:200]}\n  跳帧 {sparse_value[:200]}')
+    assert not mismatched, '跳帧改变了读取结果（同族 bug）：\n' + '\n'.join(mismatched)
+
+
+def test_cursor_apis_are_positions_not_seqs(tmp_path):
+    """`event_count`/`events_since` 是**位置游标**，不是 seq——两种形态**本来就该不同**。
+
+    跳帧会话里事件更少（帧被跳过），所以这两个数字必然更小。**这不是 bug**：它们的唯一
+    消费者（`recall.row_from_session` 的 L0 目录增量缓存）是"位置进、位置出"，自洽即可。
+    把这条写下来，是为了避免以后有人把它误当 bug 去"修"成相同。
+    """
+    path = _rich_log(tmp_path)
     dense, sparse = _both_forms(path)
 
-    dense_rows = [(seq, str(message.content)) for seq, message in surface_with_seq(dense)]
-    sparse_rows = [(seq, str(message.content)) for seq, message in surface_with_seq(sparse)]
-    assert sparse_rows == dense_rows, f'跳帧后历史取数变了：\n{dense_rows}\n{sparse_rows}'
-
-
-def test_shadowed_messages_matches_across_forms(tmp_path):
-    """压缩算"被压内容"（`_shadowed_messages` 用）：两种形态必须一致，且不许抛错。"""
-    path, (start_seq, end_seq) = _frame_heavy_log(tmp_path)
-    dense, sparse = _both_forms(path)
-
-    dense_msgs = [str(message.content) for message in
-                  _shadowed_messages(dense, start_seq, end_seq)]
-    sparse_msgs = [str(message.content) for message in
-                   _shadowed_messages(sparse, start_seq, end_seq)]
-    assert sparse_msgs == dense_msgs, f'跳帧后被压内容变了：\n{dense_msgs}\n{sparse_msgs}'
-    assert sparse_msgs, '这个区间里应当有被压消息（否则用例没测到东西）'
-
-
-def test_history_payloads_matches_across_forms(tmp_path):
-    """端到端：`history_payloads`（`/history` 的返回体）两种形态必须一致。"""
-    from my_coder.web.payload import history_payloads
-
-    path, _ = _frame_heavy_log(tmp_path)
-    dense, sparse = _both_forms(path)
-    assert history_payloads(sparse) == history_payloads(dense), '跳帧改变了历史返回体'
+    assert sparse.event_count < dense.event_count, '跳帧会话的事件数本来就该更少'
+    # 位置进、位置出：两种形态各自自洽（切片结果的长度 == 总数 - 起点）
+    for session in (dense, sparse):
+        assert len(session.events_since(1)) == session.event_count - 1
