@@ -453,6 +453,8 @@ def main() -> None:
     parser.add_argument('--model', default='deepseek-v4-flash', help='model id for the OpenAI-compatible API')
     parser.add_argument('--host', default='127.0.0.1', help='bind host (default 127.0.0.1)')
     parser.add_argument('--port', default=8000, type=int, help='bind port (default 8000)')
+    parser.add_argument('--max-open-seats', type=int, default=0, metavar='N',
+                        help='常驻席位上限（LRU 释放空闲席位；0 = 用代码缺省 3）（issue #54 ②）')
     parser.add_argument('--readonly-nudge', type=int, default=READONLY_NUDGE_AT, metavar='N',
                         help='nudge after N consecutive read-only calls (0 = off)')
     parser.add_argument('--readonly-close', type=int, default=READONLY_CLOSE_AT, metavar='N',

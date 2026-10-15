@@ -171,9 +171,10 @@ def open_session_seat(sid: str, *, allow_missing: bool,
     # **返回值必须留住**（issue #54 ②）：回收曾经是静默的——被释放的标签页只会在下一次请求时
     # 撞上 `not open — switch to it first`，而不知道为什么。记到刚建的这个 seat 上，路由就能
     # 回给前端（"该会话已释放，点击重开"）。上限从宿主参数取，缺省回退到模块常量。
-    seat.evicted = evict_idle_seats(
-        keep=sid, max_open=getattr(getattr(state, 'args', None), 'max_open_seats',
-                                  MAX_OPEN_SEATS))
+    # `--max-open-seats` 未给或给 0 → 用模块缺省（**不能**把 0 当'上限为零'：
+    # 那会把所有席位都踢掉，正好与本节的目的相反）
+    limit = getattr(getattr(state, 'args', None), 'max_open_seats', None) or MAX_OPEN_SEATS
+    seat.evicted = evict_idle_seats(keep=sid, max_open=limit)
     return seat
 
 
@@ -259,6 +260,9 @@ def open_session(sid: str, *, allow_missing: bool,
         'todos': fold_todos(seat.session) or [],   # 当前 todo 投影：切换会话时恢复 dock
         'queue': queue_rows(seat.agent),           # 待处理队列投影：切换会话时恢复队列区
         'context': context_payload(seat.session),  # 上下文占用：切换会话时恢复圆环
+        # 本次打开**连带释放掉**的其它席位（issue #54 ②）：回收不能是静默的——
+        # 前端据此提示"该会话已释放，点击重开"，而不是等下一次请求撞 404 才知道。
+        'evicted': list(seat.evicted),
     }
 
 
