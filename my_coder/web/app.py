@@ -25,6 +25,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 
 from ..app.compaction import run_compaction, select_compact_range
 from ..app.constants import READONLY_CLOSE_AT, READONLY_NUDGE_AT
@@ -44,6 +45,19 @@ app = FastAPI(title='MyCoder web')
 app.mount('/vendor', StaticFiles(directory=_ROOT / 'web' / 'vendor'), name='vendor')
 
 DONE_MARKER = object()
+
+
+async def _offload(function, /, *args, **kwargs):
+    """把**同步重活**挪出事件循环（issue #54 ③）。
+
+    判据：`async def` 路由里**任何**可能花上毫秒级以上 CPU/IO 的同步调用（重放日志、
+    全文件扫描、压缩选区）都必须经它执行。否则那段时间**整个循环停摆**——别的会话的
+    SSE、审批、心跳全部排队（"并行"变成"排队"，实测打开大会话 0.5–0.6 s）。
+
+    注意：被卸载的函数会在**线程池线程**里创建/改动对象（Session/Seat/agent），
+    之后仍只在事件循环线程里使用——没有并发访问，所以不需要锁；这条前提别破坏。
+    """
+    return await run_in_threadpool(function, *args, **kwargs)
 
 
 def _check_init() -> None:
@@ -130,7 +144,9 @@ async def new_session(request: Request) -> dict:
             # 严格校验：`{"workspace": 123}` 若被 `str()` 化会变成"路径 123 不存在"这种
             # 误导性报错，还可能被非字符串假值（`0`/`[]`）绕过"已固定"的守卫
             raise HTTPException(400, 'workspace must be a string')
-    return open_session(_fresh_sid(), allow_missing=True, workspace=workspace)
+    # 重放 + 历史投影都在里面（大会话 0.5–0.6 s）：挪出循环，别卡住别的会话
+    return await _offload(open_session, _fresh_sid(), allow_missing=True,
+                         workspace=workspace)
 
 
 def _fresh_sid() -> str:
@@ -226,7 +242,9 @@ async def chat(request: Request) -> StreamingResponse:
     if not message:
         raise HTTPException(400, 'message must not be empty')
     sid = body.get('sid') or state.current_sid
-    seat = state.seats.get(sid) or open_session_seat(sid, allow_missing=True)
+    # 首次给某个会话发消息要打开席位 = 重放整份日志：同样挪出循环
+    seat = state.seats.get(sid) or await _offload(open_session_seat, sid,
+                                                allow_missing=True)
     # seat 一旦建成就带 agent：`Seat.agent` 只在 `open_session_seat` 的构造窗口里是
     # None（先登记 seat 好让审批钩子闭包引用它，再 build_agent），路由侧看不到那个窗口
     assert seat.agent is not None
