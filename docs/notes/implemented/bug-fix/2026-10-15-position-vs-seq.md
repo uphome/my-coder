@@ -75,3 +75,5 @@ Status: implemented
 - **反向验证**（判据本身也要验）：撤掉修复跑上述测试必须红——实测 `payload.py:68` /
   `compaction.py:369` 各报 `IndexError`；压缩选区那条在真实会话上从 **0 条 → 350 条**。
 - 三绿：`ruff`（含 `eval`）· `mypy` · `pytest`。
+- **发布前自检**：四个真实会话（`.sessions/*.jsonl`，含被 seq bug 污染的那个）× 11 条读取路径（记忆 / surface / 历史 / 上下文占用 / 用户话回合 / todo / 回合表 / L1 清单 / `read_turn` /工作区 / 请求头）：**零异常**；三个小会话另比一次整表重放，与跳帧形态**逐项一致**。
+  复现：`conda run --no-capture-output -n agent-demo python .eval/release_selfcheck.py`（脚本产物不入库，见 `docs/AGENTS.md` 的 L4 判据）。
