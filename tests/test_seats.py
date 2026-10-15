@@ -106,3 +106,19 @@ def test_max_open_seats_is_configurable(tmp_path):
 
     assert len(web_state.seats) <= 2, f'应收敛到配置的上限内，实际 {len(web_state.seats)}'
     assert seats[-1].evicted, '最后一次打开应当报告它释放了谁'
+
+
+def test_negative_max_open_seats_does_not_evict_everything(tmp_path):
+    """自查发现的边界 bug：`--max-open-seats` 传负数时，不许把空闲席位全踢掉。
+
+    现场：`evict_idle_seats` 的条件是 `while len(state.seats) > max_open`。负数会让它恒真，
+    于是"LRU 收敛"退化成"逐个踢光"（只剩 `keep` 与焦点会话）——用户的多个标签页会一起失效。
+    上限夹到 >= 1 之后：负数 = 用缺省 3。
+    """
+    _init(tmp_path)
+    web_state.args.max_open_seats = -5
+    seats = [open_session_seat(f'n{index}', allow_missing=True) for index in range(4)]
+
+    assert len(web_state.seats) >= 2, (
+        f'负数上限把席位踢光了（剩 {len(web_state.seats)} 个）——应收敛到缺省值而不是 0 或 1')
+    assert all(seat is not None for seat in seats)

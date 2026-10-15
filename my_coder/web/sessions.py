@@ -173,7 +173,10 @@ def open_session_seat(sid: str, *, allow_missing: bool,
     # 回给前端（"该会话已释放，点击重开"）。上限从宿主参数取，缺省回退到模块常量。
     # `--max-open-seats` 未给或给 0 → 用模块缺省（**不能**把 0 当'上限为零'：
     # 那会把所有席位都踢掉，正好与本节的目的相反）
-    limit = getattr(getattr(state, 'args', None), 'max_open_seats', None) or MAX_OPEN_SEATS
+    # 0/None = 用代码缺省；**负数必须夹到 1**——否则 `while len(seats) > limit` 会
+    # 把所有空闲席位逐个踢到只剩 `keep` 与焦点（自查发现的边界 bug）
+    configured = getattr(getattr(state, 'args', None), 'max_open_seats', None)
+    limit = max(1, configured) if configured else MAX_OPEN_SEATS
     seat.evicted = evict_idle_seats(keep=sid, max_open=limit)
     return seat
 
