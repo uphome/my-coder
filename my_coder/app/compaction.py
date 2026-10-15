@@ -366,7 +366,11 @@ def _shadowed_messages(session: Session, start_seq: int, end_seq: int) -> list:
     for seq in session.surface:
         if not (start_seq <= seq <= end_seq):
             continue
-        event = session.events[seq]
+        # **按 seq 取**，不是 `session.events[seq]`：`events` 是 tuple，下标只在"重放一条不漏"
+        # 时等于 seq。服务打开会话走的是**跳帧重放**（`Session.from_path`），那里 seq 是稀疏的
+        # ——用下标要么越界（IndexError），要么**静默取到错的事件**（压缩据此算出的"被压内容"
+        # 与文件操作全是错的）。同族事故见 issue #54 里那 957 条重复 seq。
+        event = session.by_seq(seq)
         if event.type == 'user/message':
             msgs.append(cast(Message, event.data))
         elif event.type == 'assistant/message':

@@ -63,9 +63,12 @@ def surface_with_seq(session) -> list[tuple[int, object]]:
     保持与 derive_messages 相同的折叠规则（assistant 空 content 跳过）。
     """
     out: list[tuple[int, object]] = []
-    events = session.events
+    # **按 seq 取**（`by_seq`），不是 `events[seq]`：`session.events` 是 tuple，下标只在
+    # "重放一条不漏"时等于 seq；而服务打开会话走**跳帧重放**（`Session.from_path`），
+    # 那里 seq 稀疏——用下标要么 IndexError（历史整个 500），要么**静默渲染错的事件**。
+    # 顺带好处：不再触发 `session.events` 的整表拷贝（正是 issue #46 ② 想去掉的那个）。
     for seq in session.surface:
-        event = events[seq]
+        event = session.by_seq(seq)
         if event.type == 'user/message':
             out.append((seq, event.data))
         elif event.type == 'assistant/message':
