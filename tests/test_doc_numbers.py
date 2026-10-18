@@ -153,7 +153,12 @@ def test_documents_do_not_disagree_with_the_code():
 
     # 反静默通过：扫描面塌了（文件搬走 / 正则失效）会让下面的循环空转变绿。
     # 学 test_architecture.py 的 `assert scanned >= 30`——先证明自己真的扫到了东西。
-    assert len(claims) + exempted >= 8, (
+    #
+    # 下限从 8 降到 5：README 的简介段**主动去掉了三处行数声明**（"约 N 行 Python / 前端 /
+    # 测试"）——那是手维护、只能靠 ±10% 容差勉强不漂的说法，改成"事实 + 指路
+    # docs/architecture.md"更诚实。剩下的 5 条仍覆盖：测试数（README/architecture/NEXT_STEPS）、
+    # 代码行数（architecture.md）、以及 HISTORICAL 豁免。若再把扫描面改小，这条会先红。
+    assert len(claims) + exempted >= 5, (
         f'只扫到 {len(claims)} 条声明 + {exempted} 条豁免，说明扫描面不对'
         f'（检查 SCANNED_DOCS：{SCANNED_DOCS}）——数字门禁不能无声消失')
 

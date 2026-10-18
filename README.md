@@ -19,8 +19,9 @@
 ## 这是什么
 
 把 [deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)（`dsh`）的核心架构，用
-**约 8900 行 Python + 约 2400 行零构建前端**重写一遍（另有约 7908 行测试）——不是又一个 agent 应用，
-而是**把 agent 框架本身讲清楚**：每一处设计都对着它的母本，每一条规则都有测试盯着。
+Python 重写一遍——前端是**单个零构建的 HTML 文件**，配套一份覆盖各机制的测试套件——
+**不是又一个 agent 应用**，而是**把 agent 框架本身讲清楚**：每一处设计都对着它的母本，
+每一条规则都有测试盯着（完整清单见 [docs/architecture.md](docs/architecture.md)）。
 
 它不是玩具：模型真能在这个仓库里读文件、搜代码、改代码、跑 `pytest`、联网查资料，
 并且**每次对话只被允许读写你指定的那个目录**。
