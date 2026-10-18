@@ -188,7 +188,7 @@ python -m mypy my_coder               # 类型
 python -m pytest                      # 268 个测试（3 条平台相关会 skip）
 ```
 
-三绿才提交。测试按关注点分 32 个文件 + `conftest.py` + `test_architecture.py`（依赖方向 = 包结构）。
+三绿才提交。测试按关注点分文件（跨文件 helper 在 `conftest.py`）——其中 `test_architecture.py` 把**依赖方向钉成包结构**：下层 `import` 上层当场红。
 
 ## License
 
