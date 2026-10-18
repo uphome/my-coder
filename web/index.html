@@ -639,11 +639,14 @@ footer { padding: 10px 22px 18px; background: var(--bg1); border-top: 1px solid 
       <h1>My<span class="dot">.</span>Coder</h1>
       <span id="model-label" title="模型">…</span>
       <span id="ws-label" title="当前对话的工作区"></span>
-      <!-- 多会话分屏画布（issue #54 ④）：并排开多个会话，每格一个**独立**界面 -->
-      <a id="split-link" href="/split" target="_blank" rel="noopener"
-         title="并排打开多个会话（每个格子是一个独立的会话与流）"
-         style="margin-left:auto;color:#3b6ea5;text-decoration:none;font-size:12px;
-                border:1px solid #cbd5e1;border-radius:999px;padding:2px 10px;">分屏</a>
+      <!-- 分屏（issue #54 ④ 方案 D）：在**原界面**右侧内嵌第二个会话。
+           按钮开关；第二格是独立页面上下文（?compact=1 只保留对话与会话列表），
+           所以两格各自有独立的 currentSid / 流 / 状态，互不覆盖。 -->
+      <button id="split-toggle" type="button" aria-pressed="false"
+              title="在右侧打开第二个会话（并行对话）"
+              style="margin-left:auto;color:#3b6ea5;background:#fff;font-size:12px;
+                     border:1px solid #cbd5e1;border-radius:999px;padding:2px 10px;
+                     cursor:pointer;">分屏</button>
     </header>
     <main id="messages">
       <div class="hint">选择一个会话，或新建会话开始对话。<br>模型可以读文件、搜索代码、执行命令；敏感操作需要你点「批准」。</div>
@@ -2390,6 +2393,55 @@ ctxCompactBtn.addEventListener('click', async () => {
     applySession(await res.json());   // 含本会话的工作区（从日志里的 session/workspace 读回）
   } catch (e) { console.error('load history failed', e); }
 })();
+</script>
+
+<style>
+  /* 分屏（issue #54 ④ 方案 D）：右侧内嵌第二会话的抽屉。
+     - 第二格是独立页面上下文（iframe 载 /?compact=1），因此 currentSid / SSE / DOM 全独立；
+     - compact 模式只隐藏**顶栏**，保留会话列表（否则那一格没法切会话）。 */
+  #split-drawer { position: fixed; top: 0; right: 0; bottom: 0; width: 55vw; min-width: 460px;
+    display: none; z-index: 60; background: #fff; border-left: 1px solid #cbd5e1;
+    box-shadow: -10px 0 30px rgba(15, 23, 42, .14); }
+  #split-drawer.open { display: block; }
+  #split-drawer iframe { width: 100%; height: 100%; border: 0; display: block; background: #fff; }
+  #split-close { position: absolute; top: 8px; left: -30px; width: 26px; height: 26px;
+    border: 1px solid #cbd5e1; border-radius: 50%; background: #fff; color: #475569;
+    cursor: pointer; line-height: 1; font-size: 15px; }
+  /* compact：第二格只留对话与会话列表 */
+  body.compact header { display: none !important; }
+  body.compact #main-col { height: 100vh; }
+</style>
+<div id="split-drawer" aria-hidden="true">
+  <button id="split-close" type="button" title="关闭分屏（也可以用 Esc）">×</button>
+  <iframe id="split-frame" title="第二个会话（独立）" src="about:blank"></iframe>
+</div>
+<script>
+  // 第二格用 compact 模式：只有对话 + 会话列表
+  if (new URLSearchParams(location.search).has('compact')) {
+    document.body.classList.add('compact');
+  }
+  (function wireSplitDrawer() {
+    const drawer = document.getElementById('split-drawer');
+    const frame = document.getElementById('split-frame');
+    const toggle = document.getElementById('split-toggle');
+    const close = document.getElementById('split-close');
+    if (!drawer || !frame || !toggle) return;
+    let loaded = false;
+    function setOpen(open) {
+      drawer.classList.toggle('open', open);
+      drawer.setAttribute('aria-hidden', String(!open));
+      toggle.setAttribute('aria-pressed', String(open));
+      if (open && !loaded) {           // 懒加载：不点就不多开一个 App
+        frame.src = '/?compact=1';
+        loaded = true;
+      }
+    }
+    toggle.addEventListener('click', () => setOpen(!drawer.classList.contains('open')));
+    if (close) close.addEventListener('click', () => setOpen(false));
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' && drawer.classList.contains('open')) setOpen(false);
+    });
+  })();
 </script>
 </body>
 </html>
