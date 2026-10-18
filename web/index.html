@@ -2407,6 +2407,12 @@ ctxCompactBtn.addEventListener('click', async () => {
   #split-close { position: absolute; top: 8px; left: -30px; width: 26px; height: 26px;
     border: 1px solid #cbd5e1; border-radius: 50%; background: #fff; color: #475569;
     cursor: pointer; line-height: 1; font-size: 15px; }
+  /* **真分屏**：左半缩到 45vw，抽屉作为 body 的 flex 子项占其余宽度（不盖住左边）。
+     body 本来就是 flex 行（`#sidebar` 定宽 + `#main-col{flex:1}`），所以只调两个子项。 */
+  body.split-open #main-col { flex: 0 0 45vw; max-width: 45vw; }
+  body.split-open #sidebar { flex: 0 0 256px; }
+  body.split-open #split-drawer { position: static; width: auto; min-width: 0;
+    flex: 1 1 auto; box-shadow: none; }
   /* compact：第二格只留对话与会话列表 */
   body.compact header { display: none !important; }
   body.compact #main-col { height: 100vh; }
@@ -2429,6 +2435,7 @@ ctxCompactBtn.addEventListener('click', async () => {
     let loaded = false;
     function setOpen(open) {
       drawer.classList.toggle('open', open);
+      document.body.classList.toggle('split-open', open);   // 真分屏：左半缩窄（不是浮层）
       drawer.setAttribute('aria-hidden', String(!open));
       toggle.setAttribute('aria-pressed', String(open));
       if (open && !loaded) {           // 懒加载：不点就不多开一个 App
