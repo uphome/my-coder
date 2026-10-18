@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Python 复刻 deepseek-harness 架构的教学 demo（agent 框架本身，不是应用）。
+Python 实现的 agent 框架教学 demo（agent 框架本身，不是应用）。
 
 - **完整架构**：[`docs/architecture.md`](docs/architecture.md)
 - **设计记录（为什么这么定、放弃了什么）**：[`docs/notes/`](docs/notes/README.md)、文档分层规则 [`docs/AGENTS.md`](docs/AGENTS.md)

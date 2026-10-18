@@ -158,6 +158,8 @@ Web 端：流式输出 + 可折叠思维链 + 工具卡片 · 多会话管理（
        my_coder/tools/（十二个工具）· my_coder/bundled_skills/（随包发布的技能）
 ```
 
+> 三家开源实现（DSH / PI / opencode）的机制对照、以及**采纳与否决的理由**，记在 [docs/prior-art.md](docs/prior-art.md)——那是调研记录，不是项目定位。
+
 ## 五条不变式
 
 改动任何代码时不能破的规则（细节见 `AGENTS.md`）：

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "my-coder"
 version = "0.1.0"
-description = "Python 复刻 deepseek-harness 架构的 agent 框架（教学 + 个人工具）"
+description = "Python 实现的本地编码 agent 框架（教学 + 个人工具）：日志是唯一事实源，分层与不变式由测试守着"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
