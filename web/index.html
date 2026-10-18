@@ -639,6 +639,11 @@ footer { padding: 10px 22px 18px; background: var(--bg1); border-top: 1px solid 
       <h1>My<span class="dot">.</span>Coder</h1>
       <span id="model-label" title="模型">…</span>
       <span id="ws-label" title="当前对话的工作区"></span>
+      <!-- 多会话分屏画布（issue #54 ④）：并排开多个会话，每格一个**独立**界面 -->
+      <a id="split-link" href="/split" target="_blank" rel="noopener"
+         title="并排打开多个会话（每个格子是一个独立的会话与流）"
+         style="margin-left:auto;color:#3b6ea5;text-decoration:none;font-size:12px;
+                border:1px solid #cbd5e1;border-radius:999px;padding:2px 10px;">分屏</a>
     </header>
     <main id="messages">
       <div class="hint">选择一个会话，或新建会话开始对话。<br>模型可以读文件、搜索代码、执行命令；敏感操作需要你点「批准」。</div>
