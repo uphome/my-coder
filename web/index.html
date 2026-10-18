@@ -2412,8 +2412,11 @@ ctxCompactBtn.addEventListener('click', async () => {
      body 本来就是 flex 行（`#sidebar` 定宽 + `#main-col{flex:1}`），所以只调两个子项。 */
   body.split-open #main-col { flex: 0 0 45vw; max-width: 45vw; }
   body.split-open #sidebar { flex: 0 0 256px; }
-  body.split-open #split-drawer { position: static; width: auto; min-width: 0;
+  body.split-open #split-drawer { position: relative; height: 100vh; width: auto; min-width: 0;
     flex: 1 1 auto; box-shadow: none; }
+  /* ↑ 必须是 relative（不是 static）：① static 时 top/right/bottom 失效 ⇒ 高度变 auto
+     ⇒ 里面 height:100% 的 iframe 塌成 0（右格整片空白）；② absolute 的「×」需要一个
+     有定位的祖先，否则会飘到整个窗口的右上角。height:100vh 同时把格子的高度钉死。 */
   /* compact：第二格只留对话与会话列表。
      注意必须**显式撑满并允许内部滚动**：只隐顶栏的话，`#main-col{height:100vh}` 与
      侧栏的自动高度不匹配，会出现"上方大片空白 + 侧栏底部挤到最下"的错位。 */
