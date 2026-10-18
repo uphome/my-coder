@@ -9,7 +9,6 @@
 `日志是唯一事实源` · `模型可见 ⟺ 可重建` · `被动状态机 + Inbox` · `决策走钩子`
 
 ![Python](https://img.shields.io/badge/Python-3.13-3776AB?logo=python&logoColor=white)
-![tests](https://img.shields.io/badge/tests-268%20passing-3fb950)
 ![license](https://img.shields.io/badge/license-MIT-4d6bfe)
 ![web](https://img.shields.io/badge/Web%20UI-%E9%9B%B6%E6%9E%84%E5%BB%BA%20%C2%B7%20%E5%8D%95%E6%96%87%E4%BB%B6-39c5cf)
 
@@ -168,20 +167,6 @@ Web 端：流式输出 + 可折叠思维链 + 工具卡片 · 多会话管理（
 3. **入队即记账**——inbox 先落 `spliced` 事件再改内存，磁盘日志永远 ≥ 内存状态
 4. **决策走钩子/注册声明**——`pre_step` / `request` / `request_error` + 工具注册声明，循环里不写业务 `if`
 5. **失败降级为结果**——工具失败变 `is_error` 结果不炸循环；`CancelledError` 沿 await 链单向传播
-
----
-
-## 文档地图
-
-| 文档 | 回答什么问题 |
-|---|---|
-| **`USAGE_zh.md`** | 只想把 agent 跑起来 —— 参数、会话恢复、审批、FAQ |
-| **[`docs/architecture.md`](docs/architecture.md)** | 为什么这样设计 —— 核心机制、数据流、日志样例、模块职责、路线图 |
-| **[`docs/prior-art.md`](docs/prior-art.md)** | 别人怎么做的 —— DSH / PI / opencode 三家机制对照（参考手册，非规范） |
-| **`NEXT_STEPS.md`** | 做到哪一步了 —— 实施进度、已定设计决策、待办 |
-| **`AGENTS.md`** | 给（AI）协作者看的规则 —— 命令、不变式、约定 |
-| **[`docs/subsystems/web-projection.md`](docs/subsystems/web-projection.md)** | 前端为什么这么写 —— nodes 投影模型与 SSE 帧协议 |
-| `show_memory.py` | 亲手验证"记忆 = 日志投影" —— 重放日志，打印每次请求时的消息序列 |
 
 ---
 
