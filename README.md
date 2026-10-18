@@ -9,7 +9,7 @@
 `日志是唯一事实源` · `模型可见 ⟺ 可重建` · `被动状态机 + Inbox` · `决策走钩子`
 
 ![Python](https://img.shields.io/badge/Python-3.13-3776AB?logo=python&logoColor=white)
-![tests](https://img.shields.io/badge/tests-175%20passing-3fb950)
+![tests](https://img.shields.io/badge/tests-268%20passing-3fb950)
 ![license](https://img.shields.io/badge/license-MIT-4d6bfe)
 ![web](https://img.shields.io/badge/Web%20UI-%E9%9B%B6%E6%9E%84%E5%BB%BA%20%C2%B7%20%E5%8D%95%E6%96%87%E4%BB%B6-39c5cf)
 
@@ -20,7 +20,7 @@
 ## 这是什么
 
 把 [deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)（`dsh`）的核心架构，用
-**约 8000 行 Python + 约 2400 行零构建前端**重写一遍（另有约 7908 行测试）——不是又一个 agent 应用，
+**约 8900 行 Python + 约 2400 行零构建前端**重写一遍（另有约 7908 行测试）——不是又一个 agent 应用，
 而是**把 agent 框架本身讲清楚**：每一处设计都对着它的母本，每一条规则都有测试盯着。
 
 它不是玩具：模型真能在这个仓库里读文件、搜代码、改代码、跑 `pytest`、联网查资料，
@@ -112,7 +112,7 @@ Web 端：流式输出 + 可折叠思维链 + 工具卡片 · 多会话管理（
 首条消息后自动起名）· 批准按钮 · **每对话一个工作区**（创建时定下、写进日志、不可变）·
 常驻 todo dock · **运行中插队**（`steer`）· 待处理消息分区（排队进队列区，插队画在消息流尾部）·
 输入框旁的**上下文占用圆环**（占用 %、全会话 token、缓存命中率、手动压缩按钮）·
-两会话并行互不干扰（按 seat 隔离）。
+两会话并行互不干扰（按 seat 隔离）。常驻会话上限 3（`--max-open-seats` 可调）：超限时按 LRU 释放**空闲**会话，正在跑的不释放；被释放的会话会提示"已释放、点开重开"。
 
 ### 长会话不会撑爆
 
@@ -202,7 +202,7 @@ python -m mypy my_coder               # 类型
 python -m pytest                      # 268 个测试（3 条平台相关会 skip）
 ```
 
-三绿才提交。测试按关注点分 15 个文件 + `conftest.py` + `test_architecture.py`（依赖方向 = 包结构）。
+三绿才提交。测试按关注点分 32 个文件 + `conftest.py` + `test_architecture.py`（依赖方向 = 包结构）。
 
 ## License
 
