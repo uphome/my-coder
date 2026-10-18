@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import my_coder.web.sessions as web_sessions
 from my_coder import web
 from my_coder.web import state as web_state
 from my_coder.web.sessions import MAX_OPEN_SEATS, open_session_seat
@@ -122,3 +123,78 @@ def test_negative_max_open_seats_does_not_evict_everything(tmp_path):
     assert len(web_state.seats) >= 2, (
         f'负数上限把席位踢光了（剩 {len(web_state.seats)} 个）——应收敛到缺省值而不是 0 或 1')
     assert all(seat is not None for seat in seats)
+
+
+def test_concurrent_open_same_sid_creates_one_seat(tmp_path):
+    """并发两条"首消息"打开同一会话：**只能有一个 Seat/Agent**（否则两个 agent 各写同一日志）。
+
+    现场：`/chat` 里 `state.seats.get(sid) or await _offload(open_session_seat, …)`——`await`
+    会让出循环，于是两条并发请求都可能看到"还没建"，各自在线程里建一个 Seat。文件层的
+    `touch(exist_ok=False)` 只防跨进程，防不了进程内这把竞态。
+    """
+    import threading
+    import time as _time
+
+    _init(tmp_path)
+    real = web_sessions.repair_dangling_tool_calls
+
+    def slow_repair(session):
+        _time.sleep(0.05)          # 撑开创建窗口，让四条线程真的重叠
+        return real(session)
+
+    web_sessions.repair_dangling_tool_calls = slow_repair
+    try:
+        results: list[object] = []
+        lock = threading.Lock()
+
+        def opener():
+            seat = open_session_seat('race', allow_missing=True)
+            with lock:
+                results.append(seat)
+
+        threads = [threading.Thread(target=opener) for _ in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+    finally:
+        web_sessions.repair_dangling_tool_calls = real
+
+    assert len(results) == 4
+    assert len({id(seat) for seat in results}) == 1, '并发打开产生了多个 Seat（各带一个 Agent）'
+    assert web_state.seats['race'] is results[0], '登记的必须就是大家拿到的那个'
+    assert results[0].agent is not None
+
+
+def test_seat_is_registered_only_after_agent_is_ready(tmp_path):
+    """登记必须在 `build_agent` **之后**：否则循环里别的请求会查到 agent 还是 None 的席位。"""
+    _init(tmp_path)
+    seen: dict[str, object] = {}
+    real = web_sessions.build_agent
+
+    def spy(session, args, counters, *, hooks):
+        seen['registered_during_build'] = 'probe' in web_state.seats
+        return real(session, args, counters, hooks=hooks)
+
+    web_sessions.build_agent = spy
+    try:
+        open_session_seat('probe', allow_missing=True)
+    finally:
+        web_sessions.build_agent = real
+
+    assert seen['registered_during_build'] is False, (
+        'agent 还没建好就把席位登记了——并发下 /chat 的 assert seat.agent is not None 会 500')
+    assert 'probe' in web_state.seats
+
+
+def test_reusing_a_seat_clears_stale_evicted(tmp_path):
+    """复用席位时清掉上次创建留下的"已释放"记录（否则前端会弹过时的提示）。"""
+    _init(tmp_path)
+    web_state.args.max_open_seats = 1
+    open_session_seat('old', allow_missing=True)
+    fresh = open_session_seat('new', allow_missing=True)
+    assert fresh.evicted, '超过上限时应当报告释放了谁'
+
+    again = open_session_seat('new', allow_missing=True)     # 复用
+    assert again is fresh
+    assert again.evicted == [], f'复用后仍带着过时的 evicted：{again.evicted}'

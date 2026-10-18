@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -41,6 +42,18 @@ from .state import Seat, state
 # 打开过的会话——实测 4 个小会话就到 337 MB 私有内存，一个大会话（117 MB 日志）单独就
 # 484 MB。**释放不等于丢数据**：重开时 adopt 重放日志即可恢复（不变式③：磁盘 ≥ 内存）。
 MAX_OPEN_SEATS = 3
+
+# 进程内"打开席位"的**按 sid 互斥**（`_offload` 之后的收尾，issue #54 ③）：
+# 创建跑在线程池里，而 `open_session_seat` 里"查不到就建"不再原子的——两条 /chat 并发
+# 首消息会各建一个 Seat/Agent、各 bind 同一个日志文件（交错写 + seq 竞争）。
+# 按 sid 分锁而不是一把全局锁：不同会话的打开仍然并行（那正是把创建挪出循环的目的）。
+_open_locks: dict[str, threading.Lock] = {}
+_open_locks_guard = threading.Lock()
+
+
+def _lock_for(sid: str) -> threading.Lock:
+    with _open_locks_guard:
+        return _open_locks.setdefault(sid, threading.Lock())
 
 # Web approval：敏感工具（bash/write/edit）执行前推送请求给浏览器，等待人工批准/拒绝。
 # 用户不点则 fail-safe 拒绝（防模型永久卡住）。
@@ -116,12 +129,30 @@ def open_session_seat(sid: str, *, allow_missing: bool,
         if workspace:
             raise HTTPException(400, WORKSPACE_FIXED_MESSAGE)
         seat.last_used = time.monotonic()      # 复用也算"用过"（冷却是 LRU 式挑最久没用）
+        # 上次创建时记的"已释放"是**过去**的事，复用不能再报一遍（前端会弹误导提示）
+        seat.evicted = []
         return seat
     # 新会话 = 磁盘上还没有它的文件；**空文件就是"这个会话存在"的事实**，所以这里用
     # `exist_ok=False` **原子占坑**（不是先 exists() 再 touch()）：两个进程/两个请求同时
     # 判定"这个 id 还没人用"时，只有一个能把文件建出来，另一个拿到 FileExistsError → 退回
     # "已有会话"语义（工作区从那个文件里读）。单 worker 下这段本来没有 await、切不开，
     # 但多 worker（各自内存、只共享磁盘）就是这么撞的。
+    # 快路没命中：加锁后**再查一次**（等锁期间别人可能已经建好），仍无才真正创建。
+    with _lock_for(sid):
+        seat = state.seats.get(sid)
+        if seat is not None:
+            if workspace:
+                raise HTTPException(400, WORKSPACE_FIXED_MESSAGE)
+            seat.last_used = time.monotonic()
+            seat.evicted = []
+            return seat
+        return _create_seat(sid, log_path=log_path, allow_missing=allow_missing,
+                            workspace=workspace)
+
+
+def _create_seat(sid: str, *, log_path: Path, allow_missing: bool,
+                 workspace: str | Path | None) -> Seat:
+    """真正创建席位——**只在 `open_session_seat` 的按 sid 锁内调用**。"""
     is_new = not log_path.exists()
     if is_new:
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -156,7 +187,6 @@ def open_session_seat(sid: str, *, allow_missing: bool,
         })
     seat = Seat(sid, session, _args_for_workspace(resolved), None)
     seat.last_used = time.monotonic()
-    state.seats[sid] = seat  # 先登记：审批钩子闭包引用 seat，创建 agent 前就位
     hooks = Hooks()
     hooks.approval = approval_for(seat)   # Web 版确认：弹本会话的批准/拒绝
     seat.agent = build_agent(
@@ -164,6 +194,10 @@ def open_session_seat(sid: str, *, allow_missing: bool,
         {'reasoning_started': False, 'request_no': 0, 'tool_no': 0},
         hooks=hooks,
     )
+    # **建完 agent 才登记**：创建现在跑在线程池里，而事件循环仍在服务——先登记的话，
+    # 别的请求会查到"已登记但 agent 还是 None"的席位（`/chat` 里那句 assert 会 500）。
+    # 审批钩子闭包引用的是 `seat` 对象本身，不依赖注册；审批只会在回合开始后触发。
+    state.seats[sid] = seat
     # 新建席位之后再看要不要冷却释放（issue #46 ①）：**只在这里触发**，不搞后台任务——
     # "打开新会话"正是常驻席位增长的那一刻，在这里收口最简单也最好测。
     # `keep` 传 sid（刚建的这个）与焦点会话：前端正在看的那个绝不能放。
