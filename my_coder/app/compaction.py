@@ -432,7 +432,13 @@ async def run_compaction(session: Session, llm, *, keep_turns: int = 3,
             texts = [b.text for b in msg.content if getattr(b, 'type', '') == 'text']
             text = '\n'.join(texts)
             if text:
-                parts.append(f'[{msg.role}] {text[:2000]}')
+                if len(text) > 2000:
+                    # 摘要请求只看每条消息的前 2000 字符——**必须把截断说出来**，
+                    # 否则模型会以为看到了全文（压缩后的摘要会缺中段/尾部）。
+                    parts.append(f'[{msg.role}] {text[:2000]}\n'
+                                 f'…（此处截断，原文共 {len(text)} 字符）')
+                else:
+                    parts.append(f'[{msg.role}] {text}')
         conversation = '\n\n'.join(parts) or '(no text)'
         request = LlmRequest(
             system=COMPACT_SYSTEM,
@@ -471,6 +477,16 @@ async def run_compaction(session: Session, llm, *, keep_turns: int = 3,
         checkpoint_body = (
             f'{CHECKPOINT_PREAMBLE}\n\n{SUMMARY_OPEN_TAG}\n{body}\n{SUMMARY_CLOSE_TAG}'
         )
+        # 3) checkpoint 落盘：surface replace 顶替旧区间——**先落"生效的那一步"**。
+        # 之前是"先落 summary 审计、后落 replace"：若两步之间失败（_apply_surface 抛错 /
+        # 磁盘满），日志里会留下一条"摘要存在、却没生效"的记录，把审计/统计带偏。
+        # 现在的失败方向是良性的：replace 成功而 summary 没落 = 只有审计缺一条。
+        session.append(
+            'user/message',
+            create_user_message([TextBlock(text=checkpoint_body)]),
+            surface_op='replace', shadowed=(start_seq, end_seq),
+        )
+        # 2') 审计：摘要全文 + 遮蔽范围 + 文件操作（**在 replace 之后**，见上）
         session.append(COMPACTION_SUMMARY, {
             'compaction_id': cid,
             'range': [start_seq, end_seq],
@@ -481,12 +497,6 @@ async def run_compaction(session: Session, llm, *, keep_turns: int = 3,
                 'edited': sorted(file_ops.edited),
             },
         })
-        # 3) checkpoint 落盘：surface replace 顶替旧区间
-        session.append(
-            'user/message',
-            create_user_message([TextBlock(text=checkpoint_body)]),
-            surface_op='replace', shadowed=(start_seq, end_seq),
-        )
         # 4) 解锁
         session.append(COMPACTION_END, {'compaction_id': cid})
         return True

@@ -402,6 +402,24 @@ async def queue_update(request: Request) -> dict:
             'queue': queue_rows(seat.agent)}
 
 
+# 手动压缩的**按会话互斥**：两个标签页同时点压缩会各自选段、各自 replace，第二次的
+# `_apply_surface` 可能找不到端点（ValueError→500）或顶替错段。auto-compaction 不受影响
+# （它在 turn 内跑，`status != 'idle'` 那道守卫会拦住手动压缩）。
+_compacting: set[str] = set()
+
+
+def _try_begin_compaction(sid: str) -> bool:
+    """把会话标记为"压缩中"；False = 已有压缩在跑（并发互斥）。"""
+    if sid in _compacting:
+        return False
+    _compacting.add(sid)
+    return True
+
+
+def _end_compaction(sid: str) -> None:
+    _compacting.discard(sid)
+
+
 @app.post('/compact')
 async def compact(request: Request) -> dict:
     """手动压缩会话：把旧回合折叠成 checkpoint（复用 run_compaction）。
@@ -436,10 +454,18 @@ async def compact(request: Request) -> dict:
         raise HTTPException(409, 'agent 正在运行——回合结束后再压缩')
     if select_compact_range(seat.session, keep_turns=1) is None:
         return {'compacted': False, 'reason': '没有可压缩的旧回合'}
-    ok = await run_compaction(
-        seat.session, agent.llm, keep_turns=1,
-        model=agent.options.get('model', ''),
-    )
+    if not _try_begin_compaction(sid):
+        raise HTTPException(409, 'compaction already in progress for this session')
+    try:
+        ok = await run_compaction(
+            seat.session, agent.llm, keep_turns=1,
+            # 兜底顺序：会话装配参数 → 宿主参数。都给不出就让 llm 层用自己的默认，
+            # 不要把一个空 model 直接发出去（那会是 400）。
+            model=(agent.options.get('model')
+                   or (state.args.model if state.args is not None else '') or ''),
+        )
+    finally:
+        _end_compaction(sid)
     return {'compacted': ok,
             'reason': '压缩完成' if ok else '压缩未完成（摘要生成失败或摘要未通过校验）'}
 
