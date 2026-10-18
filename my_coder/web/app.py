@@ -91,6 +91,17 @@ def index() -> FileResponse:
     return FileResponse(_ROOT / 'web' / 'index.html')
 
 
+@app.get('/split')
+def split() -> FileResponse:
+    """多会话分屏画布（issue #54 ④ 的最小落地）：每个格子是一个完整的 `/` 界面。
+
+    为什么用 iframe 而不是把界面重写成多面板：`currentSid` / SSE / DOM 都是**页面级**状态，
+    iframe 天然给每个格子一份独立的页面上下文，**不改现有前端一行逻辑**；服务端本来就按
+    会话隔离（每会话一个 Seat/agent 队列/审批表），所以两格能真的同时跑两个回合。
+    """
+    return FileResponse(_ROOT / 'web' / 'split.html')
+
+
 @app.get('/meta')
 def meta() -> dict:
     """前端元信息：默认工作区 + 相对路径解析基准 + 模型名 + fake 标记。

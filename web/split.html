@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>MyCoder · 分屏（多会话并行）</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: #0f1115; color: #c9d1d9;
+    font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  body { display: flex; flex-direction: column; }
+  header { display: flex; align-items: center; gap: 10px; padding: 6px 10px;
+    border-bottom: 1px solid #232833; background: #12151b; flex: 0 0 auto; }
+  header strong { font-weight: 600; color: #e6edf3; }
+  header span { color: #8b949e; }
+  button { background: #1b2029; color: #c9d1d9; border: 1px solid #2a3140;
+    border-radius: 6px; padding: 3px 10px; cursor: pointer; font: inherit; }
+  button[aria-pressed="true"] { background: #22304a; border-color: #3b6ea5; color: #e6edf3; }
+  main { flex: 1 1 auto; display: flex; min-height: 0; }
+  iframe { flex: 1 1 0; border: 0; border-right: 1px solid #232833; min-width: 0; }
+  iframe:last-child { border-right: 0; }
+  @media (max-width: 900px) { main { flex-direction: column; }
+    iframe { border-right: 0; border-bottom: 1px solid #232833; } }
+</style>
+</head>
+<body>
+<!--
+  多会话并行的"分屏画布"（issue #54 ④ 的最小落地）。
+
+  做法：每个格子是一个 **完整的 MyCoder 界面**（iframe 载 `/`），因此各自拥有独立的
+  `currentSid`、独立的 SSE 流、独立的 DOM 状态——**不共享任何前端状态**，也就不会互相覆盖。
+  服务端本来就按会话隔离（每会话一个 Seat/agent/SSE 队列/审批表；`sid` 走请求体且
+  fail-closed），所以两格可以真的同时跑两个回合。
+
+  已知边界（服务端语义，不是本页的缺陷）：
+  - **同一会话不能并行两轮**（一个 Seat 只有一个 agent；回合中插话用 /steer）；
+  - 服务端的"焦点别名"是全局的：某一格切会话会让 `state.current_sid` 跟着变——
+    影响的是"每轮注入的 L0 会话目录排除哪个会话""当前会话不可删"这两处，
+    删会话前先在目标格子里切一次即可；
+  - 审批弹在**该会话所属那一格**里（事件只推给那个会话的流）。
+
+  用法：`/split` 默认两格，`/split?panes=3` 三格；每格里自己切会话。
+-->
+<header>
+  <strong>MyCoder · 分屏</strong>
+  <span>每格一个独立会话（独立的流与状态）</span>
+  <span style="flex:1 1 auto"></span>
+  <button type="button" data-panes="2" aria-pressed="true">两格</button>
+  <button type="button" data-panes="3" aria-pressed="false">三格</button>
+  <button type="button" id="reload" title="重新载入所有格子">重载</button>
+</header>
+<main id="panes"></main>
+<script>
+  const initial = Number(new URLSearchParams(location.search).get('panes')) || 2;
+  const clamped = Math.min(4, Math.max(1, initial));
+  const panes = document.getElementById('panes');
+
+  function build(count) {
+    panes.replaceChildren();
+    for (let index = 0; index < count; index += 1) {
+      const frame = document.createElement('iframe');
+      // 每个 iframe 是**独立的页面上下文**：currentSid / SSE / DOM 全独立
+      frame.src = '/';
+      frame.title = `会话格 ${index + 1}`;
+      panes.append(frame);
+    }
+    for (const button of document.querySelectorAll('button[data-panes]')) {
+      button.setAttribute('aria-pressed', String(Number(button.dataset.panes) === count));
+    }
+    const url = new URL(location.href);
+    url.searchParams.set('panes', String(count));
+    history.replaceState(null, '', url);
+  }
+
+  for (const button of document.querySelectorAll('button[data-panes]')) {
+    button.addEventListener('click', () => build(Number(button.dataset.panes)));
+  }
+  document.getElementById('reload').addEventListener('click', () => build(
+    document.querySelectorAll('#panes iframe').length || 2));
+  build(clamped);
+</script>
+</body>
+</html>
