@@ -65,4 +65,5 @@ def register(registry, skills: SkillTable) -> None:
         # 刷新在表内部的锁里串行化（表同时被循环线程的 live 段和这里的工作线程读写）。
         execution_mode='parallel',
         offload=True,
+        cacheable=True,          # 纯读、无产出：进度策略据此计"无进展只读"
     ))

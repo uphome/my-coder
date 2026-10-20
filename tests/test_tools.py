@@ -313,6 +313,56 @@ async def test_edit_requires_unique_verbatim_match(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_write_and_edit_are_atomic_writes(tmp_path):
+    """正常路径不回归：write_file / edit 内容正确，且不留下临时文件。"""
+    registry = build_tools(workspace=tmp_path)
+    path = tmp_path / 'note.txt'
+
+    written = await registry.execute(
+        'write_file', {'file_path': str(path), 'content': 'hello\n'}, None)
+    assert written.is_error is False
+    assert path.read_text(encoding='utf-8') == 'hello\n'
+    assert sorted(p.name for p in tmp_path.iterdir()) == ['note.txt']
+
+    edited = await registry.execute(
+        'edit', {'file_path': str(path), 'old_string': 'hello', 'new_string': 'world'}, None)
+    assert edited.is_error is False
+    assert path.read_text(encoding='utf-8') == 'world\n'
+    assert sorted(p.name for p in tmp_path.iterdir()) == ['note.txt']
+
+
+@pytest.mark.asyncio
+async def test_atomic_write_keeps_original_when_replace_fails(tmp_path, monkeypatch):
+    """判据：`os.replace` 失败 = 写入没发生——旧内容原样，且临时文件被清理。
+
+    直接 `write_text` 没有这个性质：崩溃/磁盘满会留下半截文件。这里让 replace
+    抛错（模拟磁盘满），替换前后的可观测内容必须都还是旧文件。工具层异常由
+    循环降级成 `is_error` 结果（不变式 5）；测试直连 executor，故异常原样抛出。
+    """
+    registry = build_tools(workspace=tmp_path)
+    path = tmp_path / 'keep.txt'
+    path.write_text('original\n', encoding='utf-8')
+
+    def _fail_replace(src, dst):
+        raise OSError('disk full')
+
+    monkeypatch.setattr('os.replace', _fail_replace)
+
+    with pytest.raises(OSError, match='disk full'):
+        await registry.execute(
+            'write_file', {'file_path': str(path), 'content': 'new\n'}, None)
+    assert path.read_text(encoding='utf-8') == 'original\n'
+    assert sorted(p.name for p in tmp_path.iterdir()) == ['keep.txt']
+
+    with pytest.raises(OSError, match='disk full'):
+        await registry.execute(
+            'edit', {'file_path': str(path), 'old_string': 'original',
+                     'new_string': 'changed'}, None)
+    assert path.read_text(encoding='utf-8') == 'original\n'
+    assert sorted(p.name for p in tmp_path.iterdir()) == ['keep.txt']
+
+
+@pytest.mark.asyncio
 async def test_bash_runs_and_reports_exit_code(tmp_path):
     registry = build_tools(workspace=tmp_path)
 

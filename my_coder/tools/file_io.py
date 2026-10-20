@@ -7,12 +7,39 @@ resolve_in_workspace 校验，越界拒绝（轻量沙箱）。
 """
 from __future__ import annotations
 
+import os
+import tempfile
 from pathlib import Path
 
 from ..app.constants import READ_FILE_DEFAULT_LIMIT, READ_FILE_MAX_CHARS, READ_FILE_MAX_LIMIT
 from ..app.sandbox import occurrence_lines, resolve_in_workspace
 from ..state.registry import ToolSpec
 from ..values.messages import ToolOutcome
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """原子写文本：同目录临时文件写满 → os.replace 覆盖；失败清理临时文件并原样抛出。
+
+    为什么必须同目录：`os.replace` 只在**同一文件系统内**是原子 rename，跨盘
+    在 Windows 上直接 OSError；临时文件放别处就退化成"复制 + 删除"，半截文件
+    照样可能出现。
+    为什么不直接 `path.write_text`：写到一半崩溃（进程被杀/断电/磁盘满）会留下
+    **半截文件**——旧内容没了、新内容不完整，等于把用户文件毁了。换成原子
+    rename 后，任何时刻观测到的要么是旧内容、要么是完整新内容。
+    失败方向是良性的：replace 之前的失败旧文件原样保留；清掉临时文件不留垃圾；
+    异常原样上抛，由循环层降级成 `is_error` 结果（不变式 5）。
+    """
+    handle = tempfile.NamedTemporaryFile(
+        mode='w', encoding='utf-8', dir=path.parent,
+        prefix=f'.{path.name}.', suffix='.tmp', delete=False)
+    tmp_path = Path(handle.name)
+    try:
+        with handle:
+            handle.write(text)
+        os.replace(tmp_path, path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
 
 
 def register(registry, workspace: Path) -> None:
@@ -106,7 +133,7 @@ def register(registry, workspace: Path) -> None:
         if denied:
             return denied
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(args['content'], encoding='utf-8')
+        _atomic_write_text(path, args['content'])
         return ToolOutcome(content=f'wrote {path}')
 
     async def edit(args, agent, signal):
@@ -141,7 +168,7 @@ def register(registry, workspace: Path) -> None:
         offset = before.index(old_string)
         line_no = before.count('\n', 0, offset) + 1  # 1-based 起始行号
         after = before[:offset] + new_string + before[offset + len(old_string):]
-        path.write_text(after, encoding='utf-8')
+        _atomic_write_text(path, after)
         # 返回行号：模型可以用 read_file 验证改动（闭环）
         return ToolOutcome(content=f'edited {args["file_path"]} (replaced at line {line_no})')
 
