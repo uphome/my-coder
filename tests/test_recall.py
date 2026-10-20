@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import json
 from argparse import Namespace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from my_coder.app.recall import (
+    CHECKPOINT_MARK,
     TurnInfo,
     build_turns,
     render_manifest,
@@ -625,3 +627,114 @@ async def test_recall_prompt_affordances_are_switched_separately(tmp_path):
     assert 'Continuity:' in system
     assert 'tool:recall' not in system
     assert 'session_manifest' not in system
+
+
+# ---------- 会话列表扫描：只有一份实现，且对 JSON 分隔符不敏感 ----------
+#
+# 旧实现是两份逐行**字面量**匹配（`'"type": "user/message"' in line`、
+# `line.startswith('{"session": true')`），依赖 `json.dumps` 默认分隔符：换成紧凑分隔符
+# 就静默少数。现在两份都调 `values/persistence.py` 的 `scan_log`，下面钉住三点：
+# 紧凑日志统计与默认一致、紧凑会话头不计入事件数、recall 与 web 列表关键计数一致。
+
+
+def _rewrite_with_separators(source: Path, target: Path, separators) -> None:
+    """把一份日志按另一种 JSON 分隔符重写（模拟"换序列化"）。"""
+    lines = source.read_text(encoding='utf-8').splitlines()
+    target.write_text(
+        ''.join(json.dumps(json.loads(line), ensure_ascii=False, separators=separators) + '\n'
+                for line in lines),
+        encoding='utf-8',
+    )
+
+
+def test_line_level_scan_helpers_ignore_json_separators():
+    """共享原语本身对分隔符不敏感：类型用正则取，会话头**解析**后判 `session is True`。"""
+    from my_coder.values.persistence import line_event_type, line_is_session_header
+
+    header = {'session': True, 'format_version': 1, 'id': 'x', 'time': 0.0}
+    event = {'seq': 0, 'time': 0.0, 'type': 'user/message', 'data': {}}
+    for separators in (None, (',', ':')):
+        kwargs = {} if separators is None else {'separators': separators}
+        assert line_is_session_header(json.dumps(header, **kwargs))
+        assert not line_is_session_header(json.dumps(event, **kwargs))
+        assert line_event_type(json.dumps(event, **kwargs)) == 'user/message'
+    assert line_event_type('{"seq":0,"data":{"nested":1}}') is None
+    assert not line_is_session_header('not json')
+
+
+def test_compact_json_log_gives_the_same_counts(tmp_path):
+    """紧凑分隔符写出的日志，统计结果与默认分隔符**逐项一致**。
+
+    旧实现里 `'"type": "user/message"' in line` 在 `"type":"user/message"` 上直接不匹配，
+    于是列表的事件数照加、用户话/回合/标题却全丢——**静默**少数，没有任何报错。
+    """
+    sessions_dir = tmp_path / 'sess'
+    sessions_dir.mkdir()
+    workspace = tmp_path / 'proj'
+    workspace.mkdir()
+    _compacted_session('defaults', workspace=str(workspace),
+                       store=sessions_dir / 'defaults.jsonl')
+    _rewrite_with_separators(sessions_dir / 'defaults.jsonl',
+                             sessions_dir / 'compact.jsonl', separators=(',', ':'))
+
+    rows = {row.session_id: row for row in scan_sessions(sessions_dir, default_workspace='')}
+    default_row, compact_row = rows['defaults'], rows['compact']
+    assert compact_row.events == default_row.events
+    assert compact_row.user_messages == default_row.user_messages == 3   # checkpoint 不算
+    assert compact_row.turns == default_row.turns == 2
+    assert compact_row.compactions == default_row.compactions == 0
+    assert compact_row.title == default_row.title == '召回测试'
+    assert compact_row.workspace == default_row.workspace == str(workspace)
+    assert compact_row.summary == default_row.summary == '召回测试'
+
+
+def test_compact_session_header_is_not_counted_as_an_event(tmp_path):
+    """紧凑会话头（`{"session":true,...}`）同样不算事件——判据是解析结果，不是字面量。"""
+    sessions_dir = tmp_path / 'sess'
+    sessions_dir.mkdir()
+    path = sessions_dir / 'compact.jsonl'
+    _compacted_session('compact', workspace=str(tmp_path), store=path)
+    _rewrite_with_separators(path, path, separators=(',', ':'))
+
+    lines = path.read_text(encoding='utf-8').splitlines()
+    assert lines[0].startswith('{"session":true'), '夹具应当是真的紧凑会话头'
+    row = next(row for row in scan_sessions(sessions_dir, default_workspace='')
+               if row.session_id == 'compact')
+    assert row.events == len(lines) - 1, '会话头不是事件，不许算进事件数'
+
+
+def test_web_scan_sessions_agrees_with_recall_scan(tmp_path, monkeypatch):
+    """同一文件上，Web 列表与召回 L0 的**关键计数一致**（两边调同一个 `scan_log`）。"""
+    from my_coder.values.persistence import scan_log
+    from my_coder.web import sessions as web_sessions
+    from my_coder.web.state import state as web_state
+
+    sessions_dir = tmp_path / 'sess'
+    sessions_dir.mkdir()
+    workspace = tmp_path / 'proj'
+    workspace.mkdir()
+    _compacted_session('shared', workspace=str(workspace),
+                       store=sessions_dir / 'shared.jsonl')
+    _rewrite_with_separators(sessions_dir / 'shared.jsonl',
+                             sessions_dir / 'compact.jsonl', separators=(',', ':'))
+
+    # 最小宿主状态：列表只需要 sessions_dir + args.workspace
+    monkeypatch.setattr(web_state, 'sessions_dir', sessions_dir)
+    monkeypatch.setattr(web_state, 'args', Namespace(workspace=tmp_path))
+    listing = {item['id']: item for item in web_sessions.scan_sessions()}
+    rows = {row.session_id: row for row in scan_sessions(sessions_dir, default_workspace='')}
+
+    for sid in ('shared', 'compact'):
+        item, row = listing[sid], rows[sid]
+        assert item['events'] == row.events
+        assert item['title'] == row.title
+        assert item['summary'] == row.summary
+        assert item['workspace'] == row.workspace
+        assert item['workspace_ok'] == row.workspace_ok
+        # Web 列表不暴露用户话数/回合数，但两条路径确实调同一个共享扫描：
+        # 直接对一下共享函数的计数，证明口径没有分叉
+        scan = scan_log(sessions_dir / f'{sid}.jsonl',
+                        checkpoint_mark=CHECKPOINT_MARK)
+        assert scan.user_messages == row.user_messages == 3
+        assert scan.turns == row.turns == 2
+

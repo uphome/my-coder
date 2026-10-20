@@ -26,8 +26,9 @@
 ## 成本与新鲜度
 
 - **扫会话目录按 file stat 缓存**（`(mtime_ns, size)` 键控）：L0 每请求求值一次，
-  命中缓存时只做 `scandir` + `stat`；未命中才逐行扫（行内匹配，**不整包解析**——
-  实测 45 MB 语料整包 `json.loads` 要 842 ms，只解析命中行 140 ms）。
+  命中缓存时只做 `scandir` + `stat`；未命中才逐行扫（`values/persistence.py` 的
+  `scan_log`，**不整包解析**——实测 45 MB 语料整包 `json.loads` 要 842 ms，
+  只解析命中行 140 ms）。行扫描**只有这一份实现**，Web 的会话列表复用它。
 - **L1/L2 只解析目标会话**（当前会话直接用内存里的 `Session`，不重读盘）。
 """
 from __future__ import annotations
@@ -39,6 +40,7 @@ from pathlib import Path
 
 from ..state.session import Session
 from ..values.messages import Message, TextBlock, ToolCallBlock, ToolResultBlock
+from ..values.persistence import scan_log
 from .workspace import normalize_recorded_workspace
 
 log = logging.getLogger('recall')
@@ -109,9 +111,12 @@ _LIVE_CACHE: dict[int, _LiveCounter] = {}
 
 
 def _scan_one(path: Path, default_workspace: str) -> SessionRow:
-    """逐行扫一个日志：只做行内子串匹配 + 命中行才 `json.loads`（实测快 6 倍）。
+    """逐行扫一个日志，得到 L0 目录的一行。
 
-    统计的三类事件都能靠 `"type": "..."` 干净地数出来（JSONL 一行一事件）。
+    **行扫描只有一份实现**：`values/persistence.py` 的 `scan_log`（`web/sessions.py`
+    的会话列表也调它），统计口径（事件数排除会话头、用户话数排除 checkpoint、
+    title/workspace 后者覆盖）因此不会两边漂。这里只负责 stat 键控缓存 + 把日志里
+    记录的工作区归一化（含"没记录过就跟随宿主默认"）。
     """
     stat = path.stat()
     key = (stat.st_mtime_ns, stat.st_size)
@@ -120,63 +125,23 @@ def _scan_one(path: Path, default_workspace: str) -> SessionRow:
     if cached is not None and cached[0] == key:
         return cached[1]
 
-    events = user_messages = turns = compactions = 0
-    summary = title = title_source = workspace = ''
-    with path.open(encoding='utf-8') as handle:
-        for line in handle:
-            # 第一行是会话头（文件级元数据，不是事件）：跳过，否则目录里的
-            # "事件数"比真实事件多 1，且它不匹配任何 `"type"` 分支。
-            if line.startswith('{"session": true'):
-                continue
-            events += 1
-            if '"type": "user/message"' in line:
-                # **checkpoint 也是一条 user/message**（`surface_op='replace'` 写的合成消息）：
-                # 不许算进"用户话数"，否则目录里的条数和 L1 清单的行数对不上——
-                # 而"清单只收真人发言"是我们自己定的规则（AGENTS.md 的召回归约）。
-                if CHECKPOINT_MARK in line:
-                    continue
-                user_messages += 1
-                if not summary:
-                    try:
-                        payload = (json.loads(line).get('data') or {}).get('$message') or {}
-                        for block in payload.get('content') or []:
-                            if '$text' in block:
-                                summary = block['$text'][:60]
-                                break
-                    except (TypeError, ValueError, KeyError):
-                        pass
-            elif '"type": "turn/start"' in line:
-                turns += 1
-            elif '"type": "compaction/start"' in line:
-                compactions += 1
-            if '"type": "session/title"' in line:
-                try:
-                    payload = (json.loads(line).get('data') or {}).get('$dict') or {}
-                    title = payload.get('title', '') or title
-                    title_source = payload.get('source', '') or title_source
-                except (TypeError, ValueError, KeyError):
-                    pass
-            if '"type": "session/workspace"' in line:
-                # 与 seat 侧同一条归一化规则（否则"列表显示 A、工具在 B"最难查）；
-                # 空白记录按"没记录过"处理——空白折成 cwd 就是一次静默换根
-                try:
-                    payload = (json.loads(line).get('data') or {}).get('$dict') or {}
-                    raw = str(payload.get('workspace') or '').strip()
-                    if raw:
-                        try:
-                            workspace = str(normalize_recorded_workspace(raw))
-                        except OSError:
-                            workspace = raw
-                except (TypeError, ValueError, KeyError):
-                    pass
+    scan = scan_log(path, checkpoint_mark=CHECKPOINT_MARK)
+    # 与 seat 侧同一条归一化规则（否则"列表显示 A、工具在 B"最难查）；
+    # 空白记录按"没记录过"处理——空白折成 cwd 就是一次静默换根（scan_log 已 strip）
+    workspace = scan.workspace
+    if workspace:
+        try:
+            workspace = str(normalize_recorded_workspace(workspace))
+        except OSError:      # 坏路径/循环链接：保留原字符串（列表只是信息，不该整页报错）
+            pass
 
     effective = workspace or default_workspace
     row = SessionRow(
-        session_id=path.stem, events=events, updated=stat.st_mtime,
-        title=title, title_source=title_source,
-        summary=title or summary or '(empty)', workspace=effective,
+        session_id=path.stem, events=scan.events, updated=stat.st_mtime,
+        title=scan.title, title_source=scan.title_source,
+        summary=scan.title or scan.summary or '(empty)', workspace=effective,
         workspace_ok=Path(effective).is_dir() if effective else False,
-        user_messages=user_messages, turns=turns, compactions=compactions,
+        user_messages=scan.user_messages, turns=scan.turns, compactions=scan.compactions,
     )
     _SCAN_CACHE[cache_key] = (key, row)
     return row
@@ -184,7 +149,11 @@ def _scan_one(path: Path, default_workspace: str) -> SessionRow:
 
 def scan_sessions(sessions_dir: Path, default_workspace: str = '',
                   exclude: str = '') -> list[SessionRow]:
-    """扫会话目录（最近更新的在前）。**唯一实现**：web 的列表也走这里。
+    """扫会话目录（最近更新的在前）。**L0 的唯一入口**。
+
+    行扫描只有一份实现：`values/persistence.py` 的 `scan_log`——Web 的会话列表
+    （`web/sessions.py:scan_sessions`）也调它，所以两边的"事件数 / 用户话数 /
+    回合数 / 标题 / 工作区"是同一套口径，不会各算各的。
 
     `exclude` 是要跳过的会话 id——**当前会话必须排除**：它每追加一条事件就变，
     stat 键控缓存必然失效，于是"每请求求值一次"的 L0 会**每次重扫整个日志**

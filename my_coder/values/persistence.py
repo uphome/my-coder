@@ -101,6 +101,148 @@ def read_header(path: Path) -> SessionHeader | None:
     return session_header_from_json(data)
 
 
+# ---------- 行级快扫：会话列表与召回 L0 共用的**唯一**一份扫描口径 ----------
+#
+# 会话列表每个请求都要重算，所以不能整行 `json.loads`。但也不能像旧实现那样用字面量
+# 匹配（`'"type": "user/message"' in line`、`line.startswith('{"session": true')`）：
+# 那两个判据依赖 `json.dumps` 的**默认分隔符**（`', '` / `': '`），换紧凑分隔符 / 缩进 /
+# 字段顺序就会**静默少数**——列表少报事件、少列用户话，而且没有任何报错。
+#
+# 这里的两条判据都对序列化不敏感：类型用正则取（容忍任意空白），会话头**解析**首行后
+# 判 `session is True`。`scan_log` 把统计口径也收成一份，`app/recall.py` 的 L0 与
+# `web/sessions.py` 的列表都调它，两边不会各算各的。
+
+_TYPE_FIELD_RE = re.compile(r'"type"\s*:\s*"([^"]+)"')
+
+
+def line_event_type(line: str) -> str | None:
+    """取一行日志**信封**的 `type`（取不到返回 None）。
+
+    用正则而不是整行 `json.loads`：这是逐行扫的热路径，整行解析要慢一个量级。
+    正则对分隔符/空白不敏感（`"type": "x"` 与 `"type":"x"` 都认）——旧实现依赖默认
+    分隔符字面量时，换了序列化就静默少数，根因正在这里。
+
+    payload 里作为**字符串**出现的同名文本会被转义（`\\"type\\":`），匹配不到；而信封的
+    `type` 写在 `data` 之前，`search` 先命中的是它。
+    """
+    match = _TYPE_FIELD_RE.search(line)
+    return match.group(1) if match else None
+
+
+def line_is_session_header(line: str) -> bool:
+    """这一行是不是会话头：**解析它**、判顶层 `session is True`。
+
+    同样不能用字面量 `{"session": true`：紧凑日志（`{"session":true,...}`）会让会话头
+    被当成第 1 个事件。只对每个文件的**首行**调用，整行解析的成本可以忽略；坏行按
+    "不是头"处理（宁可多算 1 个事件，也不要因一条坏行让整个列表消失）。
+    """
+    try:
+        data = json.loads(line)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(data, dict) and is_session_header_line(data)
+
+
+@dataclass(frozen=True)
+class LogScan:
+    """一份会话日志的**行级投影**（不造 `SessionEvent`，只留列表/目录要的计数）。
+
+    字段口径由 `scan_log` 说明；两个消费方共用，避免"同一份日志两处各算一套"。
+    """
+
+    events: int = 0
+    user_messages: int = 0
+    turns: int = 0
+    compactions: int = 0
+    title: str = ''
+    title_source: str = ''
+    # 日志里的**原始记录值**（已 strip）。归一化（expanduser + resolve）是应用层规则，
+    # 由调用方做——`values` 不能 import 上层。
+    workspace: str = ''
+    # 第一条真人 `user/message` 的正文前 60 字：列表没有标题时拿它兜底。
+    summary: str = ''
+
+
+def _event_data(line: str) -> dict:
+    """把一行解析出 `data`（坏行 / 形状不对一律空 dict——列表扫描不该整页报错）。"""
+    try:
+        data = json.loads(line)
+    except (TypeError, ValueError):
+        return {}
+    payload = data.get('data') if isinstance(data, dict) else None
+    return payload if isinstance(payload, dict) else {}
+
+
+def _dict_payload(line: str) -> dict:
+    """`data` 里的 `$dict`（title / workspace 这类普通 dict 的 tagged 形态）。"""
+    value = _event_data(line).get('$dict')
+    return value if isinstance(value, dict) else {}
+
+
+def _first_text_of_message(line: str) -> str:
+    """`user/message` 的第一个 `$text` 块（前 60 字）；没有正文返回空串。"""
+    message = _event_data(line).get('$message')
+    if not isinstance(message, dict):
+        return ''
+    for block in message.get('content') or []:
+        if isinstance(block, dict) and '$text' in block:
+            return str(block['$text'])[:60]
+    return ''
+
+
+def scan_log(path: Path, *, checkpoint_mark: str = '') -> LogScan:
+    """逐行扫一份会话日志，得到会话列表 / L0 目录要的计数（不做整包解析）。
+
+    统计口径（**两个消费方共用这一份**，别再各写一份）：
+
+    - `events`：**排除会话头**（文件级元数据，不是事件）；空行不算事件（JSONL 一行一事件）；
+    - `user_messages`：`user/message` 里**排除 checkpoint**——压缩写的是
+      `surface_op='replace'` 的合成消息，正文含 `checkpoint_mark`；不排除的话目录里的
+      "用户话数"会和 L1 清单的行数对不上（"清单只收真人发言"是我们自己定的规则）；
+    - `title` / `workspace`：**后者覆盖前者**，但空值不覆盖（一条空标题不该把已有标题抹掉）；
+    - `workspace`：返回日志里的原始记录值（已 strip），空白表示"没记录过"；
+    - `summary`：第一条真人 `user/message` 的正文前 60 字（列表的 fallback 摘要）。
+
+    `checkpoint_mark` 是 checkpoint 的标记串（空串 = 不排除任何用户话）：标记由压缩器
+    定义，`values` 不知道它，所以由调用方传进来。
+    """
+    events = user_messages = turns = compactions = 0
+    title = title_source = workspace = summary = ''
+    first = True
+    with path.open(encoding='utf-8') as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            if first:
+                first = False
+                if line_is_session_header(line):
+                    continue
+            events += 1
+            type_ = line_event_type(line)
+            if type_ == 'user/message':
+                if checkpoint_mark and checkpoint_mark in line:
+                    continue
+                user_messages += 1
+                if not summary:
+                    summary = _first_text_of_message(line)
+            elif type_ == 'turn/start':
+                turns += 1
+            elif type_ == 'compaction/start':
+                compactions += 1
+            elif type_ == 'session/title':
+                payload = _dict_payload(line)
+                title = str(payload.get('title') or '') or title
+                title_source = str(payload.get('source') or '') or title_source
+            elif type_ == 'session/workspace':
+                raw = str(_dict_payload(line).get('workspace') or '').strip()
+                if raw:
+                    workspace = raw
+    return LogScan(
+        events=events, user_messages=user_messages, turns=turns, compactions=compactions,
+        title=title, title_source=title_source, workspace=workspace, summary=summary,
+    )
+
+
 def declared_version(path: Path) -> int:
     """日志声称的格式版本：有头用头，没头按 v0（本机制落地前的老文件）。"""
     header = read_header(path)
