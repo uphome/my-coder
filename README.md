@@ -184,7 +184,7 @@ Web 端默认只绑 `127.0.0.1` 且不校验来源——**不要**把它暴露�
 ```sh
 python -m ruff check my_coder tests   # 风格
 python -m mypy my_coder               # 类型
-python -m pytest                      # 268 个测试（3 条平台相关会 skip）
+python -m pytest                      # 281 个测试（3 条平台相关会 skip）
 ```
 
 三绿才提交。测试按关注点分文件（跨文件 helper 在 `conftest.py`）——其中 `test_architecture.py` 把**依赖方向钉成包结构**：下层 `import` 上层当场红。
