@@ -118,7 +118,7 @@ Windows 控制台是 GBK：用 `--no-capture-output`；`conda run -c` 不支持�
   `/history` 与 `sessions/*/switch|new` 三条通道幂等。见 `docs/prior-art.md` §5。
 - **工具收敛（issue #2）**：判据是"**自上次变更以来连续多少次只读调用**"，不是回合步数
   （实测：实现型长回合 61 步、最长只读段只有 4，按步数砍会砍掉合法的大任务）。纯读工具**必须声明**
-  `ToolSpec.cacheable=True`（六条纯读工具在 `my_coder/tools/` 里各自声明；默认 `False` = 会变更，
+  `ToolSpec.cacheable=True`（七条纯读工具在 `my_coder/tools/` 里各自声明；默认 `False` = 会变更，
   出现一次变更类调用就清零计数）；到阈值把提示写进**那次工具结果的正文**；
   到硬上限时下一步**不带工具面**（收尾步；模型若仍发调用则**不执行**、补 `is_error`），
   `turn/end` 记 **`read-budget`**。开关：`--readonly-nudge/--readonly-close/--no-convergence`。

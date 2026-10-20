@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import threading
 import time
 import uuid
@@ -29,11 +28,13 @@ from pathlib import Path
 from fastapi import HTTPException
 
 from ..app.factory import build_agent
+from ..app.recall import CHECKPOINT_MARK
 from ..app.workspace import normalize_recorded_workspace, resolve_workspace
 from ..capability.hooks import Hooks
 from ..state.recovery import repair_dangling_tool_calls
 from ..state.session import Session
 from ..tools.todo import fold_todos
+from ..values.persistence import scan_log
 from .payload import context_payload, history_payloads, queue_rows
 from .state import Seat, state
 
@@ -312,9 +313,13 @@ def validate_sid(sid: str) -> None:
 def scan_sessions() -> list[dict]:
     """扫描会话目录：id / 事件数 / 更新时间 / 标题 / 首条用户消息摘要 / 工作区 + 工作区是否还在。
 
-    磁盘行内快扫（不整包解析）：标题 = 最后一条 session/title 事件的 title
-    （user 手动 > auto 自动，按追加顺序后者覆盖）；无标题事件时列表显示
-    首条 user/message 摘要作为 fallback（对齐 harness 的三级来源）。
+    行扫描**不是这里写的**：`values/persistence.py` 的 `scan_log` 是唯一一份实现，
+    召回 L0（`app/recall.py:_scan_one`）也调它——所以两边的"事件数 / 用户话数 / 回合数 /
+    标题 / 工作区"是同一套口径，且对 JSON 分隔符不敏感（旧实现靠 `'"type": "..."'`
+    字面量匹配，紧凑日志会静默少数）。
+
+    标题 = 最后一条 session/title 事件的 title（user 手动 > auto 自动，按追加顺序后者覆盖）；
+    无标题事件时列表显示首条 user/message 摘要作为 fallback（对齐 harness 的三级来源）。
     工作区同理取最后一条 `session/workspace`（后写覆盖前写）；没有（或记录是空白）就报
     宿主默认，所以这一栏不会空着。
 
@@ -328,57 +333,27 @@ def scan_sessions() -> list[dict]:
                          if state.args is not None else '')
     items: list[dict] = []
     for path in sorted((state.sessions_dir or Path('.sessions')).glob('*.jsonl')):
-        events = 0
-        summary = ''
-        title = ''
-        title_source = ''
-        workspace = ''
-        with path.open(encoding='utf-8') as fh:
-            for line in fh:
-                # 第一行是会话头（文件级元数据，不是事件）：计数与快扫都跳过它，
-                # 否则列表里的"事件数"会比真实事件多 1。
-                if line.startswith('{"session": true'):
-                    continue
-                events += 1
-                # 找第一条 user/message 当 fallback 摘要
-                if not summary and '"type": "user/message"' in line:
-                    try:
-                        data = (json.loads(line).get('data') or {}).get('$message') or {}
-                        for block in data.get('content') or []:
-                            if '$text' in block:
-                                summary = block['$text'][:60]
-                                break
-                    except (TypeError, ValueError, KeyError):
-                        pass
-                # 最后一条 session/title 事件即当前标题（后者覆盖前者）
-                if '"type": "session/title"' in line:
-                    try:
-                        data = (json.loads(line).get('data') or {}).get('$dict') or {}
-                        title = data.get('title', '')
-                        title_source = data.get('source', '')
-                    except (TypeError, ValueError, KeyError):
-                        pass
-                # 最后一条 session/workspace 事件即当前工作区（同上）。
-                # 归一化走 `normalize_recorded_workspace`：列表与 seat 必须**同一条规则**
-                # （否则"列表显示 rel-ws、工具在 <cwd>/rel-ws"这类不一致最难查）；解析失败
-                # （坏路径/循环链接）就退回原字符串——列表只是信息，不该因一条坏记录整页报错。
-                # 空白记录按"没记录"处理，与 seat 侧的判据一致（空白折叠成 cwd 是错的）
-                if '"type": "session/workspace"' in line:
-                    try:
-                        data = (json.loads(line).get('data') or {}).get('$dict') or {}
-                        raw = str(data.get('workspace') or '').strip()
-                        if raw:
-                            workspace = str(normalize_recorded_workspace(raw))
-                    except (TypeError, ValueError, KeyError, OSError):
-                        workspace = raw
+        # checkpoint 判据与召回共用同一个标记（别在这里写第二个字面量）：合成消息
+        # 不算"用户话"，也不该拿 checkpoint 的前导文字当列表摘要
+        scan = scan_log(path, checkpoint_mark=CHECKPOINT_MARK)
+        # 归一化走 `normalize_recorded_workspace`：列表与 seat 必须**同一条规则**
+        # （否则"列表显示 rel-ws、工具在 <cwd>/rel-ws"这类不一致最难查）；解析失败
+        # （坏路径/循环链接）就退回原字符串——列表只是信息，不该因一条坏记录整页报错。
+        # 空白记录按"没记录"处理，与 seat 侧的判据一致（空白折叠成 cwd 是错的）
+        workspace = scan.workspace
+        if workspace:
+            try:
+                workspace = str(normalize_recorded_workspace(workspace))
+            except OSError:
+                pass
         effective = workspace or default_workspace
         items.append({
             'id': path.stem,
-            'events': events,
+            'events': scan.events,
             'updated': path.stat().st_mtime,
-            'title': title or None,
-            'title_source': title_source or None,
-            'summary': title or summary or '(empty)',  # 标题优先，摘要兜底
+            'title': scan.title or None,
+            'title_source': scan.title_source or None,
+            'summary': scan.title or scan.summary or '(empty)',  # 标题优先，摘要兜底
             'workspace': effective,                    # 没记录过 = 跟随宿主默认
             'workspace_ok': Path(effective).is_dir() if effective else False,
         })

@@ -27,7 +27,7 @@
 
 > **2026-10-03 日志粒度（issue #51）**：流式帧不再落盘（Session.emit_stream 只喂实时 UI），每 step 落一条 ssistant/stream 汇总。实测同一份日志投影：**116.3 MB / 425,854 行 → 约 12.5 MB / 4,530 行**（帧占 89.3% 字节、98.9% 行）；内容完整性有机械证明（帧拼接 == 落盘的正文/参数/思维链）。见 [粒度那篇](docs/notes/implemented/feature/2026-10-03-stream-log-granularity.md)。
 >
-> 当前全量测试：251 个（3 条平台相关 skip）——数字由 `tests/test_doc_numbers.py` **机械保证**
+> 当前全量测试：281 个（3 条平台相关 skip）——数字由 `tests/test_doc_numbers.py` **机械保证**
 > （文档里任何测试数/行数与代码不符，那个门禁就会红；不再靠"记得同步"）。
 
 ## read_file 升级（已完成）
@@ -864,7 +864,7 @@ python eval/recall/export_sessions.py                       # 证据导出成可
 
 **验收**：`tests/test_loop.py` 三条新用例——失败后重试留档（含 code/message/turn/step/
 provider/model）+ 不进模型历史 / 取消留档且 `partial` 是半截文本（同时 `turn/end` 仍记
-`aborted`）/ `partial` 截断上限。全量 268 个测试（3 条 skip）。
+`aborted`）/ `partial` 截断上限。全量 281 个测试（3 条 skip）。
 
 ## 工具收敛（issue #2，2026-09-30 落地）
 
@@ -877,7 +877,7 @@ provider/model）+ 不进模型历史 / 取消留档且 `partial` 是半截文�
 连续多少次只读调用**"，**不是回合步数**——按步数砍会砍掉合法的大任务（opencode 按总步数：
 `agent.steps` + `MAX_STEPS_PROMPT`；DSH / PI 不设上限）。
 
-**落地**：`ToolSpec.cacheable` 声明（六条纯读工具为真；默认 `False` = 会变更 → 计数清零）
+**落地**：`ToolSpec.cacheable` 声明（七条纯读工具为真；默认 `False` = 会变更 → 计数清零）
 + `state/progress.py` 的 `ProgressPolicy`（软 8 / 硬 16）→ 软提示写进**那次工具结果的正文**；
 到硬上限时下一步**不带工具面**（收尾步；模型若仍发调用则**不执行**、补 `is_error`），
 `turn/end` 记 `read-budget`。开关 `--readonly-nudge/--readonly-close/--no-convergence`。

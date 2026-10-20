@@ -250,6 +250,28 @@ async def test_skill_tool_unknown_name_is_a_result(tmp_path):
     assert 'project-instructions' in outcome.content        # 列出可用名字，模型能自我纠正
 
 
+def test_skill_tool_declares_cacheable_so_reading_counts_as_readonly(tmp_path):
+    """`skill` 必须声明 `cacheable=True`（与其余纯读工具一致），否则收敛判据被绕过。
+
+    现场：只有 `skill` 漏了这条声明，`ToolSpec.cacheable` 默认 `False`——读技能被当成
+    "会变更"，`ProgressPolicy.note` 于是把"连续只读"计数**清零**：模型反复读技能（或
+    "读几次技能再读文件"）永远到不了 nudge/close 阈值，收敛压力整个失效。
+
+    断言分两层：① 声明从注册表里读得到；② 语义面真的按只读计数（不是只躺个字段）。
+    """
+    from my_coder.state.progress import NUDGE, ProgressPolicy
+
+    spec = build_tools(workspace=tmp_path).get('skill')
+    assert spec.cacheable is True
+
+    policy = ProgressPolicy(nudge_at=2, close_at=None)
+    assert policy.note(True) is None                        # 先有一次只读打底
+    # 把"读技能"这次调用喂给进度策略：计入只读 → 第 2 次触发软提示（若声明为 False
+    # 会返回 None 且计数清零，这条断言就会红）
+    assert policy.note(spec.cacheable) is NUDGE
+    assert policy.readonly_run == 2
+
+
 def test_web_skill_catalog_survives_reload(tmp_path):
     """技能目录可重建：新会话（reload）重新扫描，目录照旧注入。
 

@@ -730,6 +730,124 @@ async def test_web_steer_interrupts_open_sse_stream(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_web_agent_startup_approval_reaches_sse_stream(tmp_path):
+    """agent 一启动就求审批：请求必须推到前端，而不是被 `queue=None` 静默拒绝。
+
+    回归（真实竞态）：`/chat` 曾把 `seat.queue = queue` 写在 `sse_stream()` 生成器体内，
+    而 `run_agent` 任务在它**之前**创建。生成器首次迭代才赋值，于是当 agent 在 SSE
+    首帧之前就请求审批时，`web/sessions.py` 的审批钩子看到 `seat.queue is None`，
+    直接 `return False`——浏览器上根本没有批准按钮，工具被静默跳过。
+
+    做法（确定性，不睡眠等超时）：桩掉 agent 的 `followup`，让它在**启动瞬间同步**发起
+    审批请求并记录那一刻的 `seat.queue`（这就是竞态判据）；审批走**真实的** Web 钩子
+    （缺陷就在它身上）。钩子把 Future 放进等待表时，用会通知的 dict 叫醒测试，拿到 aid
+    后走真实的 `POST /approval/respond` 批准——于是"请求真的在等人工"与"请求真的作为
+    SSE 帧到了前端"同时被钉住。
+    """
+    from my_coder import web
+
+    web.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess')
+    seat = web.state.seats['web']
+    real_agent = seat.agent
+    assert real_agent is not None
+    approval_hook = real_agent.hooks.approval
+    assert approval_hook is not None, 'Web 版 seat 必须挂 approval 钩子'
+
+    # 钩子往 seat.approvals 登记 Future 的那一刻 = "请求已到前端、等人点批准"。
+    # 用会通知的 dict 把这一步变成事件：测试不用轮询、也不用 sleep。
+    pending: dict[str, str] = {}
+    approval_registered = asyncio.Event()
+
+    class NotifyingApprovals(dict):
+        def __setitem__(self, key, value):
+            super().__setitem__(key, value)
+            pending['id'] = key
+            approval_registered.set()
+
+    seat.approvals = NotifyingApprovals()
+    finished = asyncio.Event()
+
+    class ApprovalOnStartAgent:
+        """假 agent：followup 一被调用就求审批（模拟"一启动就卡在等批准"）。"""
+        status = 'idle'
+
+        def __init__(self) -> None:
+            self.queue_at_startup = None
+            self.approved = None
+
+        def followup(self, message: str, rpc_id: str = '') -> None:
+            # **同步**记下启动瞬间的 seat.queue——旧实现此刻还是 None（窗口就在这）
+            self.queue_at_startup = seat.queue
+            self._approval = asyncio.ensure_future(self._ask())
+
+        async def _ask(self) -> None:
+            self.approved = await approval_hook('bash', {'command': 'echo hi'})
+            finished.set()
+
+        async def when_idle(self) -> None:
+            await finished.wait()
+
+        def cancel(self) -> None:
+            pass
+
+    stub = ApprovalOnStartAgent()
+    seat.agent = stub
+
+    transport = httpx.ASGITransport(app=web.app)
+    async with httpx.AsyncClient(transport=transport, base_url='http://test') as client:
+        async def read_sse() -> str:
+            parts = []
+            async with client.stream('POST', '/chat',
+                                     json={'message': 'hi', 'sid': 'web'}) as resp:
+                assert resp.status_code == 200
+                async for chunk in resp.aiter_text():
+                    parts.append(chunk)
+            return ''.join(parts)
+
+        reader = asyncio.create_task(read_sse())
+        try:
+            # 等"请求进入等待表"或"钩子已经返回"的先到者（两者都是事件，不是计时）：
+            # 修复生效 → 前者；旧实现 → 钩子因 queue=None 立刻返回，后者先到。
+            waiters = [asyncio.ensure_future(approval_registered.wait()),
+                       asyncio.ensure_future(finished.wait())]
+            try:
+                await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                for waiter in waiters:
+                    waiter.cancel()
+            assert stub.queue_at_startup is not None, (
+                'agent 启动时 seat.queue 还没挂上：审批钩子看到 queue=None 会静默拒绝，'
+                '请求根本到不了前端（旧实现把赋值写在 sse_stream() 生成器体内）')
+            assert approval_registered.is_set(), '审批请求没有进入等待表（钩子静默拒绝了）'
+            # 走真实路由批准：能 200 找到这个 Future，就证明请求真的在等人工响应
+            respond = await client.post('/approval/respond',
+                                        json={'id': pending['id'], 'approved': True})
+            assert respond.status_code == 200
+            sse = await asyncio.wait_for(reader, timeout=10)
+        finally:
+            if not reader.done():
+                reader.cancel()
+                try:
+                    await reader
+                except asyncio.CancelledError:
+                    pass
+
+    # 审批请求真的作为 SSE 帧推到了前端（id/name/arguments 够画批准按钮）
+    assert '"type": "approval_request"' in sse
+    frames = [json.loads(chunk.split('\n\n')[0])
+              for chunk in sse.split('data: ') if '"approval_request"' in chunk]
+    assert len(frames) == 1
+    assert frames[0]['id'] == pending['id']
+    assert frames[0]['name'] == 'bash'
+    assert frames[0]['arguments'] == {'command': 'echo hi'}
+    # 钩子把我们的"批准"真的返回给了 agent（queue=None 时它只会直接 False）
+    assert stub.approved is True
+    assert not seat.approvals, '审批结束后 Future 必须从等待表清掉'
+    # finally 的清理判据不变：流结束后队列已摘掉
+    assert seat.queue is None
+
+
+@pytest.mark.asyncio
 async def test_web_sse_disconnect_cancels_agent(tmp_path):
     """SSE 客户端断开（停止/关页）必须取消 agent，否则回合永不收敛。
 
@@ -1228,4 +1346,73 @@ def test_web_new_session_ids_do_not_collide_within_a_second(tmp_path, monkeypatc
     (sessions_dir / f'{second}.jsonl').touch()
     assert client.post('/sessions/new').json()['id'] == 'web-1700000000-3'
     assert len(client.get('/sessions').json()) == 4  # 'web' + 三个新会话，都在列表里
+
+
+# ---------------------------------------------------------------------------
+# 宿主级开关：max-open-seats 与工具收敛（CLI/Web 两个宿主语义一致）
+# ---------------------------------------------------------------------------
+
+
+def test_web_init_web_applies_runtime_flags(tmp_path):
+    """`init_web` 的运行时开关要落到 `state.args` → 每个 Seat 的 args → agent 的进度策略。
+
+    回归背景：`main()` 解析了 `--max-open-seats/--readonly-nudge/--readonly-close/
+    --no-convergence`，但 `init_web` 的签名里根本没有它们，也没人补进 `state.args`——
+    于是 Web 宿主永远取默认（命令行看着有、行为不对）。只断言 Namespace 里躺着值不够：
+    这些值必须真的被 `build_agent` 消费到，否则又只是"参数存在"。
+    """
+    from my_coder import web
+
+    web.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess',
+                 max_open_seats=2, readonly_nudge=5, readonly_close=9)
+    args = web.state.args
+    assert (args.max_open_seats, args.readonly_nudge, args.readonly_close) == (2, 5, 9)
+    assert args.no_convergence is False                     # 默认：收敛机制开着
+
+    seat = web.state.seats['web']
+    # 座席 args 是宿主模板的逐字段复制（只换 workspace），开关跟着坐席走
+    assert (seat.args.max_open_seats, seat.args.readonly_nudge, seat.args.readonly_close) \
+        == (2, 5, 9)
+    # 真的落到 agent 的进度策略上（阈值来自宿主参数，不是 constants 默认）
+    assert (seat.agent.progress.nudge_at, seat.agent.progress.close_at) == (5, 9)
+    assert seat.agent.progress.enabled is True
+
+    # --no-convergence：整条收敛机制关掉（等价于回到没有它的行为）
+    web.init_web(tmp_path, fake=True, sessions_dir=tmp_path / 'sess2', no_convergence=True)
+    assert web.state.args.no_convergence is True
+    assert web.state.seats['web'].agent.progress.enabled is False
+
+
+def test_web_main_forwards_runtime_flags_to_init_web(tmp_path, monkeypatch):
+    """`main()` 解析出来的四个开关必须**原样传给 init_web**（缺口就在这一跳）。
+
+    打桩 `init_web` / `load_env` / `uvicorn.run`（不真起服务、不读仓库 .env），
+    从真实 argv 走一遍 `main()`，断言四个开关都到达装配入口。
+    """
+    import sys
+    from importlib import import_module
+
+    import uvicorn
+
+    web_app = import_module('my_coder.web.app')
+    captured: dict = {}
+
+    def fake_init(workspace, **kwargs):
+        captured.update(workspace=workspace, **kwargs)
+
+    monkeypatch.setattr(web_app, 'init_web', fake_init)
+    monkeypatch.setattr(web_app, 'load_env', lambda path: None)
+    monkeypatch.setattr(uvicorn, 'run', lambda app, **kwargs: None)
+    monkeypatch.setattr(sys, 'argv', [
+        'web', '--workspace', str(tmp_path), '--fake',
+        '--max-open-seats', '2', '--readonly-nudge', '5',
+        '--readonly-close', '9', '--no-convergence',
+    ])
+    web_app.main()
+
+    assert captured['workspace'] == tmp_path
+    assert captured['max_open_seats'] == 2
+    assert captured['readonly_nudge'] == 5
+    assert captured['readonly_close'] == 9
+    assert captured['no_convergence'] is True
 

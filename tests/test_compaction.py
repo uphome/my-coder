@@ -75,7 +75,7 @@ async def test_compaction_selection_and_file_ops():
 
 @pytest.mark.asyncio
 async def test_compaction_transaction_fake_llm(tmp_path):
-    """整链路：start → summary → replace(checkpoint) → end，摘要替换旧回合。"""
+    """整链路：start → replace(checkpoint) → summary → end，摘要替换旧回合。"""
     from my_coder.app.compaction import run_compaction
 
     class FakeCompactorLlm:

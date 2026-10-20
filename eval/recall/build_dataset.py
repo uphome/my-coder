@@ -130,13 +130,22 @@ def text_of(event: dict) -> str:
 def replay(events: list[dict]) -> tuple[list[int], list[dict]]:
     """重放 surface 投影：返回 (live seq 列表, 每次压缩的遮蔽跨度)。
 
-    注意时序：`compaction/summary` 在 `replace` **之前**落日志（四步事务是
-    start → summary → replace → end），所以摘要要先用 pending 暂存，
-    等 replace 建跨度时再挂上去——否则每次跨度都拿不到摘要。
+    **两种事件顺序都要认**（这是被 issue #63 改过的地方）：
+    - 当前生产顺序 `start → replace → summary → end`：replace 先建跨度，
+      summary 紧随其后 → 直接挂到刚建的那个跨度上；
+    - 早期日志顺序 `start → summary → replace → end`：summary 先到 → 暂存，
+      等 replace 建跨度时再挂上去。
+    只用 `pending_summary` 一种方式的话，新日志的每次压缩都会拿到空摘要
+    （`main()` 里 `if not summary: continue` 会静默跳过整段——不是崩溃，是少算）。
+
+    `awaiting_summary` 必须**每个事务开头复位**：旧顺序里 summary 先到、不会消费这个
+    标记，不复位的话下一笔的 summary 会被挂到上一笔的跨度上（实测：两次压缩的旧顺序
+    日志会得到 `[B, 空]` 而非 `[A, B]`）。
     """
     surface: list[int] = []
     spans: list[dict] = []
     pending_summary = ''
+    awaiting_summary = False
     for event in events:
         op = event.get('surface_op')
         if op == 'append':
@@ -150,10 +159,19 @@ def replay(events: list[dict]) -> tuple[list[int], list[dict]]:
                 'summary': pending_summary,
             })
             pending_summary = ''
+            awaiting_summary = True
             del surface[start:end + 1]
             surface.insert(start, event['seq'])
+        elif event['type'] == 'compaction/start':
+            # 新事务：上一笔的"等 summary"作废——旧顺序从不消费它，失败的事务也可能没有
+            awaiting_summary = False
         elif event['type'] == 'compaction/summary':
-            pending_summary = text_of(event)
+            text = text_of(event)
+            if awaiting_summary and spans:
+                spans[-1]['summary'] = text     # 当前顺序：replace 之后紧跟 summary
+                awaiting_summary = False
+            else:
+                pending_summary = text          # 早期顺序：summary 先于 replace
     return surface, spans
 
 

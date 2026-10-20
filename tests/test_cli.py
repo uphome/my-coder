@@ -7,6 +7,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from my_coder.app.ui import render_event
+from my_coder.values.messages import (
+    StreamFrame,
+    TextBlock,
+    ToolCallBlock,
+    create_assistant_message,
+    new_event,
+)
 from my_coder.values.persistence import load_events
 
 
@@ -51,3 +59,78 @@ def test_cli_repl_runs_multiple_turns(tmp_path):
             if getattr(block, 'type', '') == 'text':
                 texts.append(block.text)
     assert '第一轮：读 README' in texts and '第二轮：列文件' in texts
+
+
+# ---- 渲染器的确定性单测（issue：--resume 重放看不到助手正文）----
+# 不起 subprocess、不跑模型：直接构造事件/流帧序列喂给同一个 render_event，
+# 用 capsys 断言正文的出现次数。两条路径（重放 / 实时）在这里是行级可比的。
+
+def _render_state() -> dict:
+    """与 cli.py 的 ui_state 初值一致（streamed 标记由渲染时按需补上）。"""
+    return {'reasoning_started': False, 'request_no': 0, 'tool_no': 0}
+
+
+def _render(events, capsys) -> str:
+    """按顺序把事件/流帧喂给同一个 render_event（共用一份 state），返回终端文本。"""
+    state = _render_state()
+    for event in events:
+        render_event(event, False, state)
+    return capsys.readouterr().out
+
+
+def _turn_prefix() -> list:
+    """一次请求的开头（两条路径共有）：回合/步骤边界 + 请求头。"""
+    return [
+        new_event(1, 'turn/start', {'turn': 1}),
+        new_event(2, 'step/start', {'turn': 1, 'step': 1}),
+        new_event(3, 'request/header', {'turn': 1, 'step': 1, 'model': 'fake'}),
+    ]
+
+
+def _assistant_message(*blocks):
+    """构造一条 assistant/message 事件（data 形状与 loop.py 落日志的一致）。"""
+    return new_event(
+        8, 'assistant/message',
+        {'turn': 1, 'step': 1, 'message': create_assistant_message(blocks)},
+        surface_op='append',
+    )
+
+
+def test_resume_replay_prints_assistant_text_once(capsys):
+    """重放路径：issue #51 之后新日志没有 assistant/chunk 帧，正文必须由
+    assistant/message 补打——否则 --resume 完全看不到历史助手正文。"""
+    events = [*_turn_prefix(), _assistant_message(TextBlock(text='历史助手正文'))]
+    out = _render(events, capsys)
+    assert out.count('历史助手正文') == 1
+
+
+def test_live_stream_does_not_duplicate_assistant_text(capsys):
+    """实时路径：正文已由 assistant/chunk 逐字打印，随后到达的 assistant/message
+    必须跳过（同一 (turn, step) 的 streamed 标记），否则正文出现两次。"""
+    events = [
+        *_turn_prefix(),
+        StreamFrame(type='assistant/chunk', data={
+            'turn': 1, 'step': 1,
+            'chunk': {'text': '实时助手正文', 'tool_calls': [],
+                      'finish_reason': None, 'usage': None},
+        }),
+        _assistant_message(TextBlock(text='实时助手正文')),
+    ]
+    out = _render(events, capsys)
+    assert out.count('实时助手正文') == 1
+
+
+def test_assistant_message_prints_only_text_blocks(capsys):
+    """正文从 block tuple 里按类型挑：不假设 content[0] 是文本块。
+    工具调用块不进正文（它由随后的 tool/call 事件渲染）。"""
+    events = [
+        *_turn_prefix(),
+        _assistant_message(
+            ToolCallBlock(id='call-1', name='read_file', arguments='{"path": "README.md"}'),
+            TextBlock(text='跟在工具调用后面的正文'),
+        ),
+    ]
+    out = _render(events, capsys)
+    assert out.count('跟在工具调用后面的正文') == 1
+    assert 'read_file' not in out
+

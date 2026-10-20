@@ -67,11 +67,25 @@ def _check_init() -> None:
 
 def init_web(workspace: Path, fake: bool = False, model: str = 'deepseek-v4-flash',
              sessions_dir: Path | None = None, sid: str = 'web',
-             compact_at: int | None = None) -> None:
-    """初始化宿主状态（测试可注入 workspace / fake / sessions_dir / compact_at）。
+             compact_at: int | None = None, max_open_seats: int = 0,
+             readonly_nudge: int = READONLY_NUDGE_AT,
+             readonly_close: int = READONLY_CLOSE_AT,
+             no_convergence: bool = False) -> None:
+    """初始化宿主状态（测试可注入 workspace / fake / sessions_dir / compact_at 等）。
 
     `workspace` 是**默认**工作区：新建对话没指定工作区时用它。每个对话的工作区存在
     自己的 Seat 上（`Seat.args.workspace`），并在创建时落一条 `session/workspace` 事件。
+
+    这里的参数就是**宿主级装配参数模板**，会被每个 Seat 逐字段继承（`_args_for_workspace`）：
+
+    - `max_open_seats`：常驻席位上限（0 = 用代码缺省 `MAX_OPEN_SEATS`；负数在
+      `sessions._create_seat` 里夹到 1）
+    - `readonly_nudge` / `readonly_close` / `no_convergence`：工具收敛的三个开关，
+      语义与 `cli.py` 同名参数完全一致（0 = 关这一层）；它们经 `app.factory._progress_policy`
+      变成每回合的 `ProgressPolicy`
+
+    **必须有入口把 CLI 解析出来的值传进来**——否则参数看着存在、运行时却永远取默认
+    （`main()` 曾经漏传这四个，是"命令行有、行为不对"的一类缺口）。
 
     Seat 注册表是宿主级缓存：每次 init_web 都清空重来（`state.reset`）——测试每个用例
     用独立 sessions_dir，若不清空，旧目录的 seat（同 sid，如 'web'）会被复用，把上个
@@ -81,7 +95,9 @@ def init_web(workspace: Path, fake: bool = False, model: str = 'deepseek-v4-flas
     state.reset(sessions_dir, argparse.Namespace(
         fake=fake, model=model, workspace=workspace, hide_reasoning=False,
         session=sid, sessions=str(sessions_dir), prompt='', resume=False, verbose=False,
-        compact_at=compact_at,
+        compact_at=compact_at, max_open_seats=max_open_seats,
+        readonly_nudge=readonly_nudge, readonly_close=readonly_close,
+        no_convergence=no_convergence,
     ))
     open_session(sid, allow_missing=True)
 
@@ -273,6 +289,14 @@ async def chat(request: Request) -> StreamingResponse:
 
     watch = session.on_event(_watch_first_user_message)
 
+    # 本会话的活跃队列必须在拉起 agent **之前**挂到 seat：per-seat approval 钩子
+    # （`sessions.approval_for`）经它把审批请求推给本会话的浏览器。这里必须是**同步赋值**，
+    # 位置就在 `create_task(run_agent())` 之前——`create_task` 只是把任务排进就绪队列，
+    # agent 一跑起来就可能请求审批；若把赋值写在 `sse_stream()` 生成器体内（生成器首次
+    # 迭代才执行），那段窗口里钩子会看到 `seat.queue is None` 而**静默拒绝**：用户没看到
+    # 批准按钮，工具被跳过。（旧实现写全局 _active_queue——两会话并行时会被互相覆盖）
+    seat.queue = queue
+
     async def run_agent() -> None:
         try:
             agent.followup(message, rpc_id=request_id)
@@ -283,9 +307,9 @@ async def chat(request: Request) -> StreamingResponse:
     task = asyncio.create_task(run_agent())
 
     async def sse_stream():
-        # 本会话的活跃队列挂到 seat：per-seat approval 钩子经它推送请求。
-        # （旧实现写全局 _active_queue——两会话并行时会被互相覆盖）
-        seat.queue = queue
+        # 队列已在**创建 run_agent 任务之前**同步挂到 seat（见上面的赋值）：生成器是惰性的
+        # （首次迭代才执行），审批钩子可能在 SSE 首帧之前就要求人工确认——挂载绝不能晚于
+        # 任务创建，否则那段窗口里的审批会被当成"该会话没有活跃流"直接拒绝。
         cur_turn = 0   # 会话事件流的当前回合（turn_start 推进；user_message 帧附上）
         try:
             while True:
@@ -510,6 +534,12 @@ def main() -> None:
                              '(deepseek-v4 window is 1M; default off)')
     args = parser.parse_args()
     load_env(_ROOT / '.env')  # 与 CLI 一致：注入 .env 的 API key
-    init_web(args.workspace, fake=args.fake, model=args.model, compact_at=args.compact_at)
+    # 四个运行时开关必须在这里显式传进去：init_web 不会去读 argparse 的 Namespace
+    # （CLI 与 Web 各自解析，装配参数模板由宿主显式交出），漏传 = 运行永远取默认。
+    init_web(args.workspace, fake=args.fake, model=args.model, compact_at=args.compact_at,
+             max_open_seats=args.max_open_seats,
+             readonly_nudge=args.readonly_nudge,
+             readonly_close=args.readonly_close,
+             no_convergence=args.no_convergence)
     import uvicorn
     uvicorn.run(app, host=args.host, port=args.port)
