@@ -1,8 +1,9 @@
 """应用层：上下文压缩引擎——把旧回合折叠成 checkpoint，模型上下文变小。
 
 架构位置：纯应用逻辑（事件溯源之上、框架不动）。对齐 dsh 的
-compaction/start → summary → replace → end 四步事务；选段策略借鉴
-"保留最近 N 个回合"的直觉（简化 dsh 的 token 预算 + PI 的回合切分）。
+compaction/start → replace → summary → end 四步事务（replace 是生效步骤，
+先落它：中途失败只缺一条审计，不会留下"摘要存在却从未生效"的假记录）；
+选段策略借鉴"保留最近 N 个回合"的直觉（简化 dsh 的 token 预算 + PI 的回合切分）。
 
 关键语义（见 state/session.py 的 surface replace）：
 - 遮蔽区间按 surface 的【位置】切，不是 seq 数值——引擎基于当前 surface
@@ -74,7 +75,9 @@ CHECKPOINT_PREAMBLE = (
     'from the messages that follow, without acknowledging this checkpoint.'
 )
 
-# 事务事件序列（对齐 dsh：start → summary → replace → end）
+# 事务事件序列（实际落盘顺序：start → replace → summary → end）。
+# 对齐 dsh 的四步事务，但把 replace（生效步骤）放在 summary（审计）之前：
+# 两步之间失败只会缺一条审计，不会留下"摘要存在却从未生效"的假记录。
 COMPACTION_START = 'compaction/start'
 COMPACTION_SUMMARY = 'compaction/summary'
 COMPACTION_END = 'compaction/end'
@@ -404,11 +407,13 @@ async def run_compaction(session: Session, llm, *, keep_turns: int = 3,
                          model: str = '') -> bool:
     """执行一次压缩事务；无可压或失败返回 False。
 
-    四步事务（对齐 dsh）：
+    四步事务（实际落盘顺序；对齐 dsh 的 start/replace/summary/end 语义）：
       1. compaction/start    加锁（审计：压缩开始）
-      2. compaction/summary  审计（摘要全文 + 遮蔽范围 + 文件操作）
-      3. user/message        surface replace（checkpoint 原位顶替旧回合）
+      2. user/message        surface replace（checkpoint 原位顶替旧回合）
+      3. compaction/summary  审计（摘要全文 + 遮蔽范围 + 文件操作）
       4. compaction/end      解锁（成功/失败都落）
+    replace 是**生效**那一步，所以先落它、summary 审计后补：两步之间失败
+    只会缺一条审计，不会留下"摘要存在却从未生效"的假记录。
     摘要请求：复用调用方 llm 发一个小请求；摘要必须比被压内容小
     （字符近似 token；宁拒勿滥——压缩要真省）。失败（LLM 错误/摘要
     不够小）→ 落 compaction/end{error}，日志完好可重试。
@@ -451,7 +456,7 @@ async def run_compaction(session: Session, llm, *, keep_turns: int = 3,
             # 让长会话的结构化摘要（思考几 k + 正文 1-2k）放得下。
             max_tokens=8192,
         )
-        # 2) 生成摘要（复用调用方 llm；失败降级为结果，不炸）
+        # 生成摘要（复用调用方 llm；失败降级为结果，不炸）
         collected = []
         async for chunk in llm.stream(request):
             if chunk.text:
@@ -477,7 +482,7 @@ async def run_compaction(session: Session, llm, *, keep_turns: int = 3,
         checkpoint_body = (
             f'{CHECKPOINT_PREAMBLE}\n\n{SUMMARY_OPEN_TAG}\n{body}\n{SUMMARY_CLOSE_TAG}'
         )
-        # 3) checkpoint 落盘：surface replace 顶替旧区间——**先落"生效的那一步"**。
+        # 2) checkpoint 落盘：surface replace 顶替旧区间——**先落"生效的那一步"**。
         # 之前是"先落 summary 审计、后落 replace"：若两步之间失败（_apply_surface 抛错 /
         # 磁盘满），日志里会留下一条"摘要存在、却没生效"的记录，把审计/统计带偏。
         # 现在的失败方向是良性的：replace 成功而 summary 没落 = 只有审计缺一条。
@@ -486,7 +491,7 @@ async def run_compaction(session: Session, llm, *, keep_turns: int = 3,
             create_user_message([TextBlock(text=checkpoint_body)]),
             surface_op='replace', shadowed=(start_seq, end_seq),
         )
-        # 2') 审计：摘要全文 + 遮蔽范围 + 文件操作（**在 replace 之后**，见上）
+        # 3) 审计：摘要全文 + 遮蔽范围 + 文件操作（**在 replace 之后**，见上）
         session.append(COMPACTION_SUMMARY, {
             'compaction_id': cid,
             'range': [start_seq, end_seq],
